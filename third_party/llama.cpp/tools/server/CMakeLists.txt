@@ -15,32 +15,11 @@ add_library(${TARGET} STATIC
     server-context.h
 )
 
-target_sources(${TARGET} PRIVATE
-    ../pyannote/pyannote-align.cpp
-    ../pyannote/pyannote-diarize.cpp
-    ../pyannote/pyannote-entrypoints.h
-    ../whisper/whisper-cli-entrypoint.cpp
-    ../whisper/whisper-cli-entrypoint.h
-    ../whisper/whisper-common-audio.cpp
-    ../../../whisper.cpp/examples/grammar-parser.cpp
-    ../../../whisper.cpp/src/whisper.cpp
-)
-target_compile_definitions(${TARGET} PRIVATE
-    LLAMA_PYANNOTE_NO_MAIN=1
-    WHISPER_VERSION=\"llama-server-inproc\"
-)
-
 if (BUILD_SHARED_LIBS)
     set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
 target_include_directories(${TARGET} PRIVATE ../mtmd)
-target_include_directories(${TARGET} PRIVATE ../pyannote)
-target_include_directories(${TARGET} PRIVATE ../whisper)
-target_include_directories(${TARGET} PRIVATE ../../../whisper.cpp/examples)
-target_include_directories(${TARGET} PRIVATE ../../../whisper.cpp/include)
-target_include_directories(${TARGET} PRIVATE ../../../whisper.cpp/src)
-target_include_directories(${TARGET} PRIVATE ../../vendor ../../ggml/include)
 target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(${TARGET} PUBLIC common mtmd ${CMAKE_THREAD_LIBS_INIT})
 
@@ -48,10 +27,6 @@ target_link_libraries(${TARGET} PUBLIC common mtmd ${CMAKE_THREAD_LIBS_INIT})
 # llama-server executable
 
 set(TARGET llama-server)
-
-if (NOT LLAMA_HTTPLIB)
-    message(FATAL_ERROR "LLAMA_HTTPLIB is OFF, cannot build llama-server. Hint: to skip building server, set -DLLAMA_BUILD_SERVER=OFF")
-endif()
 
 set(TARGET_SRCS
     server.cpp
@@ -84,20 +59,4 @@ target_include_directories(${TARGET} PRIVATE ../mtmd)
 target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(${TARGET} PRIVATE server-context PUBLIC common cpp-httplib ${CMAKE_THREAD_LIBS_INIT})
 
-if (WIN32)
-    TARGET_LINK_LIBRARIES(${TARGET} PRIVATE ws2_32)
-endif()
-
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
-
-#
-# Debug utility for reproducing in-process whisper + pyannote pipeline outside HTTP handling.
-#
-add_executable(inproc-pipeline-repro
-    inproc-pipeline-repro.cpp
-)
-target_include_directories(inproc-pipeline-repro PRIVATE ../pyannote)
-target_include_directories(inproc-pipeline-repro PRIVATE ../whisper)
-target_include_directories(inproc-pipeline-repro PRIVATE ${CMAKE_SOURCE_DIR})
-target_link_libraries(inproc-pipeline-repro PRIVATE server-context)
-target_compile_features(inproc-pipeline-repro PRIVATE cxx_std_17)

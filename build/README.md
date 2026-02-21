@@ -32,6 +32,20 @@ Default download destinations:
 Both scripts now reject repo-internal destinations.
 
 `build_full_stack_cuda.ps1` now fetches PDFium automatically, and fetches FFmpeg automatically when `-EnableFfmpeg` is set.
+By default it prepares an external build-time snapshot from this repo's `third_party/llama.cpp` into `..\ENGINEbuilds\...` (no in-place overwrite of repo sources).
+Use `-PrepareLlamaSource $true` to switch to upstream + patch preparation mode.
+
+## Prepare external llama source (upstream + patch)
+
+```powershell
+.\build\prepare_llama_source_from_patch.ps1 -Force
+```
+
+Defaults:
+
+- Upstream cache: `..\ENGINEbuilds\upstream\llama-clean\`
+- Prepared source: `..\ENGINEbuilds\sources\llama.cpp\`
+- Patch: latest `..\ENGINEbuilds\patches\llama-working-overlay-*.patch`
 
 ## One-command full CUDA flow
 
@@ -103,5 +117,10 @@ If your overlay folder moved, pass:
 - `pdfium.dll` (if found)
 - `llama-server-bridge.dll` and related llama/ggml runtime DLLs (if found)
 - FFmpeg runtime DLLs required by bridge audio conversion (if enabled)
+- `LICENSES.txt` (key runtime/release license texts combined into one file)
+- `THIRD_PARTY_NOTICES.md` (bundle-level notice index with pointers)
+- `LICENSE-ENGINE.txt` (project license)
+- `licenses/third_party/*` copied from repo `third_party/licenses` top-level curated files
+  (tooling-only `torch`/`numpy`/`torchaudio` files are intentionally excluded)
 - `licenses/pdfium/*` copied from fetched PDFium runtime
 - `licenses/ffmpeg/*` copied from fetched FFmpeg runtime (when FFmpeg staging is enabled)

@@ -7,12 +7,9 @@
 #include "llama.h"
 #include "log.h"
 
-#include <algorithm>
 #include <atomic>
-#include <cctype>
 #include <exception>
 #include <signal.h>
-#include <string>
 #include <thread> // for std::thread::hardware_concurrency
 
 #if defined(_WIN32)
@@ -124,17 +121,7 @@ int main(int argc, char ** argv) {
     // register API routes
     server_routes routes(params, ctx_server);
 
-    const char * env_audio_only_raw = std::getenv("LLAMA_SERVER_AUDIO_ONLY");
-    bool is_audio_only_server = false;
-    if (env_audio_only_raw != nullptr) {
-        std::string env_audio_only(env_audio_only_raw);
-        std::transform(env_audio_only.begin(), env_audio_only.end(), env_audio_only.begin(), [](unsigned char c) {
-            return (char) std::tolower(c);
-        });
-        is_audio_only_server = !(env_audio_only.empty() || env_audio_only == "0" || env_audio_only == "false" || env_audio_only == "off" || env_audio_only == "no");
-    }
-
-    bool is_router_server = params.model.path.empty() && !is_audio_only_server;
+    bool is_router_server = params.model.path.empty();
     std::optional<server_models_routes> models_routes{};
     if (is_router_server) {
         // setup server instances manager
@@ -160,7 +147,6 @@ int main(int argc, char ** argv) {
         routes.post_embeddings             = models_routes->proxy_post;
         routes.post_embeddings_oai         = models_routes->proxy_post;
         routes.post_rerank                 = models_routes->proxy_post;
-        routes.post_audio_transcriptions = models_routes->proxy_post;
         routes.post_tokenize               = models_routes->proxy_post;
         routes.post_detokenize             = models_routes->proxy_post;
         routes.post_apply_template         = models_routes->proxy_post;
@@ -178,43 +164,39 @@ int main(int argc, char ** argv) {
 
     ctx_http.get ("/health",              ex_wrapper(routes.get_health)); // public endpoint (no API key check)
     ctx_http.get ("/v1/health",           ex_wrapper(routes.get_health)); // public endpoint (no API key check)
-    ctx_http.post("/v1/audio/transcriptions", ex_wrapper(routes.post_audio_transcriptions));
-
-    if (!is_audio_only_server) {
-        ctx_http.get ("/metrics",             ex_wrapper(routes.get_metrics));
-        ctx_http.get ("/props",               ex_wrapper(routes.get_props));
-        ctx_http.post("/props",               ex_wrapper(routes.post_props));
-        ctx_http.post("/api/show",            ex_wrapper(routes.get_api_show));
-        ctx_http.get ("/models",              ex_wrapper(routes.get_models)); // public endpoint (no API key check)
-        ctx_http.get ("/v1/models",           ex_wrapper(routes.get_models)); // public endpoint (no API key check)
-        ctx_http.get ("/api/tags",            ex_wrapper(routes.get_models)); // ollama specific endpoint. public endpoint (no API key check)
-        ctx_http.post("/completion",          ex_wrapper(routes.post_completions)); // legacy
-        ctx_http.post("/completions",         ex_wrapper(routes.post_completions));
-        ctx_http.post("/v1/completions",      ex_wrapper(routes.post_completions_oai));
-        ctx_http.post("/chat/completions",    ex_wrapper(routes.post_chat_completions));
-        ctx_http.post("/v1/chat/completions", ex_wrapper(routes.post_chat_completions));
-        ctx_http.post("/api/chat",            ex_wrapper(routes.post_chat_completions)); // ollama specific endpoint
-        ctx_http.post("/v1/responses",        ex_wrapper(routes.post_responses_oai));
-        ctx_http.post("/v1/messages",         ex_wrapper(routes.post_anthropic_messages)); // anthropic messages API
-        ctx_http.post("/v1/messages/count_tokens", ex_wrapper(routes.post_anthropic_count_tokens)); // anthropic token counting
-        ctx_http.post("/infill",              ex_wrapper(routes.post_infill));
-        ctx_http.post("/embedding",           ex_wrapper(routes.post_embeddings)); // legacy
-        ctx_http.post("/embeddings",          ex_wrapper(routes.post_embeddings));
-        ctx_http.post("/v1/embeddings",       ex_wrapper(routes.post_embeddings_oai));
-        ctx_http.post("/rerank",              ex_wrapper(routes.post_rerank));
-        ctx_http.post("/reranking",           ex_wrapper(routes.post_rerank));
-        ctx_http.post("/v1/rerank",           ex_wrapper(routes.post_rerank));
-        ctx_http.post("/v1/reranking",        ex_wrapper(routes.post_rerank));
-        ctx_http.post("/tokenize",            ex_wrapper(routes.post_tokenize));
-        ctx_http.post("/detokenize",          ex_wrapper(routes.post_detokenize));
-        ctx_http.post("/apply-template",      ex_wrapper(routes.post_apply_template));
-        // LoRA adapters hotswap
-        ctx_http.get ("/lora-adapters",       ex_wrapper(routes.get_lora_adapters));
-        ctx_http.post("/lora-adapters",       ex_wrapper(routes.post_lora_adapters));
-        // Save & load slots
-        ctx_http.get ("/slots",               ex_wrapper(routes.get_slots));
-        ctx_http.post("/slots/:id_slot",      ex_wrapper(routes.post_slots));
-    }
+    ctx_http.get ("/metrics",             ex_wrapper(routes.get_metrics));
+    ctx_http.get ("/props",               ex_wrapper(routes.get_props));
+    ctx_http.post("/props",               ex_wrapper(routes.post_props));
+    ctx_http.post("/api/show",            ex_wrapper(routes.get_api_show));
+    ctx_http.get ("/models",              ex_wrapper(routes.get_models)); // public endpoint (no API key check)
+    ctx_http.get ("/v1/models",           ex_wrapper(routes.get_models)); // public endpoint (no API key check)
+    ctx_http.get ("/api/tags",            ex_wrapper(routes.get_models)); // ollama specific endpoint. public endpoint (no API key check)
+    ctx_http.post("/completion",          ex_wrapper(routes.post_completions)); // legacy
+    ctx_http.post("/completions",         ex_wrapper(routes.post_completions));
+    ctx_http.post("/v1/completions",      ex_wrapper(routes.post_completions_oai));
+    ctx_http.post("/chat/completions",    ex_wrapper(routes.post_chat_completions));
+    ctx_http.post("/v1/chat/completions", ex_wrapper(routes.post_chat_completions));
+    ctx_http.post("/api/chat",            ex_wrapper(routes.post_chat_completions)); // ollama specific endpoint
+    ctx_http.post("/v1/responses",        ex_wrapper(routes.post_responses_oai));
+    ctx_http.post("/v1/messages",         ex_wrapper(routes.post_anthropic_messages)); // anthropic messages API
+    ctx_http.post("/v1/messages/count_tokens", ex_wrapper(routes.post_anthropic_count_tokens)); // anthropic token counting
+    ctx_http.post("/infill",              ex_wrapper(routes.post_infill));
+    ctx_http.post("/embedding",           ex_wrapper(routes.post_embeddings)); // legacy
+    ctx_http.post("/embeddings",          ex_wrapper(routes.post_embeddings));
+    ctx_http.post("/v1/embeddings",       ex_wrapper(routes.post_embeddings_oai));
+    ctx_http.post("/rerank",              ex_wrapper(routes.post_rerank));
+    ctx_http.post("/reranking",           ex_wrapper(routes.post_rerank));
+    ctx_http.post("/v1/rerank",           ex_wrapper(routes.post_rerank));
+    ctx_http.post("/v1/reranking",        ex_wrapper(routes.post_rerank));
+    ctx_http.post("/tokenize",            ex_wrapper(routes.post_tokenize));
+    ctx_http.post("/detokenize",          ex_wrapper(routes.post_detokenize));
+    ctx_http.post("/apply-template",      ex_wrapper(routes.post_apply_template));
+    // LoRA adapters hotswap
+    ctx_http.get ("/lora-adapters",       ex_wrapper(routes.get_lora_adapters));
+    ctx_http.post("/lora-adapters",       ex_wrapper(routes.post_lora_adapters));
+    // Save & load slots
+    ctx_http.get ("/slots",               ex_wrapper(routes.get_slots));
+    ctx_http.post("/slots/:id_slot",      ex_wrapper(routes.post_slots));
 
     //
     // Start the server
@@ -230,26 +212,6 @@ int main(int argc, char ** argv) {
             if (models_routes.has_value()) {
                 models_routes->models.unload_all();
             }
-            llama_backend_free();
-        };
-
-        if (!ctx_http.start()) {
-            clean_up();
-            LOG_ERR("%s: exiting due to HTTP server error\n", __func__);
-            return 1;
-        }
-        ctx_http.is_ready.store(true);
-
-        shutdown_handler = [&](int) {
-            ctx_http.stop();
-        };
-
-    } else if (is_audio_only_server) {
-        LOG_INF("%s: starting audio-only server mode; no LLM model will be loaded in this process\n", __func__);
-
-        clean_up = [&ctx_http]() {
-            SRV_INF("%s: cleaning up before exit...\n", __func__);
-            ctx_http.stop();
             llama_backend_free();
         };
 
@@ -327,13 +289,6 @@ int main(int argc, char ** argv) {
         }
 
         // when the HTTP server stops, clean up and exit
-        clean_up();
-    } else if (is_audio_only_server) {
-        LOG_INF("%s: audio-only server is listening on %s\n", __func__, ctx_http.listening_address.c_str());
-        if (ctx_http.thread.joinable()) {
-            ctx_http.thread.join(); // keep the main thread alive
-        }
-
         clean_up();
     } else {
         LOG_INF("%s: server is listening on %s\n", __func__, ctx_http.listening_address.c_str());

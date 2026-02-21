@@ -5,8 +5,10 @@ param(
     [string]$CargoProfile = "Release",
     [string]$CmakeExe = "cmake",
     [string]$CargoExe = "cargo",
-    [string]$LlamaCppDir = "third_party/llama.cpp",
+    [string]$LlamaCppDir = "",
     [string]$WhisperCppDir = "third_party/whisper.cpp",
+    [bool]$PrepareLlamaSource = $false,
+    [string]$LlamaPatchFile = "",
     [string]$BuildRoot = "",
     [string]$LlamaBuildDir = "",
     [string]$WhisperBuildDir = "",
@@ -58,6 +60,29 @@ function Test-IsUnderPath {
     $fullPath = [System.IO.Path]::GetFullPath($PathValue).TrimEnd('\') + '\'
     $fullBase = [System.IO.Path]::GetFullPath($BasePath).TrimEnd('\') + '\'
     return $fullPath.StartsWith($fullBase, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Copy-DirectoryTree {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourceRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationRoot
+    )
+
+    if (-not (Test-Path -LiteralPath $SourceRoot)) {
+        throw "Source directory not found: $SourceRoot"
+    }
+
+    if (Test-Path -LiteralPath $DestinationRoot) {
+        Remove-Item -LiteralPath $DestinationRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $DestinationRoot | Out-Null
+
+    $items = Get-ChildItem -LiteralPath $SourceRoot -Force -ErrorAction SilentlyContinue
+    foreach ($item in $items) {
+        Copy-Item -LiteralPath $item.FullName -Destination $DestinationRoot -Recurse -Force
+    }
 }
 
 function Resolve-CmakeExecutable {
@@ -148,6 +173,7 @@ function Invoke-WhisperBuild {
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $buildsRoot = Join-Path (Split-Path -Parent $repoRoot) "ENGINEbuilds"
 $CmakeExe = Resolve-CmakeExecutable -ToolValue $CmakeExe
+$repoLlamaDir = Join-Path $repoRoot "third_party\\llama.cpp"
 
 if ([string]::IsNullOrWhiteSpace($BuildRoot)) {
     $BuildRoot = Join-Path $buildsRoot "full-stack-cuda"
@@ -185,8 +211,45 @@ if (Test-IsUnderPath -PathValue $BundleDir -BasePath $repoRoot) {
     throw "BundleDir must be outside the repo. Current: $BundleDir"
 }
 
+if ($PrepareLlamaSource) {
+    $prepareLlamaScript = Join-Path $PSScriptRoot "prepare_llama_source_from_patch.ps1"
+    if (-not (Test-Path -LiteralPath $prepareLlamaScript)) {
+        throw "Missing llama source prep script: $prepareLlamaScript"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($LlamaCppDir) -or $LlamaCppDir -eq "third_party/llama.cpp") {
+        $LlamaCppDir = Join-Path $BuildRoot "llama-src"
+    }
+
+    $prepareArgs = @{
+        OutDir = $LlamaCppDir
+        Force = $true
+    }
+    if (-not [string]::IsNullOrWhiteSpace($LlamaPatchFile)) {
+        $prepareArgs["PatchFile"] = $LlamaPatchFile
+    }
+
+    & $prepareLlamaScript @prepareArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to prepare external llama source."
+    }
+} elseif ([string]::IsNullOrWhiteSpace($LlamaCppDir) -or $LlamaCppDir -eq "third_party/llama.cpp" -or $LlamaCppDir -eq "third_party\\llama.cpp") {
+    $LlamaCppDir = Join-Path $BuildRoot "llama-src"
+    Copy-DirectoryTree -SourceRoot $repoLlamaDir -DestinationRoot $LlamaCppDir
+    Write-Host "Prepared llama source from repo snapshot:"
+    Write-Host "  Source: $repoLlamaDir"
+    Write-Host "  OutDir: $LlamaCppDir"
+}
+
+if ([string]::IsNullOrWhiteSpace($LlamaCppDir)) {
+    $LlamaCppDir = Join-Path $repoRoot "third_party\\llama.cpp"
+}
 $LlamaCppDir = Resolve-AbsolutePath -PathValue $LlamaCppDir -RepoRoot $repoRoot
 $WhisperCppDir = Resolve-AbsolutePath -PathValue $WhisperCppDir -RepoRoot $repoRoot
+
+if (Test-IsUnderPath -PathValue $LlamaCppDir -BasePath $repoRoot) {
+    throw "LlamaCppDir must be outside the repo for full-stack build. Use default repo snapshot copy, -PrepareLlamaSource `$true, or pass an external path."
+}
 
 if ([string]::IsNullOrWhiteSpace($FfmpegRoot)) {
     $FfmpegRoot = Join-Path $buildsRoot "runtime-deps\\ffmpeg"

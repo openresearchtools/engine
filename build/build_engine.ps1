@@ -12,7 +12,8 @@ param(
     [string]$CudaBinDir = "",
     [bool]$StageCmakeRuntime = $true,
     [bool]$StageFfmpegRuntime = $true,
-    [bool]$StageCudaRuntime = $true
+    [bool]$StageCudaRuntime = $true,
+    [bool]$StageRepoLicenseFiles = $true
 )
 
 $ErrorActionPreference = "Stop"
@@ -146,6 +147,74 @@ function Copy-LicenseFiles {
         }
         Copy-Item -LiteralPath $file.FullName -Destination $destinationFile -Force
     }
+}
+
+function Stage-RepoLicenseFiles {
+    param(
+        [string]$RepoRoot,
+        [string]$BundleOutDir,
+        [string]$BundleLicenseRoot
+    )
+
+    $sourceDir = Join-Path $RepoRoot "third_party\\licenses"
+    if (-not (Test-Path -LiteralPath $sourceDir)) {
+        Write-Warning "Repo license source folder not found at '$sourceDir' (skipping static license staging)"
+        return
+    }
+
+    $destDir = Join-Path $BundleLicenseRoot "third_party"
+    New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+
+    $excludedTopLevelFiles = @(
+        "torch-LICENSE.txt",
+        "torch-NOTICE.txt",
+        "torchaudio-LICENSE.txt",
+        "numpy-LICENSE.txt",
+        "ffmpeg-SOURCE.txt"
+    )
+
+    # Copy curated, top-level license files only. Skip tooling-only files.
+    $topLevelFiles = Get-ChildItem -Path $sourceDir -File -ErrorAction SilentlyContinue
+    foreach ($file in $topLevelFiles) {
+        if ($excludedTopLevelFiles -contains $file.Name) {
+            continue
+        }
+        Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $destDir $file.Name) -Force
+    }
+
+    $repoLicenseFile = Join-Path $RepoRoot "LICENSE"
+    if (Test-Path -LiteralPath $repoLicenseFile) {
+        Copy-Item -LiteralPath $repoLicenseFile -Destination (Join-Path $BundleOutDir "LICENSE-ENGINE.txt") -Force
+    }
+
+    $bundleKeyLicenses = Join-Path $BundleOutDir "LICENSES.txt"
+    $repoKeyLicenses = Join-Path $sourceDir "LICENSES.txt"
+    if (Test-Path -LiteralPath $repoKeyLicenses) {
+        Copy-Item -LiteralPath $repoKeyLicenses -Destination $bundleKeyLicenses -Force
+    } else {
+        Write-Warning "Key release licenses file not found at '$repoKeyLicenses'"
+    }
+
+    $noticePath = Join-Path $BundleOutDir "THIRD_PARTY_NOTICES.md"
+    @"
+# Third-Party Notices
+
+This bundle includes third-party software.
+
+Key combined license text:
+
+- ./LICENSES.txt
+
+Bundled license folders:
+
+- ./licenses/third_party/
+- ./licenses/pdfium/
+- ./licenses/ffmpeg/
+
+Full license inventory (including transitive/tooling exports):
+
+- https://github.com/openresearchtools/engine/tree/main/third_party/licenses
+"@ | Set-Content -Path $noticePath -Encoding ASCII
 }
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -288,6 +357,10 @@ if (Test-Path -LiteralPath $PdfiumDll) {
 }
 
 $bundleLicenseRoot = Join-Path $OutDir "licenses"
+if ($StageRepoLicenseFiles) {
+    Stage-RepoLicenseFiles -RepoRoot $repoRoot -BundleOutDir $OutDir -BundleLicenseRoot $bundleLicenseRoot
+}
+
 $pdfiumRoot = Resolve-PdfiumRoot -PdfiumDllPath $PdfiumDll
 if (-not [string]::IsNullOrWhiteSpace($pdfiumRoot)) {
     Copy-LicenseFiles -SourceRoot $pdfiumRoot -DestinationRoot (Join-Path $bundleLicenseRoot "pdfium") -ComponentName "PDFium"
