@@ -1,0 +1,10 @@
+﻿FFmpeg source/license provenance
+
+- FFmpeg upstream source repository: https://github.com/FFmpeg/FFmpeg
+- Copied LGPL text file source: https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/COPYING.LGPLv2.1
+- Binary build source used by fetch script: https://github.com/BtbN/FFmpeg-Builds
+- Binary build source license file: ffmpeg-builds-LICENSE.txt (MIT)
+- Fetch script: ENGINE/build/download-ffmpeg-lgpl-win-x64.ps1
+
+Note:
+- FFmpeg is generally distributed under LGPL/GPL options depending on build configuration.

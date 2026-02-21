@@ -1,0 +1,15 @@
+[package]
+name = "pdf"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+anyhow = "1.0.98"
+clap = { version = "4.5.31", features = ["derive"] }
+once_cell = "1.21.0"
+pdfium-render = { path = "../../pdfium-render", default-features = false, features = ["pdfium_latest", "thread_safe"] }
+regex = "1.11.1"
+walkdir = "2.5.0"

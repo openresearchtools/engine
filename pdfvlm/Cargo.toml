@@ -1,0 +1,13 @@
+[package]
+name = "pdfvlm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+pdfium-render = { path = "../../pdfium-render" }
+image = { version = "0.25", default-features = true, features = ["png"] }
+encoding_rs = "0.8"
+
