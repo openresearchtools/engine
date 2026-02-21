@@ -10,6 +10,7 @@ Tooling scripts for pyannote model conversion and GGUF packaging.
 - `update_upstreams.ps1`
 - `license_audit.ps1`
 - `extract_cpp_licenses.ps1`
+- `extract_cpp_embedded_licenses.ps1`
 
 ### Update third_party subtrees
 
@@ -53,7 +54,7 @@ Use `-FailOnFirstParty` to fail if any first-party files contain license markers
 
 ## C++ licenses snapshot
 
-Run this to export upstream license notices for llama.cpp and whisper.cpp into:
+Run this to export upstream **license notice files**:
 
 - `third_party/licenses/cpp_licenses/llama.cpp/`
 - `third_party/licenses/cpp_licenses/whisper.cpp/`
@@ -63,3 +64,17 @@ Run this to export upstream license notices for llama.cpp and whisper.cpp into:
 ```
 
 Use `-IncludeNested` to also copy nested `LICENSE`/`COPYING`/`NOTICE` files.
+
+## CPP embedded license dump
+
+Run this to dump **only files in `third_party/llama.cpp` and `third_party/whisper.cpp` that contain embedded license markers**:
+
+```
+.\extras\extract_cpp_embedded_licenses.ps1
+```
+
+Output is written to:
+
+- `..\ENGINEbuilds\cpp-license-snippets\cpp-license-snippets.txt`
+- `..\ENGINEbuilds\cpp-license-snippets\files\*.license-snippets.txt`
+- `..\ENGINEbuilds\cpp-license-snippets\cpp-license-embedded-manifest.csv`
