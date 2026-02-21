@@ -9,6 +9,7 @@ Tooling scripts for pyannote model conversion and GGUF packaging.
 - `convert_pyannote_to_gguf.ps1`
 - `update_upstreams.ps1`
 - `license_audit.ps1`
+- `extract_cpp_licenses.ps1`
 
 ### Update third_party subtrees
 
@@ -49,3 +50,16 @@ Use `-NoThirdParty` if you want to exclude `third_party`.
 Use `-OnlyFirstParty` to isolate only files outside `third_party`.
 Use `-Strict -FailOnUnknown` for a stricter release check.
 Use `-FailOnFirstParty` to fail if any first-party files contain license markers.
+
+## C++ licenses snapshot
+
+Run this to export upstream license notices for llama.cpp and whisper.cpp into:
+
+- `third_party/licenses/cpp_licenses/llama.cpp/`
+- `third_party/licenses/cpp_licenses/whisper.cpp/`
+
+```
+.\extras\extract_cpp_licenses.ps1
+```
+
+Use `-IncludeNested` to also copy nested `LICENSE`/`COPYING`/`NOTICE` files.
