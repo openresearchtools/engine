@@ -66,6 +66,31 @@ jobs:
       - name: Build Full Stack Bundle
         shell: pwsh
         run: |
+          $vcvarsCandidates = @(
+              "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat",
+              "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvarsall.bat",
+              "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat",
+              "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
+          )
+          $vcvars = $vcvarsCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if ([string]::IsNullOrWhiteSpace($vcvars)) {
+              throw "vcvarsall.bat not found in expected VS 2022 locations."
+          }
+          cmd /c "`"$vcvars`" x64 >nul && set" | ForEach-Object {
+              if ($_ -match "^(.*?)=(.*)$") {
+                  [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2], "Process")
+              }
+          }
+
+          $env:CMAKE_GENERATOR = "Ninja Multi-Config"
+          if ([string]::IsNullOrWhiteSpace($env:CUDA_PATH)) {
+              throw "CUDA_PATH is not set after CUDA setup action."
+          }
+          $env:CUDACXX = Join-Path $env:CUDA_PATH "bin\\nvcc.exe"
+          if (-not (Test-Path -LiteralPath $env:CUDACXX)) {
+              throw "nvcc not found at $env:CUDACXX"
+          }
+
           .\build\build_full_stack_cuda.ps1 `
             -CmakeConfig Release `
             -CargoProfile Release `

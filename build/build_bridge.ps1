@@ -318,6 +318,7 @@ switch ($HttpsBackend) {
 switch ($Backend) {
     "cuda" {
         $cmakeArgs += "-DGGML_CUDA=ON"
+        $cmakeArgs += "-DGGML_CUDA_CUB_3DOT2=ON"
     }
     "vulkan" {
         $cmakeArgs += "-DGGML_VULKAN=ON"
