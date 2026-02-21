@@ -15,6 +15,9 @@ param(
     [switch]$BuildPyannoteCli,
     [string[]]$OverlaySearchRoots = @(),
     [switch]$EnableFfmpeg,
+    [bool]$EnableBackendDl = $false,
+    [bool]$EnableCpuAllVariants = $false,
+    [bool]$DisableGgmlNative = $false,
     [string]$FfmpegRoot = "",
     [ValidateSet("off", "openssl", "boringssl", "libressl")]
     [string]$HttpsBackend = "boringssl",
@@ -320,6 +323,19 @@ switch ($Backend) {
         $cmakeArgs += "-DGGML_VULKAN=ON"
     }
     default { }
+}
+
+if ($EnableCpuAllVariants) {
+    $EnableBackendDl = $true
+}
+if ($EnableBackendDl) {
+    $cmakeArgs += "-DGGML_BACKEND_DL=ON"
+}
+if ($EnableCpuAllVariants) {
+    $cmakeArgs += "-DGGML_CPU_ALL_VARIANTS=ON"
+}
+if ($DisableGgmlNative) {
+    $cmakeArgs += "-DGGML_NATIVE=OFF"
 }
 
 if ($EnableFfmpeg) {

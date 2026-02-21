@@ -15,12 +15,14 @@ param(
     [string]$CargoTargetDir = "",
     [string]$BundleDir = "",
     [bool]$FetchRuntimeDeps = $true,
+    [bool]$StageCudaRuntime = $false,
     [switch]$ForceDependencyRefresh,
     [bool]$ApplyDiarizeOverlay = $true,
     [bool]$BuildWhisperCli = $false,
     [switch]$BuildLlamaServerCli,
     [switch]$BuildPyannoteCli,
     [switch]$EnableFfmpeg,
+    [bool]$EnableCpuAllVariants = $false,
     [ValidateSet("off", "openssl", "boringssl", "libressl")]
     [string]$HttpsBackend = "boringssl",
     [string]$FfmpegRoot = "",
@@ -346,6 +348,11 @@ $bridgeArgs = @{
     BuildPyannoteCli = $BuildPyannoteCli.IsPresent
     Jobs = $Jobs
 }
+if ($EnableCpuAllVariants) {
+    $bridgeArgs["EnableBackendDl"] = $true
+    $bridgeArgs["EnableCpuAllVariants"] = $true
+    $bridgeArgs["DisableGgmlNative"] = $true
+}
 if ($EnableFfmpeg) {
     $bridgeArgs["EnableFfmpeg"] = $true
     $bridgeArgs["FfmpegRoot"] = $FfmpegRoot
@@ -372,6 +379,7 @@ $engineArgs = @{
     FfmpegBinDir = $FfmpegBinDir
     StageCmakeRuntime = $true
     StageFfmpegRuntime = $EnableFfmpeg.IsPresent
+    StageCudaRuntime = $StageCudaRuntime
 }
 
 & $engineScript @engineArgs
