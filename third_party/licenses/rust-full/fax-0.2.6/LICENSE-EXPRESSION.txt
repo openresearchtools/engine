@@ -1,0 +1,7 @@
+Crate: fax
+Version: 0.2.6
+License expression: MIT
+Repository: https://github.com/pdf-rs/fax
+
+No explicit LICENSE/COPYING/NOTICE file was found in the crate root.
+Use the license expression and upstream repository to confirm obligations.

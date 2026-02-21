@@ -1,5 +1,5 @@
 param(
-    [string]$Destination = (Join-Path $PSScriptRoot "..\\third_party\\pdfium"),
+    [string]$Destination = "",
     [string]$Tag = "latest",
     [switch]$Force
 )
@@ -7,15 +7,47 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-function Resolve-DestinationPath {
-    param([string]$PathValue)
-    if ([System.IO.Path]::IsPathRooted($PathValue)) {
-        return $PathValue
+function Resolve-AbsolutePath {
+    param(
+        [string]$PathValue,
+        [string]$RepoRoot
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PathValue)) {
+        return ""
     }
-    return (Join-Path (Get-Location) $PathValue)
+    if ([System.IO.Path]::IsPathRooted($PathValue)) {
+        return [System.IO.Path]::GetFullPath($PathValue)
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $PathValue))
 }
 
-$dest = Resolve-DestinationPath -PathValue $Destination
+function Test-IsUnderPath {
+    param(
+        [string]$PathValue,
+        [string]$BasePath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PathValue)) {
+        return $false
+    }
+    $fullPath = [System.IO.Path]::GetFullPath($PathValue).TrimEnd('\') + '\'
+    $fullBase = [System.IO.Path]::GetFullPath($BasePath).TrimEnd('\') + '\'
+    return $fullPath.StartsWith($fullBase, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$buildsRoot = Join-Path (Split-Path -Parent $repoRoot) "ENGINEbuilds"
+
+if ([string]::IsNullOrWhiteSpace($Destination)) {
+    $Destination = Join-Path $buildsRoot "runtime-deps\\pdfium"
+}
+$dest = Resolve-AbsolutePath -PathValue $Destination -RepoRoot $repoRoot
+
+if (Test-IsUnderPath -PathValue $dest -BasePath $repoRoot) {
+    throw "Destination must be outside the repo. Use a path under ..\\ENGINEbuilds\\runtime-deps. Current: $dest"
+}
+
 $dllPath = Join-Path $dest "pdfium.dll"
 $nestedDllPath = Join-Path $dest "bin\\pdfium.dll"
 
@@ -65,4 +97,3 @@ if (Test-Path $nestedDllPath) {
 }
 
 throw "Download/extract completed but pdfium.dll was not found under $dest"
-

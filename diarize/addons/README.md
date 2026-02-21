@@ -8,7 +8,7 @@ This folder contains the whisper+pyannote add-on layer intended to sit on top of
 - Apply it with:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/apply_llama_overlay.ps1 -LlamaRoot .\llama.cpp
+powershell -ExecutionPolicy Bypass -File .\diarize\scripts\apply_llama_overlay.ps1 -LlamaRoot .\third_party\llama.cpp
 ```
 
 ## Patch (Reference)

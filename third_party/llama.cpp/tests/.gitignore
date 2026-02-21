@@ -1,3 +1,6 @@
-*.wav
-*.ogg
-*.wav.txt
+*
+!*.*
+*.o
+ggml-common.h
+**/*.swp
+!peg-parser

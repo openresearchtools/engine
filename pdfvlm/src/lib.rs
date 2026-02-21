@@ -50,7 +50,7 @@ unsafe fn set_out_error(out_error: *mut *mut c_char, message: Option<&str>) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pdfvlm_run_from_argv(
     argc: i32,
     argv: *const *const c_char,
@@ -81,7 +81,7 @@ pub unsafe extern "C" fn pdfvlm_run_from_argv(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pdfvlm_free_c_string(ptr: *mut c_char) {
     if ptr.is_null() {
         return;
@@ -90,4 +90,3 @@ pub unsafe extern "C" fn pdfvlm_free_c_string(ptr: *mut c_char) {
         let _ = CString::from_raw(ptr);
     }
 }
-

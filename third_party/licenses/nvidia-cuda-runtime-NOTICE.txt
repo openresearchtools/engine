@@ -1,0 +1,15 @@
+﻿NVIDIA CUDA Runtime Components (Windows)
+
+This ENGINE Windows bundle includes NVIDIA CUDA runtime libraries for GPU acceleration in the llama bridge path.
+
+Shipped NVIDIA files in the bundle:
+- cublas64_13.dll
+- cublasLt64_13.dll
+
+These files are redistributed under the NVIDIA CUDA EULA.
+See: nvidia-cuda-EULA.txt
+
+Official NVIDIA CUDA EULA page:
+https://docs.nvidia.com/cuda/eula/index.html
+
+Note: End users may replace these CUDA DLLs with compatible versions installed on their own systems.

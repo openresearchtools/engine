@@ -1,13 +1,59 @@
 param(
     [string]$OutDir = "",
-    [string]$AssetPattern = "*win64-lgpl-shared*.zip"
+    [string]$AssetPattern = "*win64-lgpl-shared*.zip",
+    [string]$ReleaseApiUrl = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest",
+    [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
 
-$root = Split-Path -Parent $PSScriptRoot
+function Resolve-AbsolutePath {
+    param(
+        [string]$PathValue,
+        [string]$RepoRoot
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PathValue)) {
+        return ""
+    }
+    if ([System.IO.Path]::IsPathRooted($PathValue)) {
+        return [System.IO.Path]::GetFullPath($PathValue)
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $PathValue))
+}
+
+function Test-IsUnderPath {
+    param(
+        [string]$PathValue,
+        [string]$BasePath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PathValue)) {
+        return $false
+    }
+    $fullPath = [System.IO.Path]::GetFullPath($PathValue).TrimEnd('\') + '\'
+    $fullBase = [System.IO.Path]::GetFullPath($BasePath).TrimEnd('\') + '\'
+    return $fullPath.StartsWith($fullBase, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$buildsRoot = Join-Path (Split-Path -Parent $repoRoot) "ENGINEbuilds"
 if ([string]::IsNullOrWhiteSpace($OutDir)) {
-    $OutDir = Join-Path $root "third_party\\ffmpeg"
+    $OutDir = Join-Path $buildsRoot "runtime-deps\\ffmpeg"
+}
+$OutDir = Resolve-AbsolutePath -PathValue $OutDir -RepoRoot $repoRoot
+
+if (Test-IsUnderPath -PathValue $OutDir -BasePath $repoRoot) {
+    throw "OutDir must be outside the repo. Use a path under ..\\ENGINEbuilds\\runtime-deps. Current: $OutDir"
+}
+
+$expectedBin = Join-Path $OutDir "bin"
+$expectedLib = Join-Path $OutDir "lib"
+$expectedInclude = Join-Path $OutDir "include"
+if (-not $Force -and (Test-Path -LiteralPath $expectedBin) -and (Test-Path -LiteralPath $expectedLib) -and (Test-Path -LiteralPath $expectedInclude)) {
+    Write-Host "FFmpeg LGPL shared build already present at $OutDir"
+    Write-Host "Use -Force to re-download."
+    exit 0
 }
 
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("ffmpeg-lgpl-" + [Guid]::NewGuid().ToString("N"))
@@ -24,9 +70,9 @@ try {
         "Accept" = "application/vnd.github+json"
     }
 
-    $release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest"
+    $release = Invoke-RestMethod -Headers $headers -Uri $ReleaseApiUrl
     if ($null -eq $release -or $null -eq $release.assets) {
-        throw "Failed to retrieve release assets from BtbN/FFmpeg-Builds"
+        throw "Failed to retrieve release assets from: $ReleaseApiUrl"
     }
 
     $asset = $release.assets | Where-Object { $_.name -like $AssetPattern } | Select-Object -First 1
@@ -45,6 +91,7 @@ try {
     Copy-Item -Path (Join-Path $payloadRoot.FullName "*") -Destination $OutDir -Recurse -Force
 
     Write-Host "FFmpeg LGPL shared build downloaded:"
+    Write-Host "  Release API: $ReleaseApiUrl"
     Write-Host "  Source: $($asset.browser_download_url)"
     Write-Host "  Destination: $OutDir"
     Write-Host "  Expected DLL location: $(Join-Path $OutDir 'bin')"

@@ -1,3 +1,20 @@
-build*/
+*.o
+*.a
+.cache/
+# Do not ignore .git directory, otherwise the reported build number will always be 0
 .github/
-.devops/
+.gitignore
+.vs/
+.vscode/
+.DS_Store
+
+build*/
+
+models/*
+
+/llama-cli
+/llama-quantize
+
+arm_neon.h
+compile_commands.json
+Dockerfile

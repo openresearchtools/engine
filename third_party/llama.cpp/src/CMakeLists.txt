@@ -1,147 +1,168 @@
-# TODO: should not use this
-if (WIN32)
-    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
-
-    if (BUILD_SHARED_LIBS)
-        set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
-    endif()
-endif()
-
-
-if (WHISPER_ALL_WARNINGS)
-    if (NOT MSVC)
-        list(APPEND WARNING_FLAGS -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function)
-        list(APPEND C_FLAGS       -Wshadow -Wstrict-prototypes -Wpointer-arith -Wmissing-prototypes
-                                  -Werror=implicit-int -Werror=implicit-function-declaration)
-        list(APPEND CXX_FLAGS     -Wmissing-declarations -Wmissing-noreturn)
-
-        list(APPEND C_FLAGS   ${WARNING_FLAGS})
-        list(APPEND CXX_FLAGS ${WARNING_FLAGS})
-
-        add_compile_options("$<$<COMPILE_LANGUAGE:C>:${C_FLAGS}>"
-                            "$<$<COMPILE_LANGUAGE:CXX>:${CXX_FLAGS}>")
-    else()
-        # todo : msvc
-        set(C_FLAGS   "")
-        set(CXX_FLAGS "")
-    endif()
-endif()
-
-if (WHISPER_COREML)
-    find_library(FOUNDATION_FRAMEWORK Foundation)
-    find_library(COREML_FRAMEWORK CoreML)
-
-    if (COREML_FRAMEWORK)
-        message(STATUS "CoreML framework found")
-
-        set(WHISPER_EXTRA_FLAGS ${WHISPER_EXTRA_FLAGS} -DWHISPER_USE_COREML)
-    else()
-        message(FATAL_ERROR "CoreML framework not found")
-    endif()
-
-    if (WHISPER_COREML_ALLOW_FALLBACK)
-        set(WHISPER_EXTRA_FLAGS ${WHISPER_EXTRA_FLAGS} -DWHISPER_COREML_ALLOW_FALLBACK)
-    endif()
-endif()
-
-if (WHISPER_OPENVINO)
-    find_package(OpenVINO REQUIRED COMPONENTS Runtime)
-endif()
+llama_add_compile_flags()
 
 #
 # libraries
 #
 
-# whisper.coreml
+# llama
 
-if (WHISPER_COREML)
-    set(TARGET whisper.coreml)
-
-    add_library(${TARGET}
-        coreml/whisper-compat.m
-        coreml/whisper-encoder.h
-        coreml/whisper-encoder.mm
-        coreml/whisper-encoder-impl.h
-        coreml/whisper-encoder-impl.m
-        )
-
-    include(DefaultTargetOptions)
-
-    target_include_directories(${TARGET} PUBLIC
-        .
-        )
-
-    target_link_libraries(${TARGET} PRIVATE ${FOUNDATION_FRAMEWORK} ${COREML_FRAMEWORK})
-
-    set_target_properties(${TARGET} PROPERTIES
-        COMPILE_FLAGS "-fobjc-arc"
-        XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC YES
-        )
-
-    set_target_properties(${TARGET} PROPERTIES FOLDER "libs")
-    install(TARGETS ${TARGET} LIBRARY)
-endif()
-
-if (WHISPER_OPENVINO)
-    set(TARGET whisper.openvino)
-
-    add_library(${TARGET} OBJECT
-        openvino/whisper-openvino-encoder.h
-        openvino/whisper-openvino-encoder.cpp
-        )
-
-    target_include_directories(${TARGET} PUBLIC
-        .
-        )
-
-    set_property(TARGET ${TARGET} PROPERTY POSITION_INDEPENDENT_CODE ON)
-    set(WHISPER_EXTRA_FLAGS ${WHISPER_EXTRA_FLAGS} -DWHISPER_USE_OPENVINO)
-
-    target_link_libraries(${TARGET} PRIVATE ggml openvino::runtime)
-    set_target_properties(${TARGET} PROPERTIES FOLDER "libs")
-endif()
-
-# whisper
-
-add_library(whisper
-            ../include/whisper.h
-            whisper-arch.h
-            whisper.cpp
+add_library(llama
+            ../include/llama.h
+            llama.cpp
+            llama-adapter.cpp
+            llama-arch.cpp
+            llama-batch.cpp
+            llama-chat.cpp
+            llama-context.cpp
+            llama-cparams.cpp
+            llama-grammar.cpp
+            llama-graph.cpp
+            llama-hparams.cpp
+            llama-impl.cpp
+            llama-io.cpp
+            llama-kv-cache.cpp
+            llama-kv-cache-iswa.cpp
+            llama-memory.cpp
+            llama-memory-hybrid.cpp
+            llama-memory-hybrid-iswa.cpp
+            llama-memory-recurrent.cpp
+            llama-mmap.cpp
+            llama-model-loader.cpp
+            llama-model-saver.cpp
+            llama-model.cpp
+            llama-quant.cpp
+            llama-sampler.cpp
+            llama-vocab.cpp
+            unicode-data.cpp
+            unicode.cpp
+            unicode.h
+            models/afmoe.cpp
+            models/apertus.cpp
+            models/arcee.cpp
+            models/arctic.cpp
+            models/arwkv7.cpp
+            models/baichuan.cpp
+            models/bailingmoe.cpp
+            models/bailingmoe2.cpp
+            models/bert.cpp
+            models/bitnet.cpp
+            models/bloom.cpp
+            models/chameleon.cpp
+            models/chatglm.cpp
+            models/codeshell.cpp
+            models/cogvlm.cpp
+            models/cohere2-iswa.cpp
+            models/command-r.cpp
+            models/dbrx.cpp
+            models/deci.cpp
+            models/deepseek.cpp
+            models/deepseek2.cpp
+            models/delta-net-base.cpp
+            models/dots1.cpp
+            models/dream.cpp
+            models/ernie4-5-moe.cpp
+            models/ernie4-5.cpp
+            models/exaone-moe.cpp
+            models/exaone.cpp
+            models/exaone4.cpp
+            models/falcon-h1.cpp
+            models/falcon.cpp
+            models/gemma-embedding.cpp
+            models/gemma.cpp
+            models/gemma2-iswa.cpp
+            models/gemma3.cpp
+            models/gemma3n-iswa.cpp
+            models/glm4-moe.cpp
+            models/glm4.cpp
+            models/gpt2.cpp
+            models/gptneox.cpp
+            models/granite-hybrid.cpp
+            models/granite.cpp
+            models/grok.cpp
+            models/grovemoe.cpp
+            models/hunyuan-dense.cpp
+            models/hunyuan-moe.cpp
+            models/internlm2.cpp
+            models/jais.cpp
+            models/jais2.cpp
+            models/jamba.cpp
+            models/kimi-linear.cpp
+            models/lfm2.cpp
+            models/llada-moe.cpp
+            models/llada.cpp
+            models/llama-iswa.cpp
+            models/llama.cpp
+            models/maincoder.cpp
+            models/mamba-base.cpp
+            models/mamba.cpp
+            models/mimo2-iswa.cpp
+            models/minicpm3.cpp
+            models/minimax-m2.cpp
+            models/mistral3.cpp
+            models/modern-bert.cpp
+            models/mpt.cpp
+            models/nemotron-h.cpp
+            models/nemotron.cpp
+            models/neo-bert.cpp
+            models/olmo.cpp
+            models/olmo2.cpp
+            models/olmoe.cpp
+            models/openai-moe-iswa.cpp
+            models/openelm.cpp
+            models/orion.cpp
+            models/paddleocr.cpp
+            models/pangu-embedded.cpp
+            models/phi2.cpp
+            models/phi3.cpp
+            models/plamo.cpp
+            models/plamo2.cpp
+            models/plamo3.cpp
+            models/plm.cpp
+            models/qwen.cpp
+            models/qwen2.cpp
+            models/qwen2moe.cpp
+            models/qwen2vl.cpp
+            models/qwen3.cpp
+            models/qwen35.cpp
+            models/qwen35moe.cpp
+            models/qwen3moe.cpp
+            models/qwen3next.cpp
+            models/qwen3vl-moe.cpp
+            models/qwen3vl.cpp
+            models/refact.cpp
+            models/rnd1.cpp
+            models/rwkv6-base.cpp
+            models/rwkv6.cpp
+            models/rwkv6qwen2.cpp
+            models/rwkv7-base.cpp
+            models/rwkv7.cpp
+            models/seed-oss.cpp
+            models/smallthinker.cpp
+            models/smollm3.cpp
+            models/stablelm.cpp
+            models/starcoder.cpp
+            models/starcoder2.cpp
+            models/step35-iswa.cpp
+            models/t5-dec.cpp
+            models/t5-enc.cpp
+            models/wavtokenizer-dec.cpp
+            models/xverse.cpp
             )
 
-# Set the version numbers
-set_target_properties(whisper PROPERTIES
-    VERSION ${PROJECT_VERSION}
-    SOVERSION ${SOVERSION}
+set_target_properties(llama PROPERTIES
+    VERSION ${LLAMA_INSTALL_VERSION}
+    SOVERSION 0
+    MACHO_CURRENT_VERSION 0 # keep macOS linker from seeing oversized version number
 )
 
-target_include_directories(whisper PUBLIC . ../include)
-target_compile_features   (whisper PUBLIC cxx_std_11) # don't bump
+target_include_directories(llama PRIVATE .)
+target_include_directories(llama PUBLIC ../include)
+target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
 
-if (CMAKE_CXX_BYTE_ORDER STREQUAL "BIG_ENDIAN")
-    set(WHISPER_EXTRA_FLAGS ${WHISPER_EXTRA_FLAGS} -DWHISPER_BIG_ENDIAN)
-endif()
-
-if (WHISPER_EXTRA_FLAGS)
-    target_compile_options(whisper PRIVATE ${WHISPER_EXTRA_FLAGS})
-endif()
-
-find_package(Threads REQUIRED)
-target_link_libraries(whisper PUBLIC ggml Threads::Threads)
-
-if (WHISPER_COREML)
-    target_link_libraries(whisper PRIVATE whisper.coreml)
-endif()
-
-if (WHISPER_OPENVINO)
-    target_link_libraries(whisper PRIVATE whisper.openvino)
-endif()
-
-if (WHISPER_MKL)
-    target_link_libraries(whisper PRIVATE MKL::MKL)
-endif()
+target_link_libraries(llama PUBLIC ggml)
 
 if (BUILD_SHARED_LIBS)
-    set_target_properties(whisper PROPERTIES POSITION_INDEPENDENT_CODE ON)
-    target_compile_definitions(whisper PRIVATE WHISPER_SHARED WHISPER_BUILD)
+    set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_compile_definitions(llama PRIVATE LLAMA_BUILD)
+    target_compile_definitions(llama PUBLIC  LLAMA_SHARED)
 endif()

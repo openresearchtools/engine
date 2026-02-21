@@ -19,6 +19,7 @@ use crate::llama_bridge_ffi::{
 };
 use image::imageops::FilterType;
 use image::ImageFormat;
+use image::GenericImageView;
 use pdfium_render::prelude::*;
 
 const DEFAULT_PROMPT: &str = "Convert this page to markdown. Do not miss any text and only output the bare markdown! Any graphs or figures found convert to markdown table. If figure is image without details, describe what you see in the image. For tables, pay attention to whitespace: some cells may be intentionally empty, so keep empty and filled cells in the correct columns. Ensure correct assignment of column headings and subheadings for tables.";
@@ -248,7 +249,7 @@ Options:
   --image           Full path to input image.
   --model           Full path to VLM model gguf.
   --mmproj          Full path to vision projector gguf.
-  --out-md          Full path to output markdown file.
+  --out-md, --out   Full path to output markdown file.
   --out-dir         Output directory. Result file name is input PDF stem + .md.
   --pages           1-based page list, e.g. 1,5,7-9 (default: all pages).
   --scale           PDF render target scale (default: 2.0).
@@ -354,10 +355,10 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
                 }
                 mmproj_path = Some(PathBuf::from(&argv[i]));
             }
-            "--out-md" => {
+            "--out-md" | "--out" => {
                 i += 1;
                 if i >= argv.len() {
-                    return Err("--out-md requires a value".to_string());
+                    return Err("--out-md/--out requires a value".to_string());
                 }
                 out_md = Some(PathBuf::from(&argv[i]));
             }
@@ -621,10 +622,10 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                 }
                 mmproj_path = Some(PathBuf::from(&argv[i]));
             }
-            "--out-md" => {
+            "--out-md" | "--out" => {
                 i += 1;
                 if i >= argv.len() {
-                    return Err("--out-md requires a value".to_string());
+                    return Err("--out-md/--out requires a value".to_string());
                 }
                 out_md = Some(PathBuf::from(&argv[i]));
             }
@@ -831,7 +832,9 @@ fn render_pages_to_memory(args: &Args) -> Result<Vec<RenderedPage>, Box<dyn std:
             .into());
         }
 
-        let page_index = (page_number - 1) as i32;
+        let page_index: u16 = (page_number - 1)
+            .try_into()
+            .map_err(|_| format!("Page index out of range for Pdfium: {}", page_number - 1))?;
         let page = document.pages().get(page_index)?;
 
         let width_pts = page.width().value;
@@ -844,7 +847,7 @@ fn render_pages_to_memory(args: &Args) -> Result<Vec<RenderedPage>, Box<dyn std:
 
         let render_config = PdfRenderConfig::new().set_fixed_size(temp_w, temp_h);
         let bitmap = page.render_with_config(&render_config)?;
-        let temp_img = bitmap.as_image()?;
+        let temp_img = bitmap.as_image();
         let final_img = temp_img.resize_exact(target_w as u32, target_h as u32, FilterType::CatmullRom);
 
         let mut cursor = Cursor::new(Vec::new());

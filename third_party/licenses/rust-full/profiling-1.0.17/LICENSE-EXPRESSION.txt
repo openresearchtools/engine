@@ -1,0 +1,7 @@
+Crate: profiling
+Version: 1.0.17
+License expression: MIT OR Apache-2.0
+Repository: https://github.com/aclysma/profiling
+
+No explicit LICENSE/COPYING/NOTICE file was found in the crate root.
+Use the license expression and upstream repository to confirm obligations.

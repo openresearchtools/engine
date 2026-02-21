@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Options
 IOS_MIN_OS_VERSION=16.4
@@ -7,15 +7,15 @@ VISIONOS_MIN_OS_VERSION=1.0
 TVOS_MIN_OS_VERSION=16.4
 
 BUILD_SHARED_LIBS=OFF
-WHISPER_BUILD_EXAMPLES=OFF
-WHISPER_BUILD_TESTS=OFF
-WHISPER_BUILD_SERVER=OFF
+LLAMA_BUILD_EXAMPLES=OFF
+LLAMA_BUILD_TOOLS=OFF
+LLAMA_BUILD_TESTS=OFF
+LLAMA_BUILD_SERVER=OFF
 GGML_METAL=ON
 GGML_METAL_EMBED_LIBRARY=ON
 GGML_BLAS_DEFAULT=ON
 GGML_METAL_USE_BF16=ON
 GGML_OPENMP=OFF
-BUILD_STATIC_XCFRAMEWORK=${BUILD_STATIC_XCFRAMEWORK:-OFF}
 
 COMMON_C_FLAGS="-Wno-macro-redefined -Wno-shorten-64-to-32 -Wno-unused-command-line-argument -g"
 COMMON_CXX_FLAGS="-Wno-macro-redefined -Wno-shorten-64-to-32 -Wno-unused-command-line-argument -g"
@@ -31,9 +31,10 @@ COMMON_CMAKE_ARGS=(
     -DCMAKE_XCODE_ATTRIBUTE_STRIP_INSTALLED_PRODUCT=NO
     -DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM=ggml
     -DBUILD_SHARED_LIBS=${BUILD_SHARED_LIBS}
-    -DWHISPER_BUILD_EXAMPLES=${WHISPER_BUILD_EXAMPLES}
-    -DWHISPER_BUILD_TESTS=${WHISPER_BUILD_TESTS}
-    -DWHISPER_BUILD_SERVER=${WHISPER_BUILD_SERVER}
+    -DLLAMA_BUILD_EXAMPLES=${LLAMA_BUILD_EXAMPLES}
+    -DLLAMA_BUILD_TOOLS=${LLAMA_BUILD_TOOLS}
+    -DLLAMA_BUILD_TESTS=${LLAMA_BUILD_TESTS}
+    -DLLAMA_BUILD_SERVER=${LLAMA_BUILD_SERVER}
     -DGGML_METAL_EMBED_LIBRARY=${GGML_METAL_EMBED_LIBRARY}
     -DGGML_BLAS_DEFAULT=${GGML_BLAS_DEFAULT}
     -DGGML_METAL=${GGML_METAL}
@@ -41,11 +42,6 @@ COMMON_CMAKE_ARGS=(
     -DGGML_NATIVE=OFF
     -DGGML_OPENMP=${GGML_OPENMP}
 )
-
-XCODE_VERSION=$(xcodebuild -version 2>/dev/null | head -n1 | awk '{ print $2 }')
-MAJOR_VERSION=$(echo $XCODE_VERSION | cut -d. -f1)
-MINOR_VERSION=$(echo $XCODE_VERSION | cut -d. -f2)
-echo "Detected Xcode version: $XCODE_VERSION"
 
 check_required_tool() {
     local tool=$1
@@ -59,9 +55,12 @@ check_required_tool() {
 }
 echo "Checking for required tools..."
 check_required_tool "cmake" "Please install CMake 3.28.0 or later (brew install cmake)"
-check_required_tool "xcodebuild" "Please install Xcode and Xcode Command Line Tools (xcode-select --install)"
-check_required_tool "libtool" "Please install libtool which should be available with Xcode Command Line Tools (CLT). Make sure Xcode CLT is installed (xcode-select --install)"
-check_required_tool "dsymutil" "Please install Xcode and Xcode Command Line Tools (xcode-select --install)"
+check_required_tool "xcrun" "Please install Xcode and Xcode Command Line Tools (xcode-select --install)"
+
+XCODE_VERSION=$(xcrun xcodebuild -version 2>/dev/null | head -n1 | awk '{ print $2 }')
+MAJOR_VERSION=$(echo $XCODE_VERSION | cut -d. -f1)
+MINOR_VERSION=$(echo $XCODE_VERSION | cut -d. -f2)
+echo "Detected Xcode version: $XCODE_VERSION"
 
 set -e
 
@@ -80,7 +79,7 @@ setup_framework_structure() {
     local build_dir=$1
     local min_os_version=$2
     local platform=$3  # "ios", "macos", "visionos", or "tvos"
-    local framework_name="whisper"
+    local framework_name="llama"
 
     echo "Creating ${platform}-style framework structure for ${build_dir}"
 
@@ -114,8 +113,9 @@ setup_framework_structure() {
     fi
 
     # Copy all required headers (common for all platforms)
-    cp include/whisper.h           ${header_path}
+    cp include/llama.h             ${header_path}
     cp ggml/include/ggml.h         ${header_path}
+    cp ggml/include/ggml-opt.h     ${header_path}
     cp ggml/include/ggml-alloc.h   ${header_path}
     cp ggml/include/ggml-backend.h ${header_path}
     cp ggml/include/ggml-metal.h   ${header_path}
@@ -125,8 +125,8 @@ setup_framework_structure() {
 
     # Create module map (common for all platforms)
     cat > ${module_path}module.modulemap << EOF
-framework module whisper {
-    header "whisper.h"
+framework module llama {
+    header "llama.h"
     header "ggml.h"
     header "ggml-alloc.h"
     header "ggml-backend.h"
@@ -196,13 +196,13 @@ EOF
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>whisper</string>
+    <string>llama</string>
     <key>CFBundleIdentifier</key>
-    <string>org.ggml.whisper</string>
+    <string>org.ggml.llama</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>whisper</string>
+    <string>llama</string>
     <key>CFBundlePackageType</key>
     <string>FMWK</string>
     <key>CFBundleShortVersionString</key>
@@ -231,7 +231,7 @@ combine_static_libraries() {
     local platform="$3"  # "ios", "macos", "visionos", or "tvos"
     local is_simulator="$4"
     local base_dir="$(pwd)"
-    local framework_name="whisper"
+    local framework_name="llama"
 
     # Determine output path based on platform
     local output_lib=""
@@ -244,35 +244,27 @@ combine_static_libraries() {
     fi
 
     local libs=(
-        "${base_dir}/${build_dir}/src/${release_dir}/libwhisper.a"
+        "${base_dir}/${build_dir}/src/${release_dir}/libllama.a"
         "${base_dir}/${build_dir}/ggml/src/${release_dir}/libggml.a"
         "${base_dir}/${build_dir}/ggml/src/${release_dir}/libggml-base.a"
         "${base_dir}/${build_dir}/ggml/src/${release_dir}/libggml-cpu.a"
         "${base_dir}/${build_dir}/ggml/src/ggml-metal/${release_dir}/libggml-metal.a"
         "${base_dir}/${build_dir}/ggml/src/ggml-blas/${release_dir}/libggml-blas.a"
     )
-    if [[ "$platform" == "macos" || "$platform" == "ios" ]]; then
-        echo "Adding libwhisper.coreml library to the build."
-        libs+=(
-            "${base_dir}/${build_dir}/src/${release_dir}/libwhisper.coreml.a"
-        )
-    fi
 
     # Create temporary directory for processing
     local temp_dir="${base_dir}/${build_dir}/temp"
-    echo "Creating temporary directory: ${temp_dir}"
     mkdir -p "${temp_dir}"
 
     # Since we have multiple architectures libtool will find object files that do not
     # match the target architecture. We suppress these warnings.
-    libtool -static -o "${temp_dir}/combined.a" "${libs[@]}" 2> /dev/null
+    xcrun libtool -static -o "${temp_dir}/combined.a" "${libs[@]}" 2> /dev/null
 
     # Determine SDK, architectures, and install_name based on platform and simulator flag.
     local sdk=""
     local archs=""
     local min_version_flag=""
     local install_name=""
-    local frameworks="-framework Foundation -framework Metal -framework Accelerate"
 
     case "$platform" in
         "ios")
@@ -285,15 +277,13 @@ combine_static_libraries() {
                 archs="arm64"
                 min_version_flag="-mios-version-min=${IOS_MIN_OS_VERSION}"
             fi
-            install_name="@rpath/whisper.framework/whisper"
-            frameworks+=" -framework CoreML"
+            install_name="@rpath/llama.framework/llama"
             ;;
         "macos")
             sdk="macosx"
             archs="arm64 x86_64"
             min_version_flag="-mmacosx-version-min=${MACOS_MIN_OS_VERSION}"
-            install_name="@rpath/whisper.framework/Versions/Current/whisper"
-            frameworks+=" -framework CoreML"
+            install_name="@rpath/llama.framework/Versions/Current/llama"
             ;;
         "visionos")
             if [[ "$is_simulator" == "true" ]]; then
@@ -306,7 +296,7 @@ combine_static_libraries() {
                 min_version_flag="-mtargetos=xros${VISIONOS_MIN_OS_VERSION}"
             fi
             # Use flat structure for visionOS, same as iOS
-            install_name="@rpath/whisper.framework/whisper"
+            install_name="@rpath/llama.framework/llama"
             ;;
         "tvos")
             if [[ "$is_simulator" == "true" ]]; then
@@ -318,7 +308,7 @@ combine_static_libraries() {
                 archs="arm64"
                 min_version_flag="-mtvos-version-min=${TVOS_MIN_OS_VERSION}"
             fi
-            install_name="@rpath/whisper.framework/whisper"
+            install_name="@rpath/llama.framework/llama"
             ;;
     esac
 
@@ -328,15 +318,6 @@ combine_static_libraries() {
         arch_flags+=" -arch $arch"
     done
 
-
-    if [[ "${BUILD_STATIC_XCFRAMEWORK}" == "ON" ]]; then
-        echo "Packaging static framework for ${platform}."
-        mkdir -p "$(dirname "${base_dir}/${output_lib}")"
-        cp "${temp_dir}/combined.a" "${base_dir}/${output_lib}"
-        rm -rf "${temp_dir}"
-        return
-    fi
-
     # Create dynamic library
     echo "Creating dynamic library for ${platform}."
     xcrun -sdk $sdk clang++ -dynamiclib \
@@ -344,13 +325,13 @@ combine_static_libraries() {
         $arch_flags \
         $min_version_flag \
         -Wl,-force_load,"${temp_dir}/combined.a" \
-        $frameworks \
+        -framework Foundation -framework Metal -framework Accelerate \
         -install_name "$install_name" \
         -o "${base_dir}/${output_lib}"
 
     # Platform-specific post-processing for device builds
     if [[ "$is_simulator" == "false" ]]; then
-        if command -v xcrun vtool &>/dev/null; then
+        if xcrun -f vtool &>/dev/null; then
             case "$platform" in
                 "ios")
                     echo "Marking binary as a framework binary for iOS..."
@@ -387,7 +368,7 @@ combine_static_libraries() {
     # iOS and visionOS style dSYM (flat structure)
     if [[ "$platform" == "ios" || "$platform" == "visionos" || "$platform" == "tvos" ]]; then
         # Generate dSYM in the dSYMs directory
-        xcrun dsymutil "${base_dir}/${output_lib}" -o "${base_dir}/${build_dir}/dSYMs/whisper.dSYM"
+        xcrun dsymutil "${base_dir}/${output_lib}" -o "${base_dir}/${build_dir}/dSYMs/llama.dSYM"
 
         # Create a copy of the binary that will be stripped
         cp "${base_dir}/${output_lib}" "${temp_dir}/binary_to_strip"
@@ -403,7 +384,7 @@ combine_static_libraries() {
         xcrun strip -S "${base_dir}/${output_lib}" -o "${temp_dir}/stripped_lib"
 
         # Generate dSYM in the dSYMs directory
-        xcrun dsymutil "${base_dir}/${output_lib}" -o "${base_dir}/${build_dir}/dSYMs/whisper.dSYM"
+        xcrun dsymutil "${base_dir}/${output_lib}" -o "${base_dir}/${build_dir}/dSYMs/llama.dSYM"
 
         # Replace original binary with stripped version
         mv "${temp_dir}/stripped_lib" "${base_dir}/${output_lib}"
@@ -431,8 +412,7 @@ cmake -B build-ios-sim -G Xcode \
     -DCMAKE_XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS=iphonesimulator \
     -DCMAKE_C_FLAGS="${COMMON_C_FLAGS}" \
     -DCMAKE_CXX_FLAGS="${COMMON_CXX_FLAGS}" \
-    -DWHISPER_COREML="ON" \
-    -DWHISPER_COREML_ALLOW_FALLBACK="ON" \
+    -DLLAMA_OPENSSL=OFF \
     -S .
 cmake --build build-ios-sim --config Release -- -quiet
 
@@ -440,13 +420,13 @@ echo "Building for iOS devices..."
 cmake -B build-ios-device -G Xcode \
     "${COMMON_CMAKE_ARGS[@]}" \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=${IOS_MIN_OS_VERSION} \
+    -DCMAKE_SYSTEM_NAME=iOS \
     -DCMAKE_OSX_SYSROOT=iphoneos \
     -DCMAKE_OSX_ARCHITECTURES="arm64" \
     -DCMAKE_XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS=iphoneos \
     -DCMAKE_C_FLAGS="${COMMON_C_FLAGS}" \
     -DCMAKE_CXX_FLAGS="${COMMON_CXX_FLAGS}" \
-    -DWHISPER_COREML="ON" \
-    -DWHISPER_COREML_ALLOW_FALLBACK="ON" \
+    -DLLAMA_OPENSSL=OFF \
     -S .
 cmake --build build-ios-device --config Release -- -quiet
 
@@ -457,8 +437,7 @@ cmake -B build-macos -G Xcode \
     -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
     -DCMAKE_C_FLAGS="${COMMON_C_FLAGS}" \
     -DCMAKE_CXX_FLAGS="${COMMON_CXX_FLAGS}" \
-    -DWHISPER_COREML="ON" \
-    -DWHISPER_COREML_ALLOW_FALLBACK="ON" \
+    -DLLAMA_OPENSSL=OFF \
     -S .
 cmake --build build-macos --config Release -- -quiet
 
@@ -470,8 +449,10 @@ cmake -B build-visionos -G Xcode \
     -DCMAKE_SYSTEM_NAME=visionOS \
     -DCMAKE_OSX_SYSROOT=xros \
     -DCMAKE_XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS=xros \
-    -DCMAKE_C_FLAGS="-D_XOPEN_SOURCE=700 ${COMMON_C_FLAGS}" \
-    -DCMAKE_CXX_FLAGS="-D_XOPEN_SOURCE=700 ${COMMON_CXX_FLAGS}" \
+    -DCMAKE_C_FLAGS="${COMMON_C_FLAGS}" \
+    -DCMAKE_CXX_FLAGS="${COMMON_CXX_FLAGS}" \
+    -DLLAMA_OPENSSL=OFF \
+    -DLLAMA_BUILD_SERVER=OFF \
     -S .
 cmake --build build-visionos --config Release -- -quiet
 
@@ -483,8 +464,10 @@ cmake -B build-visionos-sim -G Xcode \
     -DCMAKE_SYSTEM_NAME=visionOS \
     -DCMAKE_OSX_SYSROOT=xrsimulator \
     -DCMAKE_XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS=xrsimulator \
-    -DCMAKE_C_FLAGS="-D_XOPEN_SOURCE=700 ${COMMON_C_FLAGS}" \
-    -DCMAKE_CXX_FLAGS="-D_XOPEN_SOURCE=700 ${COMMON_CXX_FLAGS}" \
+    -DCMAKE_C_FLAGS="${COMMON_C_FLAGS}" \
+    -DCMAKE_CXX_FLAGS="${COMMON_CXX_FLAGS}" \
+    -DLLAMA_OPENSSL=OFF \
+    -DLLAMA_BUILD_SERVER=OFF \
     -S .
 cmake --build build-visionos-sim --config Release -- -quiet
 
@@ -500,6 +483,7 @@ cmake -B build-tvos-sim -G Xcode \
     -DCMAKE_XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS=appletvsimulator \
     -DCMAKE_C_FLAGS="${COMMON_C_FLAGS}" \
     -DCMAKE_CXX_FLAGS="${COMMON_CXX_FLAGS}" \
+    -DLLAMA_OPENSSL=OFF \
     -S .
 cmake --build build-tvos-sim --config Release -- -quiet
 
@@ -514,6 +498,7 @@ cmake -B build-tvos-device -G Xcode \
     -DCMAKE_XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS=appletvos \
     -DCMAKE_C_FLAGS="${COMMON_C_FLAGS}" \
     -DCMAKE_CXX_FLAGS="${COMMON_CXX_FLAGS}" \
+    -DLLAMA_OPENSSL=OFF \
     -S .
 cmake --build build-tvos-device --config Release -- -quiet
 
@@ -539,33 +524,19 @@ combine_static_libraries "build-tvos-device" "Release-appletvos" "tvos" "false"
 
 # Create XCFramework with correct debug symbols paths
 echo "Creating XCFramework..."
-
-if [[ "${BUILD_STATIC_XCFRAMEWORK}" == "ON" ]]; then
-    xcodebuild -create-xcframework \
-        -framework $(pwd)/build-ios-sim/framework/whisper.framework \
-        -framework $(pwd)/build-ios-device/framework/whisper.framework \
-        -framework $(pwd)/build-macos/framework/whisper.framework \
-        -framework $(pwd)/build-visionos/framework/whisper.framework \
-        -framework $(pwd)/build-visionos-sim/framework/whisper.framework \
-        -framework $(pwd)/build-tvos-device/framework/whisper.framework \
-        -framework $(pwd)/build-tvos-sim/framework/whisper.framework \
-        -output $(pwd)/build-apple/whisper.xcframework
-    exit 0
-fi
-
-xcodebuild -create-xcframework \
-    -framework $(pwd)/build-ios-sim/framework/whisper.framework \
-    -debug-symbols $(pwd)/build-ios-sim/dSYMs/whisper.dSYM \
-    -framework $(pwd)/build-ios-device/framework/whisper.framework \
-    -debug-symbols $(pwd)/build-ios-device/dSYMs/whisper.dSYM \
-    -framework $(pwd)/build-macos/framework/whisper.framework \
-    -debug-symbols $(pwd)/build-macos/dSYMs/whisper.dSYM \
-    -framework $(pwd)/build-visionos/framework/whisper.framework \
-    -debug-symbols $(pwd)/build-visionos/dSYMs/whisper.dSYM \
-    -framework $(pwd)/build-visionos-sim/framework/whisper.framework \
-    -debug-symbols $(pwd)/build-visionos-sim/dSYMs/whisper.dSYM \
-    -framework $(pwd)/build-tvos-device/framework/whisper.framework \
-    -debug-symbols $(pwd)/build-tvos-device/dSYMs/whisper.dSYM \
-    -framework $(pwd)/build-tvos-sim/framework/whisper.framework \
-    -debug-symbols $(pwd)/build-tvos-sim/dSYMs/whisper.dSYM \
-    -output $(pwd)/build-apple/whisper.xcframework
+xcrun xcodebuild -create-xcframework \
+    -framework $(pwd)/build-ios-sim/framework/llama.framework \
+    -debug-symbols $(pwd)/build-ios-sim/dSYMs/llama.dSYM \
+    -framework $(pwd)/build-ios-device/framework/llama.framework \
+    -debug-symbols $(pwd)/build-ios-device/dSYMs/llama.dSYM \
+    -framework $(pwd)/build-macos/framework/llama.framework \
+    -debug-symbols $(pwd)/build-macos/dSYMs/llama.dSYM \
+    -framework $(pwd)/build-visionos/framework/llama.framework \
+    -debug-symbols $(pwd)/build-visionos/dSYMs/llama.dSYM \
+    -framework $(pwd)/build-visionos-sim/framework/llama.framework \
+    -debug-symbols $(pwd)/build-visionos-sim/dSYMs/llama.dSYM \
+    -framework $(pwd)/build-tvos-device/framework/llama.framework \
+    -debug-symbols $(pwd)/build-tvos-device/dSYMs/llama.dSYM \
+    -framework $(pwd)/build-tvos-sim/framework/llama.framework \
+    -debug-symbols $(pwd)/build-tvos-sim/dSYMs/llama.dSYM \
+    -output $(pwd)/build-apple/llama.xcframework

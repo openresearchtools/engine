@@ -17,6 +17,52 @@ This repository contains runtime integration code and conversion/parity tooling 
 - License type: MIT
 - License file: `llama.cpp-LICENSE.txt`
 
+### 1a) Additional licenses pulled into this app through llama.cpp build
+
+The `llama.cpp` CMake build used by this app aggregates extra third-party licenses into its generated `license.cpp`.
+For the current ENGINE Windows CUDA build, those additional upstream projects are:
+
+- Repository: `yhirose/cpp-httplib`
+  - Upstream: `https://github.com/yhirose/cpp-httplib`
+  - License type: MIT
+  - License file in this folder: `cpp-httplib-LICENSE.txt`
+- Repository: `nlohmann/json`
+  - Upstream: `https://github.com/nlohmann/json`
+  - License type: MIT
+  - License file in this folder: `jsonhpp-LICENSE.txt`
+- Repository: `google/boringssl`
+  - Upstream: `https://github.com/google/boringssl`
+  - License type: ISC-style (BoringSSL license)
+  - License file in this folder: `boringssl-LICENSE.txt`
+
+Build-note: BoringSSL is fetched by CMake in this build profile (`LLAMA_BUILD_BORINGSSL=ON`) and linked into the shipped bridge/runtime binaries.
+
+### 1b) ggml
+
+- Role: low-level tensor/runtime framework used by `llama.cpp` and `whisper.cpp`.
+- Upstream repository: `ggml-org/ggml`
+- Upstream URL: `https://github.com/ggml-org/ggml`
+- Source locations in this repository layout:
+  - [`third_party/llama.cpp/ggml`](https://github.com/openresearchtools/engine/tree/main/third_party/llama.cpp/ggml)
+  - [`third_party/whisper.cpp/ggml`](https://github.com/openresearchtools/engine/tree/main/third_party/whisper.cpp/ggml)
+- License: MIT
+- License type: MIT
+- License file: `ggml-LICENSE.txt`
+
+### 1c) miniaudio
+
+- Role: embedded audio decode/capture helper used by the in-process whisper transcription path.
+- Upstream repository: `mackron/miniaudio`
+- Upstream URL: `https://github.com/mackron/miniaudio`
+- Source location in this repository layout:
+  - [`third_party/llama.cpp/vendor/miniaudio/miniaudio.h`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/vendor/miniaudio/miniaudio.h)
+- Build-use locations in this repository layout:
+  - [`third_party/llama.cpp/tools/whisper/whisper-common-audio.cpp`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/tools/whisper/whisper-common-audio.cpp)
+  - [`third_party/llama.cpp/tools/pyannote/pyannote-diarize.cpp`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/tools/pyannote/pyannote-diarize.cpp)
+- License: dual option (Public Domain / MIT No Attribution)
+- License type: Public Domain (Unlicense-style) OR MIT-0
+- License file: `miniaudio-LICENSE.txt`
+
 ### 2) whisper.cpp
 
 - Role: Native whisper transcription implementation integrated into `llama-server` in-process for audio flow.
@@ -82,7 +128,18 @@ This repository contains runtime integration code and conversion/parity tooling 
 - License type (intended build): LGPL (LGPL-only shared build)
 - License file: `ffmpeg-LGPL-2.1.txt`
 - Source/provenance note: `ffmpeg-SOURCE.txt`
-- Include additional third-party notices shipped inside the downloaded FFmpeg package (if present) in your final distribution.
+
+### 9) NVIDIA CUDA runtime libraries (Windows bundle)
+
+- Role: GPU acceleration runtime libraries used by the CUDA backend in shipped ENGINE binaries.
+- Typical shipped files in this project bundle:
+  - `cublas64_13.dll`
+  - `cublasLt64_13.dll`
+- License/EULA type: NVIDIA CUDA EULA
+- License files in this folder:
+  - `nvidia-cuda-EULA.txt`
+  - `nvidia-cuda-runtime-NOTICE.txt`
+- Official EULA page: `https://docs.nvidia.com/cuda/eula/index.html`
 
 ## Conversion / parity tooling (not required at runtime)
 
@@ -122,18 +179,79 @@ Full transitive tooling export:
 
 ## Dependency mapping (Rust workspace direct deps)
 
-- `engine`: `serde_json`
-- `pdf`: `anyhow`, `clap`, `once_cell`, `regex`, `walkdir`, `pdfium-render`
-- `pdfvlm`: `pdfium-render`, `image`, `encoding_rs`
+### `serde_json`
 
-Direct crate license files copied into this folder:
+- Role: JSON parsing/serialization in Rust runtime modules.
+- License type: MIT OR Apache-2.0
+- License files:
+  - `serde_json-LICENSE-MIT.txt`
+  - `serde_json-LICENSE-APACHE.txt`
 
-- `serde_json` (MIT OR Apache-2.0): `serde_json-LICENSE-MIT.txt`, `serde_json-LICENSE-APACHE.txt`
-- `anyhow` (MIT OR Apache-2.0): `anyhow-LICENSE-MIT.txt`, `anyhow-LICENSE-APACHE.txt`
-- `clap` (MIT OR Apache-2.0): `clap-LICENSE-MIT.txt`, `clap-LICENSE-APACHE.txt`
-- `once_cell` (MIT OR Apache-2.0): `once_cell-LICENSE-MIT.txt`, `once_cell-LICENSE-APACHE.txt`
-- `regex` (MIT OR Apache-2.0): `regex-LICENSE-MIT.txt`, `regex-LICENSE-APACHE.txt`
-- `walkdir` (Unlicense OR MIT): `walkdir-UNLICENSE.txt`, `walkdir-LICENSE-MIT.txt`, `walkdir-COPYING.txt`
-- `image` (MIT OR Apache-2.0): `image-LICENSE-MIT.txt`, `image-LICENSE-APACHE.txt`
-- `encoding_rs` (Apache-2.0 OR MIT + WHATWG text): `encoding_rs-LICENSE-MIT.txt`, `encoding_rs-LICENSE-APACHE.txt`, `encoding_rs-LICENSE-WHATWG.txt`
-- `pdfium-render` (MIT OR Apache-2.0): `pdfium-render-LICENSE.md`
+### `anyhow`
+
+- Role: error propagation/context in Rust runtime modules.
+- License type: MIT OR Apache-2.0
+- License files:
+  - `anyhow-LICENSE-MIT.txt`
+  - `anyhow-LICENSE-APACHE.txt`
+
+### `clap`
+
+- Role: command-line argument parsing for ENGINE CLI binaries.
+- License type: MIT OR Apache-2.0
+- License files:
+  - `clap-LICENSE-MIT.txt`
+  - `clap-LICENSE-APACHE.txt`
+
+### `once_cell`
+
+- Role: one-time/lazy static initialization in runtime modules.
+- License type: MIT OR Apache-2.0
+- License files:
+  - `once_cell-LICENSE-MIT.txt`
+  - `once_cell-LICENSE-APACHE.txt`
+
+### `regex`
+
+- Role: regular-expression matching used by runtime text processing paths.
+- License type: MIT OR Apache-2.0
+- License files:
+  - `regex-LICENSE-MIT.txt`
+  - `regex-LICENSE-APACHE.txt`
+
+### `walkdir`
+
+- Role: filesystem directory traversal in runtime file-processing paths.
+- License type: Unlicense OR MIT
+- License files:
+  - `walkdir-UNLICENSE.txt`
+  - `walkdir-LICENSE-MIT.txt`
+  - `walkdir-COPYING.txt`
+
+### `image`
+
+- Role: image buffer/format handling in runtime document/VLM processing paths.
+- License type: MIT OR Apache-2.0
+- License files:
+  - `image-LICENSE-MIT.txt`
+  - `image-LICENSE-APACHE.txt`
+
+### `encoding_rs`
+
+- Role: encoding conversion for text handling in runtime paths.
+- License type: Apache-2.0 OR MIT (plus WHATWG text)
+- License files:
+  - `encoding_rs-LICENSE-MIT.txt`
+  - `encoding_rs-LICENSE-APACHE.txt`
+  - `encoding_rs-LICENSE-WHATWG.txt`
+
+### `pdfium-render`
+
+- Role: Rust binding layer to PDFium used by `pdf` and `pdfvlm`.
+- License type: MIT OR Apache-2.0
+- License file:
+  - `pdfium-render-LICENSE.md`
+
+## Rust transitive license export (workspace)
+
+- Full transitive Rust crate export (Windows target, non-dev graph): [`rust-full/`](https://github.com/openresearchtools/engine/tree/main/third_party/licenses/rust-full/)

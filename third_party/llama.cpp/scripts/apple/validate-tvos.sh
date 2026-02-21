@@ -1,5 +1,5 @@
-#!/bin/bash
-# validate-tvos.sh - Validate tvOS Application with embedded whisper.xcframework using SwiftUI
+#!/usr/bin/env bash
+# validate-tvos.sh - Validate tvOS Application with embedded llama.xcframework using SwiftUI
 
 # Authentication options (optional) (can be set via environment variables)
 # To use: export APPLE_ID=your.email@example.com
@@ -69,9 +69,9 @@ ROOT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/../.." && pwd )"
 BUILD_DIR="${ROOT_DIR}/validation-builds/ios"
 
 # Configuration
-APP_NAME="TVOSWhisperTest"
-BUNDLE_ID="org.ggml.TVOSWhisperTest"
-XCFRAMEWORK_PATH="${ROOT_DIR}/build-apple/whisper.xcframework"
+APP_NAME="TVOSLlamaTest"
+BUNDLE_ID="org.ggml.TVOSLlamaTest"
+XCFRAMEWORK_PATH="${ROOT_DIR}/build-apple/llama.xcframework"
 TEMP_DIR="${BUILD_DIR}/temp"
 ARCHIVE_PATH="${BUILD_DIR}/${APP_NAME}.xcarchive"
 IPA_PATH="${BUILD_DIR}/${APP_NAME}.ipa"
@@ -122,10 +122,10 @@ mkdir -p "${TEMP_DIR}/${APP_NAME}/${APP_NAME}/Sources"
 # Create App.swift
 cat > "${TEMP_DIR}/${APP_NAME}/${APP_NAME}/Sources/App.swift" << EOF
 import SwiftUI
-import whisper
+import llama
 
 @main
-struct WhisperTestApp: App {
+struct LlamaTestApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -137,26 +137,29 @@ EOF
 # Create ContentView.swift with tvOS specific elements
 cat > "${TEMP_DIR}/${APP_NAME}/${APP_NAME}/Sources/ContentView.swift" << EOF
 import SwiftUI
-import whisper
+import llama
 
 struct ContentView: View {
-    // Test that we can initialize a whisper context params struct
-    let params = whisper_context_default_params()
+    // Test that we can initialize a llama context params struct
+    let params = llama_context_default_params()
 
     var body: some View {
         VStack(spacing: 40) {
-            Text("Whisper Framework Test on tvOS")
+            Text("Llama Framework Test on tvOS")
                 .font(.largeTitle)
                 .padding()
 
-            Text("whisper_context_default_params() created successfully")
+            Text("llama_context_default_params() created successfully")
                 .font(.headline)
                 .multilineTextAlignment(.center)
                 .padding()
 
             // Display some param values to confirm the framework is working
-            Text("dtw_n_top: \(params.dtw_n_top)")
-                .font(.body)
+            Text("n_ctx: \(params.n_ctx)")
+                .font(.title2)
+
+            Text("n_batch: \(params.n_batch)")
+                .font(.title2)
 
             Spacer()
         }
@@ -186,8 +189,8 @@ cat > "${TEMP_DIR}/${APP_NAME}/${APP_NAME}.xcodeproj/project.pbxproj" << 'EOF'
 /* Begin PBXBuildFile section */
         11111111111111111111111 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22222222222222222222222; };
         33333333333333333333333 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44444444444444444444444; };
-        55555555555555555555555 /* whisper.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 66666666666666666666666; };
-        77777777777777777777777 /* whisper.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 66666666666666666666666; };
+        55555555555555555555555 /* llama.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 66666666666666666666666; };
+        77777777777777777777777 /* llama.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 66666666666666666666666; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -197,7 +200,7 @@ cat > "${TEMP_DIR}/${APP_NAME}/${APP_NAME}.xcodeproj/project.pbxproj" << 'EOF'
             dstPath = "";
             dstSubfolderSpec = 10;
             files = (
-                77777777777777777777777 /* whisper.xcframework in Embed Frameworks */,
+                77777777777777777777777 /* llama.xcframework in Embed Frameworks */,
             );
             name = "Embed Frameworks";
             runOnlyForDeploymentPostprocessing = 0;
@@ -213,7 +216,7 @@ cat >> "${TEMP_DIR}/${APP_NAME}/${APP_NAME}.xcodeproj/project.pbxproj" << EOF
         22222222222222222222222 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
         44444444444444444444444 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
         AAAAAAAAAAAAAAAAAAAAAAA /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-        66666666666666666666666 /* whisper.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = whisper.xcframework; sourceTree = "<group>"; };
+        66666666666666666666666 /* llama.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = llama.xcframework; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 EOF
 
@@ -224,7 +227,7 @@ cat >> "${TEMP_DIR}/${APP_NAME}/${APP_NAME}.xcodeproj/project.pbxproj" << 'EOF'
             isa = PBXFrameworksBuildPhase;
             buildActionMask = 2147483647;
             files = (
-                55555555555555555555555 /* whisper.xcframework in Frameworks */,
+                55555555555555555555555 /* llama.xcframework in Frameworks */,
             );
             runOnlyForDeploymentPostprocessing = 0;
         };
@@ -249,7 +252,7 @@ cat >> "${TEMP_DIR}/${APP_NAME}/${APP_NAME}.xcodeproj/project.pbxproj" << 'EOF'
         DDDDDDDDDDDDDDDDDDDDDDDD /* Frameworks */ = {
             isa = PBXGroup;
             children = (
-                66666666666666666666666 /* whisper.xcframework */,
+                66666666666666666666666 /* llama.xcframework */,
             );
             name = Frameworks;
             sourceTree = "<group>";
@@ -257,19 +260,19 @@ cat >> "${TEMP_DIR}/${APP_NAME}/${APP_NAME}.xcodeproj/project.pbxproj" << 'EOF'
         EEEEEEEEEEEEEEEEEEEEEEEE = {
             isa = PBXGroup;
             children = (
-                FFFFFFFFFFFFFFFFFFFFFFFF /* TVOSWhisperTest */,
+                FFFFFFFFFFFFFFFFFFFFFFFF /* TVOSLlamaTest */,
                 CCCCCCCCCCCCCCCCCCCCCCCC /* Products */,
                 DDDDDDDDDDDDDDDDDDDDDDDD /* Frameworks */,
             );
             sourceTree = "<group>";
         };
-        FFFFFFFFFFFFFFFFFFFFFFFF /* TVOSWhisperTest */ = {
+        FFFFFFFFFFFFFFFFFFFFFFFF /* TVOSLlamaTest */ = {
             isa = PBXGroup;
             children = (
                 1111111111111111111111AA /* Sources */,
                 AAAAAAAAAAAAAAAAAAAAAAA /* Info.plist */,
             );
-            path = "TVOSWhisperTest";
+            path = "TVOSLlamaTest";
             sourceTree = "<group>";
         };
         1111111111111111111111AA /* Sources */ = {
@@ -488,12 +491,12 @@ cat >> "${TEMP_DIR}/${APP_NAME}/${APP_NAME}.xcodeproj/project.pbxproj" << 'EOF'
                 DEVELOPMENT_TEAM = "";
                 ENABLE_PREVIEWS = YES;
                 FRAMEWORK_SEARCH_PATHS = "$(PROJECT_DIR)";
-                INFOPLIST_FILE = "TVOSWhisperTest/Info.plist";
+                INFOPLIST_FILE = "TVOSLlamaTest/Info.plist";
                 LD_RUNPATH_SEARCH_PATHS = (
                     "$(inherited)",
                     "@executable_path/Frameworks",
                 );
-                PRODUCT_BUNDLE_IDENTIFIER = "org.ggml.TVOSWhisperTest";
+                PRODUCT_BUNDLE_IDENTIFIER = "org.ggml.TVOSLlamaTest";
                 PRODUCT_NAME = "$(TARGET_NAME)";
                 PROVISIONING_PROFILE_SPECIFIER = "";
                 SWIFT_VERSION = 5.0;
@@ -513,12 +516,12 @@ cat >> "${TEMP_DIR}/${APP_NAME}/${APP_NAME}.xcodeproj/project.pbxproj" << 'EOF'
                     "$(inherited)",
                     "$(PROJECT_DIR)",
                 );
-                INFOPLIST_FILE = "TVOSWhisperTest/Info.plist";
+                INFOPLIST_FILE = "TVOSLlamaTest/Info.plist";
                 LD_RUNPATH_SEARCH_PATHS = (
                     "$(inherited)",
                     "@executable_path/Frameworks",
                 );
-                PRODUCT_BUNDLE_IDENTIFIER = "org.ggml.TVOSWhisperTest";
+                PRODUCT_BUNDLE_IDENTIFIER = "org.ggml.TVOSLlamaTest";
                 PRODUCT_NAME = "$(TARGET_NAME)";
                 PROVISIONING_PROFILE_SPECIFIER = "";
                 SWIFT_VERSION = 5.0;
@@ -729,19 +732,19 @@ if grep -q "No suitable application records were found" "${VALIDATION_OUTPUT}"; 
     fi
 
     # Check if framework was properly embedded
-    if [ -d "${TEMP_DIR}/Payload/${APP_NAME}.app/Frameworks/whisper.framework" ]; then
-        echo "✅ whisper.framework properly embedded"
+    if [ -d "${TEMP_DIR}/Payload/${APP_NAME}.app/Frameworks/llama.framework" ]; then
+        echo "✅ llama.framework properly embedded"
     else
-        echo "❌ whisper.framework not properly embedded"
+        echo "❌ llama.framework not properly embedded"
         FINAL_VALIDATION_RESULT=1
     fi
 
     # Check if framework binary exists
-    if [ -f "${TEMP_DIR}/Payload/${APP_NAME}.app/Frameworks/whisper.framework/whisper" ]; then
+    if [ -f "${TEMP_DIR}/Payload/${APP_NAME}.app/Frameworks/llama.framework/llama" ]; then
         echo "✅ Framework binary exists"
 
         # Further validate framework by checking architecture
-        ARCHS=$(lipo -info "${TEMP_DIR}/Payload/${APP_NAME}.app/Frameworks/whisper.framework/whisper" 2>/dev/null | grep -o "arm64\\|x86_64" | tr '\n' ' ')
+        ARCHS=$(lipo -info "${TEMP_DIR}/Payload/${APP_NAME}.app/Frameworks/llama.framework/llama" 2>/dev/null | grep -o "arm64\\|x86_64" | tr '\n' ' ')
         if [ -n "$ARCHS" ]; then
             echo "✅ Framework architecture(s): $ARCHS"
         else

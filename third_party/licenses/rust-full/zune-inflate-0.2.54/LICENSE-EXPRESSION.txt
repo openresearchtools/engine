@@ -1,0 +1,7 @@
+Crate: zune-inflate
+Version: 0.2.54
+License expression: MIT OR Apache-2.0 OR Zlib
+Repository: <unknown>
+
+No explicit LICENSE/COPYING/NOTICE file was found in the crate root.
+Use the license expression and upstream repository to confirm obligations.

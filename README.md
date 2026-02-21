@@ -225,6 +225,7 @@ This is a straightforward “speech mode” transcription run (no diarization). 
 ```powershell
 # speech mode, default custom
 engine.exe audio `
+  --model ".\models\model.gguf" `
   --audio-file ".\sample.mp3" `
   --audio-format mp3 `
   --mode speech `
@@ -237,23 +238,25 @@ This produces subtitle-style output, where you can control the window size via `
 ```powershell
 # subtitle mode, 4.5-second windowing via custom
 engine.exe audio `
+  --model ".\models\model.gguf" `
   --audio-file ".\sample.wav" `
   --mode subtitle `
   --custom 4.5 `
   --whisper-model ".\models\whisper.bin"
 ```
 
-This generates a speaker-aware transcript by enabling diarization. With `--custom auto`, the system estimates speaker count, and `--diarization-device` lets you choose where diarization runs (for example, Vulkan).
+This generates a speaker-aware transcript by enabling diarization. With `--custom auto`, the system estimates speaker count, and `--diarization-device` lets you choose where diarization runs (for example, CUDA, Vulkan, or auto).
 
 ```powershell
 # transcript mode, auto speaker count, local diarization models
 engine.exe audio `
+  --model ".\models\model.gguf" `
   --audio-file ".\meeting.mp3" `
   --mode transcript `
   --custom auto `
   --whisper-model ".\models\whisper.bin" `
   --diarization-models-dir ".\models\diarization" `
-  --diarization-device vulkan
+  --diarization-device auto
 ```
 
 **Offline note:** if you want to run diarization fully offline with `--diarization-models-dir`, download *all required diarization model files* into that single folder (and keep the directory contents intact). The runtime expects everything it needs to be present locally in that directory.
@@ -263,11 +266,12 @@ This example also runs a diarized transcript, but forces a fixed speaker count (
 ```powershell
 # transcript mode, fixed 3 speakers, diarization from HF
 engine.exe audio `
+  --model ".\models\model.gguf" `
   --audio-file ".\meeting.mp3" `
   --mode transcript `
   --custom 3 `
   --whisper-hf-repo ggerganov/whisper.cpp `
-  --whisper-hf-file your-whisper-hf-file.bin `
+  --whisper-hf-file ggml-tiny.en.bin `
   --diarization-hf-repo openresearchtools/speaker-diarization-community-1-GGUF `
   --diarization-device cuda
 ```
@@ -276,7 +280,7 @@ If you need finer diarization tuning (for example segmentation thresholds), pass
 
 ```powershell
 # advanced diarization knobs via body JSON
-engine.exe audio --body-json ".\audio_request.json"
+engine.exe audio --model ".\models\model.gguf" --body-json ".\audio_request.json"
 ```
 
 ---
@@ -292,7 +296,7 @@ Fast digital PDF conversion:
 
 ```powershell
 # Fast digital PDF conversion
-engine.exe pdf extract --input ".\paper.pdf" --output ".\paper_fast.md"
+engine.exe pdf extract --input ".\paper.pdf" --output ".\paper_fast.md" --overwrite
 ```
 
 VLM PDF conversion (PDF → render → VLM → Markdown). Choose the option that matches how you ship `pdfium.dll`:
@@ -333,7 +337,7 @@ We have **no affiliation with the Qwen team**. This is simply a personal observa
 
 ## Embeddings
 
-The CLI supports OpenAI-style request bodies via `--body-json`, either as an inline JSON string or as a path to a JSON file. Use `--out` if you want to write the response to disk.
+The CLI supports OpenAI-style request bodies via `--body-json`. In PowerShell, using a JSON file path is the most reliable form. Use `--out` if you want to write the response to disk.
 
 Batched embeddings from a file (separate vectors per input row):
 
@@ -357,19 +361,22 @@ engine.exe embed `
   --n-gpu-layers -1
 ```
 
-Batched embeddings with inline JSON (useful for quick tests):
+Batched embeddings quick test:
 
 ```powershell
+'{"input":["a","b","c"],"encoding_format":"float"}' | Set-Content .\embed_inline.json
+
 engine.exe embed `
   --model ".\models\embedding.gguf" `
-  --body-json '{"input":["a","b","c"],"encoding_format":"float"}'
+  --body-json ".\embed_inline.json" `
+  --out ".\embed_inline_response.json"
 ```
 
 ---
 
 ## Reranking
 
-Reranking follows the same pattern: pass a request body via `--body-json` (inline or file), and optionally write results via `--out`.
+Reranking follows the same pattern: pass a request body via `--body-json` (file path recommended in PowerShell), and optionally write results via `--out`.
 
 Rerank from a file:
 
@@ -394,20 +401,26 @@ engine.exe rerank `
   --n-gpu-layers -1
 ```
 
-Rerank with inline JSON:
+Rerank quick test:
 
 ```powershell
+'{"query":"table extraction quality","documents":["doc1","doc2","doc3"],"top_n":2}' | Set-Content .\rerank_inline.json
+
 engine.exe rerank `
   --model ".\models\reranker.gguf" `
-  --body-json '{"query":"table extraction quality","documents":["doc1","doc2","doc3"],"top_n":2}'
+  --body-json ".\rerank_inline.json" `
+  --out ".\rerank_inline_response.json"
 ```
 
-Another inline example (same shape, different query/documents):
+Another example (same shape, different query/documents):
 
 ```powershell
+'{"query":"find adverse effects","documents":["row A text","row B text","row C text"],"top_n":3}' | Set-Content .\rerank_inline_2.json
+
 engine.exe rerank `
   --model ".\models\reranker.gguf" `
-  --body-json '{"query":"find adverse effects","documents":["row A text","row B text","row C text"],"top_n":3}' `
+  --body-json ".\rerank_inline_2.json" `
+  --out ".\rerank_inline_2_response.json" `
   --devices 0 `
   --n-gpu-layers -1
 ```
@@ -417,7 +430,7 @@ With multi-GPU split:
 ```powershell
 engine.exe rerank `
   --model ".\models\reranker.gguf" `
-  --body-json '{"query":"find adverse effects","documents":["row A text","row B text","row C text"],"top_n":3}' `
+  --body-json ".\rerank_inline_2.json" `
   --devices 0,1 `
   --split-mode layer `
   --tensor-split 0.6,0.4 `

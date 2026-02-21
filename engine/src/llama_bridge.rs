@@ -583,6 +583,7 @@ fn run_vlm(args: &[String]) -> Result<(), String> {
 
 fn run_audio(args: &[String]) -> Result<(), String> {
     let model = arg_value(args, "--model").unwrap_or_default();
+    let audio_only_mode = model.trim().is_empty();
     let out_path = arg_value(args, "--out");
     let devices = arg_value(args, "--devices");
     let tensor_split = arg_value(args, "--tensor-split");
@@ -711,7 +712,18 @@ fn run_audio(args: &[String]) -> Result<(), String> {
     );
 
     let t_load = Instant::now();
-    let bridge = make_bridge(
+    // Audio-only runs do not require a text model path; enable bridge audio-only mode
+    // for this process when --model is omitted.
+    let prev_audio_only_env = if audio_only_mode {
+        env::var("LLAMA_SERVER_AUDIO_ONLY").ok()
+    } else {
+        None
+    };
+    if audio_only_mode {
+        env::set_var("LLAMA_SERVER_AUDIO_ONLY", "1");
+    }
+
+    let bridge_res = make_bridge(
         &model,
         None,
         devices.as_deref(),
@@ -725,7 +737,17 @@ fn run_audio(args: &[String]) -> Result<(), String> {
         main_gpu,
         false,
         false,
-    )?;
+    );
+
+    if audio_only_mode {
+        if let Some(v) = prev_audio_only_env {
+            env::set_var("LLAMA_SERVER_AUDIO_ONLY", v);
+        } else {
+            env::remove_var("LLAMA_SERVER_AUDIO_ONLY");
+        }
+    }
+
+    let bridge = bridge_res?;
     let load_ms = t_load.elapsed().as_secs_f64() * 1000.0;
 
     let mut out = unsafe { llama_server_bridge_empty_json_result() };
@@ -954,7 +976,7 @@ fn run_embed(args: &[String]) -> Result<(), String> {
     let chunk_words = parse_usize_arg(args, "--chunk-words", 500)?;
     let batches = parse_usize_arg(args, "--batches", 8)?;
 
-    let n_ctx = parse_i32_arg(args, "--n-ctx", 32768)?;
+    let n_ctx = parse_i32_arg(args, "--n-ctx", 8192)?;
     let n_batch = parse_i32_arg(args, "--n-batch", 2048)?;
     let n_ubatch = parse_i32_arg(args, "--n-ubatch", 2048)?;
     let n_parallel = parse_i32_arg(args, "--n-parallel", 1)?;
@@ -1157,7 +1179,7 @@ fn run_rerank(args: &[String]) -> Result<(), String> {
     let chunk_words = parse_usize_arg(args, "--chunk-words", 500)?;
     let batches = parse_usize_arg(args, "--batches", 8)?;
 
-    let n_ctx = parse_i32_arg(args, "--n-ctx", 32768)?;
+    let n_ctx = parse_i32_arg(args, "--n-ctx", 8192)?;
     let n_batch = parse_i32_arg(args, "--n-batch", 2048)?;
     let n_ubatch = parse_i32_arg(args, "--n-ubatch", 2048)?;
     let n_parallel = parse_i32_arg(args, "--n-parallel", 1)?;

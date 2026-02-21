@@ -10,6 +10,6 @@ crate-type = ["rlib", "cdylib"]
 anyhow = "1.0.98"
 clap = { version = "4.5.31", features = ["derive"] }
 once_cell = "1.21.0"
-pdfium-render = { path = "../../pdfium-render", default-features = false, features = ["pdfium_latest", "thread_safe"] }
+pdfium-render = { version = "0.8.37", default-features = false, features = ["pdfium_latest", "thread_safe", "image"] }
 regex = "1.11.1"
 walkdir = "2.5.0"

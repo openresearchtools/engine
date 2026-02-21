@@ -1,731 +1,549 @@
-# whisper.cpp
+# llama.cpp
 
-![whisper.cpp](https://user-images.githubusercontent.com/1991296/235238348-05d0f6a4-da44-4900-a1de-d0707e75b763.jpeg)
+![llama](https://user-images.githubusercontent.com/1991296/230134379-7181e485-c521-4d23-a0d6-f7b3b61ba524.png)
 
-[![Actions Status](https://github.com/ggml-org/whisper.cpp/workflows/CI/badge.svg)](https://github.com/ggml-org/whisper.cpp/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Conan Center](https://shields.io/conan/v/whisper-cpp)](https://conan.io/center/whisper-cpp)
-[![npm](https://img.shields.io/npm/v/whisper.cpp.svg)](https://www.npmjs.com/package/whisper.cpp/)
+[![Release](https://img.shields.io/github/v/release/ggml-org/llama.cpp)](https://github.com/ggml-org/llama.cpp/releases)
+[![Server](https://github.com/ggml-org/llama.cpp/actions/workflows/server.yml/badge.svg)](https://github.com/ggml-org/llama.cpp/actions/workflows/server.yml)
 
-Stable: [v1.8.1](https://github.com/ggml-org/whisper.cpp/releases/tag/v1.8.1) / [Roadmap](https://github.com/orgs/ggml-org/projects/4/)
+[Manifesto](https://github.com/ggml-org/llama.cpp/discussions/205) / [ggml](https://github.com/ggml-org/ggml) / [ops](https://github.com/ggml-org/llama.cpp/blob/master/docs/ops.md)
 
-High-performance inference of [OpenAI's Whisper](https://github.com/openai/whisper) automatic speech recognition (ASR) model:
+LLM inference in C/C++
 
-- Plain C/C++ implementation without dependencies
-- Apple Silicon first-class citizen - optimized via ARM NEON, Accelerate framework, Metal and [Core ML](#core-ml-support)
-- AVX intrinsics support for x86 architectures
-- [VSX intrinsics support for POWER architectures](#power-vsx-intrinsics)
-- Mixed F16 / F32 precision
-- [Integer quantization support](#quantization)
-- Zero memory allocations at runtime
-- [Vulkan support](#vulkan-gpu-support)
-- Support for CPU-only inference
-- [Efficient GPU support for NVIDIA](#nvidia-gpu-support)
-- [OpenVINO Support](#openvino-support)
-- [Ascend NPU Support](#ascend-npu-support)
-- [Moore Threads GPU Support](#moore-threads-gpu-support)
-- [C-style API](https://github.com/ggml-org/whisper.cpp/blob/master/include/whisper.h)
-- [Voice Activity Detection (VAD)](#voice-activity-detection-vad)
+## Recent API changes
 
-Supported platforms:
+- [Changelog for `libllama` API](https://github.com/ggml-org/llama.cpp/issues/9289)
+- [Changelog for `llama-server` REST API](https://github.com/ggml-org/llama.cpp/issues/9291)
 
-- [x] Mac OS (Intel and Arm)
-- [x] [iOS](examples/whisper.objc)
-- [x] [Android](examples/whisper.android)
-- [x] [Java](bindings/java/README.md)
-- [x] Linux / [FreeBSD](https://github.com/ggml-org/whisper.cpp/issues/56#issuecomment-1350920264)
-- [x] [WebAssembly](examples/whisper.wasm)
-- [x] Windows ([MSVC](https://github.com/ggml-org/whisper.cpp/blob/master/.github/workflows/build.yml#L117-L144) and [MinGW](https://github.com/ggml-org/whisper.cpp/issues/168))
-- [x] [Raspberry Pi](https://github.com/ggml-org/whisper.cpp/discussions/166)
-- [x] [Docker](https://github.com/ggml-org/whisper.cpp/pkgs/container/whisper.cpp)
+## Hot topics
 
-The entire high-level implementation of the model is contained in [whisper.h](include/whisper.h) and [whisper.cpp](src/whisper.cpp).
-The rest of the code is part of the [`ggml`](https://github.com/ggml-org/ggml) machine learning library.
+- **[guide : using the new WebUI of llama.cpp](https://github.com/ggml-org/llama.cpp/discussions/16938)**
+- [guide : running gpt-oss with llama.cpp](https://github.com/ggml-org/llama.cpp/discussions/15396)
+- [[FEEDBACK] Better packaging for llama.cpp to support downstream consumers 🤗](https://github.com/ggml-org/llama.cpp/discussions/15313)
+- Support for the `gpt-oss` model with native MXFP4 format has been added | [PR](https://github.com/ggml-org/llama.cpp/pull/15091) | [Collaboration with NVIDIA](https://blogs.nvidia.com/blog/rtx-ai-garage-openai-oss) | [Comment](https://github.com/ggml-org/llama.cpp/discussions/15095)
+- Multimodal support arrived in `llama-server`: [#12898](https://github.com/ggml-org/llama.cpp/pull/12898) | [documentation](./docs/multimodal.md)
+- VS Code extension for FIM completions: https://github.com/ggml-org/llama.vscode
+- Vim/Neovim plugin for FIM completions: https://github.com/ggml-org/llama.vim
+- Hugging Face Inference Endpoints now support GGUF out of the box! https://github.com/ggml-org/llama.cpp/discussions/9669
+- Hugging Face GGUF editor: [discussion](https://github.com/ggml-org/llama.cpp/discussions/9268) | [tool](https://huggingface.co/spaces/CISCai/gguf-editor)
 
-Having such a lightweight implementation of the model allows to easily integrate it in different platforms and applications.
-As an example, here is a video of running the model on an iPhone 13 device - fully offline, on-device: [whisper.objc](examples/whisper.objc)
-
-https://user-images.githubusercontent.com/1991296/197385372-962a6dea-bca1-4d50-bf96-1d8c27b98c81.mp4
-
-You can also easily make your own offline voice assistant application: [command](examples/command)
-
-https://user-images.githubusercontent.com/1991296/204038393-2f846eae-c255-4099-a76d-5735c25c49da.mp4
-
-On Apple Silicon, the inference runs fully on the GPU via Metal:
-
-https://github.com/ggml-org/whisper.cpp/assets/1991296/c82e8f86-60dc-49f2-b048-d2fdbd6b5225
+----
 
 ## Quick start
 
-First clone the repository:
+Getting started with llama.cpp is straightforward. Here are several ways to install it on your machine:
 
-```bash
-git clone https://github.com/ggml-org/whisper.cpp.git
+- Install `llama.cpp` using [brew, nix or winget](docs/install.md)
+- Run with Docker - see our [Docker documentation](docs/docker.md)
+- Download pre-built binaries from the [releases page](https://github.com/ggml-org/llama.cpp/releases)
+- Build from source by cloning this repository - check out [our build guide](docs/build.md)
+
+Once installed, you'll need a model to work with. Head to the [Obtaining and quantizing models](#obtaining-and-quantizing-models) section to learn more.
+
+Example command:
+
+```sh
+# Use a local model file
+llama-cli -m my_model.gguf
+
+# Or download and run a model directly from Hugging Face
+llama-cli -hf ggml-org/gemma-3-1b-it-GGUF
+
+# Launch OpenAI-compatible API server
+llama-server -hf ggml-org/gemma-3-1b-it-GGUF
 ```
 
-Navigate into the directory:
-
-```
-cd whisper.cpp
-```
-
-Then, download one of the Whisper [models](models/README.md) converted in [`ggml` format](#ggml-format). For example:
-
-```bash
-sh ./models/download-ggml-model.sh base.en
-```
-
-Now build the [whisper-cli](examples/cli) example and transcribe an audio file like this:
-
-```bash
-# build the project
-cmake -B build
-cmake --build build -j --config Release
-
-# transcribe an audio file
-./build/bin/whisper-cli -f samples/jfk.wav
-```
-
----
-
-For a quick demo, simply run `make base.en`.
-
-The command downloads the `base.en` model converted to custom `ggml` format and runs the inference on all `.wav` samples in the folder `samples`.
-
-For detailed usage instructions, run: `./build/bin/whisper-cli -h`
-
-Note that the [whisper-cli](examples/cli) example currently runs only with 16-bit WAV files, so make sure to convert your input before running the tool.
-For example, you can use `ffmpeg` like this:
-
-```bash
-ffmpeg -i input.mp3 -ar 16000 -ac 1 -c:a pcm_s16le output.wav
-```
-
-## More audio samples
-
-If you want some extra audio samples to play with, simply run:
-
-```
-make -j samples
-```
-
-This will download a few more audio files from Wikipedia and convert them to 16-bit WAV format via `ffmpeg`.
-
-You can download and run the other models as follows:
-
-```
-make -j tiny.en
-make -j tiny
-make -j base.en
-make -j base
-make -j small.en
-make -j small
-make -j medium.en
-make -j medium
-make -j large-v1
-make -j large-v2
-make -j large-v3
-make -j large-v3-turbo
-```
-
-## Memory usage
-
-| Model  | Disk    | Mem     |
-| ------ | ------- | ------- |
-| tiny   | 75 MiB  | ~273 MB |
-| base   | 142 MiB | ~388 MB |
-| small  | 466 MiB | ~852 MB |
-| medium | 1.5 GiB | ~2.1 GB |
-| large  | 2.9 GiB | ~3.9 GB |
-
-## POWER VSX Intrinsics
-
-`whisper.cpp` supports POWER architectures and includes code which
-significantly speeds operation on Linux running on POWER9/10, making it
-capable of faster-than-realtime transcription on underclocked Raptor
-Talos II. Ensure you have a BLAS package installed, and replace the
-standard cmake setup with:
-
-```bash
-# build with GGML_BLAS defined
-cmake -B build -DGGML_BLAS=1
-cmake --build build -j --config Release
-./build/bin/whisper-cli [ .. etc .. ]
-```
-
-## Quantization
-
-`whisper.cpp` supports integer quantization of the Whisper `ggml` models.
-Quantized models require less memory and disk space and depending on the hardware can be processed more efficiently.
-
-Here are the steps for creating and using a quantized model:
-
-```bash
-# quantize a model with Q5_0 method
-cmake -B build
-cmake --build build -j --config Release
-./build/bin/quantize models/ggml-base.en.bin models/ggml-base.en-q5_0.bin q5_0
-
-# run the examples as usual, specifying the quantized model file
-./build/bin/whisper-cli -m models/ggml-base.en-q5_0.bin ./samples/gb0.wav
-```
-
-## Core ML support
-
-On Apple Silicon devices, the Encoder inference can be executed on the Apple Neural Engine (ANE) via Core ML. This can result in significant
-speed-up - more than x3 faster compared with CPU-only execution. Here are the instructions for generating a Core ML model and using it with `whisper.cpp`:
-
-- Install Python dependencies needed for the creation of the Core ML model:
-
-  ```bash
-  pip install ane_transformers
-  pip install openai-whisper
-  pip install coremltools
-  ```
-
-  - To ensure `coremltools` operates correctly, please confirm that [Xcode](https://developer.apple.com/xcode/) is installed and execute `xcode-select --install` to install the command-line tools.
-  - Python 3.11 is recommended.
-  - MacOS Sonoma (version 14) or newer is recommended, as older versions of MacOS might experience issues with transcription hallucination.
-  - [OPTIONAL] It is recommended to utilize a Python version management system, such as [Miniconda](https://docs.conda.io/en/latest/miniconda.html) for this step:
-    - To create an environment, use: `conda create -n py311-whisper python=3.11 -y`
-    - To activate the environment, use: `conda activate py311-whisper`
-
-- Generate a Core ML model. For example, to generate a `base.en` model, use:
-
-  ```bash
-  ./models/generate-coreml-model.sh base.en
-  ```
-
-  This will generate the folder `models/ggml-base.en-encoder.mlmodelc`
-
-- Build `whisper.cpp` with Core ML support:
-
-  ```bash
-  # using CMake
-  cmake -B build -DWHISPER_COREML=1
-  cmake --build build -j --config Release
-  ```
-
-- Run the examples as usual. For example:
-
-  ```text
-  $ ./build/bin/whisper-cli -m models/ggml-base.en.bin -f samples/jfk.wav
-
-  ...
-
-  whisper_init_state: loading Core ML model from 'models/ggml-base.en-encoder.mlmodelc'
-  whisper_init_state: first run on a device may take a while ...
-  whisper_init_state: Core ML model loaded
-
-  system_info: n_threads = 4 / 10 | AVX = 0 | AVX2 = 0 | AVX512 = 0 | FMA = 0 | NEON = 1 | ARM_FMA = 1 | F16C = 0 | FP16_VA = 1 | WASM_SIMD = 0 | BLAS = 1 | SSE3 = 0 | VSX = 0 | COREML = 1 |
-
-  ...
-  ```
-
-  The first run on a device is slow, since the ANE service compiles the Core ML model to some device-specific format.
-  Next runs are faster.
-
-For more information about the Core ML implementation please refer to PR [#566](https://github.com/ggml-org/whisper.cpp/pull/566).
-
-## OpenVINO support
-
-On platforms that support [OpenVINO](https://github.com/openvinotoolkit/openvino), the Encoder inference can be executed
-on OpenVINO-supported devices including x86 CPUs and Intel GPUs (integrated & discrete).
-
-This can result in significant speedup in encoder performance. Here are the instructions for generating the OpenVINO model and using it with `whisper.cpp`:
-
-- First, setup python virtual env. and install python dependencies. Python 3.10 is recommended.
-
-  Windows:
-
-  ```powershell
-  cd models
-  python -m venv openvino_conv_env
-  openvino_conv_env\Scripts\activate
-  python -m pip install --upgrade pip
-  pip install -r requirements-openvino.txt
-  ```
-
-  Linux and macOS:
-
-  ```bash
-  cd models
-  python3 -m venv openvino_conv_env
-  source openvino_conv_env/bin/activate
-  python -m pip install --upgrade pip
-  pip install -r requirements-openvino.txt
-  ```
-
-- Generate an OpenVINO encoder model. For example, to generate a `base.en` model, use:
-
-  ```
-  python convert-whisper-to-openvino.py --model base.en
-  ```
-
-  This will produce ggml-base.en-encoder-openvino.xml/.bin IR model files. It's recommended to relocate these to the same folder as `ggml` models, as that
-  is the default location that the OpenVINO extension will search at runtime.
-
-- Build `whisper.cpp` with OpenVINO support:
-
-  Download OpenVINO package from [release page](https://github.com/openvinotoolkit/openvino/releases). The recommended version to use is [2024.6.0](https://github.com/openvinotoolkit/openvino/releases/tag/2024.6.0). Ready to use Binaries of the required libraries can be found in the [OpenVino Archives](https://storage.openvinotoolkit.org/repositories/openvino/packages/2024.6/)
-
-  After downloading & extracting package onto your development system, set up required environment by sourcing setupvars script. For example:
-
-  Linux:
-
-  ```bash
-  source /path/to/l_openvino_toolkit_ubuntu22_2023.0.0.10926.b4452d56304_x86_64/setupvars.sh
-  ```
-
-  Windows (cmd):
-
-  ```powershell
-  C:\Path\To\w_openvino_toolkit_windows_2023.0.0.10926.b4452d56304_x86_64\setupvars.bat
-  ```
-
-  And then build the project using cmake:
-
-  ```bash
-  cmake -B build -DWHISPER_OPENVINO=1
-  cmake --build build -j --config Release
-  ```
-
-- Run the examples as usual. For example:
-
-  ```text
-  $ ./build/bin/whisper-cli -m models/ggml-base.en.bin -f samples/jfk.wav
-
-  ...
-
-  whisper_ctx_init_openvino_encoder: loading OpenVINO model from 'models/ggml-base.en-encoder-openvino.xml'
-  whisper_ctx_init_openvino_encoder: first run on a device may take a while ...
-  whisper_openvino_init: path_model = models/ggml-base.en-encoder-openvino.xml, device = GPU, cache_dir = models/ggml-base.en-encoder-openvino-cache
-  whisper_ctx_init_openvino_encoder: OpenVINO model loaded
-
-  system_info: n_threads = 4 / 8 | AVX = 1 | AVX2 = 1 | AVX512 = 0 | FMA = 1 | NEON = 0 | ARM_FMA = 0 | F16C = 1 | FP16_VA = 0 | WASM_SIMD = 0 | BLAS = 0 | SSE3 = 1 | VSX = 0 | COREML = 0 | OPENVINO = 1 |
-
-  ...
-  ```
-
-  The first time run on an OpenVINO device is slow, since the OpenVINO framework will compile the IR (Intermediate Representation) model to a device-specific 'blob'. This device-specific blob will get
-  cached for the next run.
-
-For more information about the OpenVINO implementation please refer to PR [#1037](https://github.com/ggml-org/whisper.cpp/pull/1037).
-
-## NVIDIA GPU support
-
-With NVIDIA cards the processing of the models is done efficiently on the GPU via cuBLAS and custom CUDA kernels.
-First, make sure you have installed `cuda`: https://developer.nvidia.com/cuda-downloads
-
-Now build `whisper.cpp` with CUDA support:
-
-```
-cmake -B build -DGGML_CUDA=1
-cmake --build build -j --config Release
+## Description
+
+The main goal of `llama.cpp` is to enable LLM inference with minimal setup and state-of-the-art performance on a wide
+range of hardware - locally and in the cloud.
+
+- Plain C/C++ implementation without any dependencies
+- Apple silicon is a first-class citizen - optimized via ARM NEON, Accelerate and Metal frameworks
+- AVX, AVX2, AVX512 and AMX support for x86 architectures
+- RVV, ZVFH, ZFH, ZICBOP and ZIHINTPAUSE support for RISC-V architectures
+- 1.5-bit, 2-bit, 3-bit, 4-bit, 5-bit, 6-bit, and 8-bit integer quantization for faster inference and reduced memory use
+- Custom CUDA kernels for running LLMs on NVIDIA GPUs (support for AMD GPUs via HIP and Moore Threads GPUs via MUSA)
+- Vulkan and SYCL backend support
+- CPU+GPU hybrid inference to partially accelerate models larger than the total VRAM capacity
+
+The `llama.cpp` project is the main playground for developing new features for the [ggml](https://github.com/ggml-org/ggml) library.
+
+<details>
+<summary>Models</summary>
+
+Typically finetunes of the base models below are supported as well.
+
+Instructions for adding support for new models: [HOWTO-add-model.md](docs/development/HOWTO-add-model.md)
+
+#### Text-only
+
+- [X] LLaMA 🦙
+- [x] LLaMA 2 🦙🦙
+- [x] LLaMA 3 🦙🦙🦙
+- [X] [Mistral 7B](https://huggingface.co/mistralai/Mistral-7B-v0.1)
+- [x] [Mixtral MoE](https://huggingface.co/models?search=mistral-ai/Mixtral)
+- [x] [DBRX](https://huggingface.co/databricks/dbrx-instruct)
+- [x] [Jamba](https://huggingface.co/ai21labs)
+- [X] [Falcon](https://huggingface.co/models?search=tiiuae/falcon)
+- [X] [Chinese LLaMA / Alpaca](https://github.com/ymcui/Chinese-LLaMA-Alpaca) and [Chinese LLaMA-2 / Alpaca-2](https://github.com/ymcui/Chinese-LLaMA-Alpaca-2)
+- [X] [Vigogne (French)](https://github.com/bofenghuang/vigogne)
+- [X] [BERT](https://github.com/ggml-org/llama.cpp/pull/5423)
+- [X] [Koala](https://bair.berkeley.edu/blog/2023/04/03/koala/)
+- [X] [Baichuan 1 & 2](https://huggingface.co/models?search=baichuan-inc/Baichuan) + [derivations](https://huggingface.co/hiyouga/baichuan-7b-sft)
+- [X] [Aquila 1 & 2](https://huggingface.co/models?search=BAAI/Aquila)
+- [X] [Starcoder models](https://github.com/ggml-org/llama.cpp/pull/3187)
+- [X] [Refact](https://huggingface.co/smallcloudai/Refact-1_6B-fim)
+- [X] [MPT](https://github.com/ggml-org/llama.cpp/pull/3417)
+- [X] [Bloom](https://github.com/ggml-org/llama.cpp/pull/3553)
+- [x] [Yi models](https://huggingface.co/models?search=01-ai/Yi)
+- [X] [StableLM models](https://huggingface.co/stabilityai)
+- [x] [Deepseek models](https://huggingface.co/models?search=deepseek-ai/deepseek)
+- [x] [Qwen models](https://huggingface.co/models?search=Qwen/Qwen)
+- [x] [PLaMo-13B](https://github.com/ggml-org/llama.cpp/pull/3557)
+- [x] [Phi models](https://huggingface.co/models?search=microsoft/phi)
+- [x] [PhiMoE](https://github.com/ggml-org/llama.cpp/pull/11003)
+- [x] [GPT-2](https://huggingface.co/gpt2)
+- [x] [Orion 14B](https://github.com/ggml-org/llama.cpp/pull/5118)
+- [x] [InternLM2](https://huggingface.co/models?search=internlm2)
+- [x] [CodeShell](https://github.com/WisdomShell/codeshell)
+- [x] [Gemma](https://ai.google.dev/gemma)
+- [x] [Mamba](https://github.com/state-spaces/mamba)
+- [x] [Grok-1](https://huggingface.co/keyfan/grok-1-hf)
+- [x] [Xverse](https://huggingface.co/models?search=xverse)
+- [x] [Command-R models](https://huggingface.co/models?search=CohereForAI/c4ai-command-r)
+- [x] [SEA-LION](https://huggingface.co/models?search=sea-lion)
+- [x] [GritLM-7B](https://huggingface.co/GritLM/GritLM-7B) + [GritLM-8x7B](https://huggingface.co/GritLM/GritLM-8x7B)
+- [x] [OLMo](https://allenai.org/olmo)
+- [x] [OLMo 2](https://allenai.org/olmo)
+- [x] [OLMoE](https://huggingface.co/allenai/OLMoE-1B-7B-0924)
+- [x] [Granite models](https://huggingface.co/collections/ibm-granite/granite-code-models-6624c5cec322e4c148c8b330)
+- [x] [GPT-NeoX](https://github.com/EleutherAI/gpt-neox) + [Pythia](https://github.com/EleutherAI/pythia)
+- [x] [Snowflake-Arctic MoE](https://huggingface.co/collections/Snowflake/arctic-66290090abe542894a5ac520)
+- [x] [Smaug](https://huggingface.co/models?search=Smaug)
+- [x] [Poro 34B](https://huggingface.co/LumiOpen/Poro-34B)
+- [x] [Bitnet b1.58 models](https://huggingface.co/1bitLLM)
+- [x] [Flan T5](https://huggingface.co/models?search=flan-t5)
+- [x] [Open Elm models](https://huggingface.co/collections/apple/openelm-instruct-models-6619ad295d7ae9f868b759ca)
+- [x] [ChatGLM3-6b](https://huggingface.co/THUDM/chatglm3-6b) + [ChatGLM4-9b](https://huggingface.co/THUDM/glm-4-9b) + [GLMEdge-1.5b](https://huggingface.co/THUDM/glm-edge-1.5b-chat) + [GLMEdge-4b](https://huggingface.co/THUDM/glm-edge-4b-chat)
+- [x] [GLM-4-0414](https://huggingface.co/collections/THUDM/glm-4-0414-67f3cbcb34dd9d252707cb2e)
+- [x] [SmolLM](https://huggingface.co/collections/HuggingFaceTB/smollm-6695016cad7167254ce15966)
+- [x] [EXAONE-3.0-7.8B-Instruct](https://huggingface.co/LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct)
+- [x] [FalconMamba Models](https://huggingface.co/collections/tiiuae/falconmamba-7b-66b9a580324dd1598b0f6d4a)
+- [x] [Jais](https://huggingface.co/inceptionai/jais-13b-chat)
+- [x] [Bielik-11B-v2.3](https://huggingface.co/collections/speakleash/bielik-11b-v23-66ee813238d9b526a072408a)
+- [x] [RWKV-7](https://huggingface.co/collections/shoumenchougou/rwkv7-gxx-gguf)
+- [x] [RWKV-6](https://github.com/BlinkDL/RWKV-LM)
+- [x] [QRWKV-6](https://huggingface.co/recursal/QRWKV6-32B-Instruct-Preview-v0.1)
+- [x] [GigaChat-20B-A3B](https://huggingface.co/ai-sage/GigaChat-20B-A3B-instruct)
+- [X] [Trillion-7B-preview](https://huggingface.co/trillionlabs/Trillion-7B-preview)
+- [x] [Ling models](https://huggingface.co/collections/inclusionAI/ling-67c51c85b34a7ea0aba94c32)
+- [x] [LFM2 models](https://huggingface.co/collections/LiquidAI/lfm2-686d721927015b2ad73eaa38)
+- [x] [Hunyuan models](https://huggingface.co/collections/tencent/hunyuan-dense-model-6890632cda26b19119c9c5e7)
+- [x] [BailingMoeV2 (Ring/Ling 2.0) models](https://huggingface.co/collections/inclusionAI/ling-v2-68bf1dd2fc34c306c1fa6f86)
+
+#### Multimodal
+
+- [x] [LLaVA 1.5 models](https://huggingface.co/collections/liuhaotian/llava-15-653aac15d994e992e2677a7e), [LLaVA 1.6 models](https://huggingface.co/collections/liuhaotian/llava-16-65b9e40155f60fd046a5ccf2)
+- [x] [BakLLaVA](https://huggingface.co/models?search=SkunkworksAI/Bakllava)
+- [x] [Obsidian](https://huggingface.co/NousResearch/Obsidian-3B-V0.5)
+- [x] [ShareGPT4V](https://huggingface.co/models?search=Lin-Chen/ShareGPT4V)
+- [x] [MobileVLM 1.7B/3B models](https://huggingface.co/models?search=mobileVLM)
+- [x] [Yi-VL](https://huggingface.co/models?search=Yi-VL)
+- [x] [Mini CPM](https://huggingface.co/models?search=MiniCPM)
+- [x] [Moondream](https://huggingface.co/vikhyatk/moondream2)
+- [x] [Bunny](https://github.com/BAAI-DCAI/Bunny)
+- [x] [GLM-EDGE](https://huggingface.co/models?search=glm-edge)
+- [x] [Qwen2-VL](https://huggingface.co/collections/Qwen/qwen2-vl-66cee7455501d7126940800d)
+- [x] [LFM2-VL](https://huggingface.co/collections/LiquidAI/lfm2-vl-68963bbc84a610f7638d5ffa)
+
+</details>
+
+<details>
+<summary>Bindings</summary>
+
+- Python: [ddh0/easy-llama](https://github.com/ddh0/easy-llama)
+- Python: [abetlen/llama-cpp-python](https://github.com/abetlen/llama-cpp-python)
+- Go: [go-skynet/go-llama.cpp](https://github.com/go-skynet/go-llama.cpp)
+- Node.js: [withcatai/node-llama-cpp](https://github.com/withcatai/node-llama-cpp)
+- JS/TS (llama.cpp server client): [lgrammel/modelfusion](https://modelfusion.dev/integration/model-provider/llamacpp)
+- JS/TS (Programmable Prompt Engine CLI): [offline-ai/cli](https://github.com/offline-ai/cli)
+- JavaScript/Wasm (works in browser): [tangledgroup/llama-cpp-wasm](https://github.com/tangledgroup/llama-cpp-wasm)
+- Typescript/Wasm (nicer API, available on npm): [ngxson/wllama](https://github.com/ngxson/wllama)
+- Ruby: [yoshoku/llama_cpp.rb](https://github.com/yoshoku/llama_cpp.rb)
+- Rust (more features): [edgenai/llama_cpp-rs](https://github.com/edgenai/llama_cpp-rs)
+- Rust (nicer API): [mdrokz/rust-llama.cpp](https://github.com/mdrokz/rust-llama.cpp)
+- Rust (more direct bindings): [utilityai/llama-cpp-rs](https://github.com/utilityai/llama-cpp-rs)
+- Rust (automated build from crates.io): [ShelbyJenkins/llm_client](https://github.com/ShelbyJenkins/llm_client)
+- C#/.NET: [SciSharp/LLamaSharp](https://github.com/SciSharp/LLamaSharp)
+- C#/VB.NET (more features - community license): [LM-Kit.NET](https://docs.lm-kit.com/lm-kit-net/index.html)
+- Scala 3: [donderom/llm4s](https://github.com/donderom/llm4s)
+- Clojure: [phronmophobic/llama.clj](https://github.com/phronmophobic/llama.clj)
+- React Native: [mybigday/llama.rn](https://github.com/mybigday/llama.rn)
+- Java: [kherud/java-llama.cpp](https://github.com/kherud/java-llama.cpp)
+- Java: [QuasarByte/llama-cpp-jna](https://github.com/QuasarByte/llama-cpp-jna)
+- Zig: [deins/llama.cpp.zig](https://github.com/Deins/llama.cpp.zig)
+- Flutter/Dart: [netdur/llama_cpp_dart](https://github.com/netdur/llama_cpp_dart)
+- Flutter: [xuegao-tzx/Fllama](https://github.com/xuegao-tzx/Fllama)
+- PHP (API bindings and features built on top of llama.cpp): [distantmagic/resonance](https://github.com/distantmagic/resonance) [(more info)](https://github.com/ggml-org/llama.cpp/pull/6326)
+- Guile Scheme: [guile_llama_cpp](https://savannah.nongnu.org/projects/guile-llama-cpp)
+- Swift [srgtuszy/llama-cpp-swift](https://github.com/srgtuszy/llama-cpp-swift)
+- Swift [ShenghaiWang/SwiftLlama](https://github.com/ShenghaiWang/SwiftLlama)
+- Delphi [Embarcadero/llama-cpp-delphi](https://github.com/Embarcadero/llama-cpp-delphi)
+- Go (no CGo needed): [hybridgroup/yzma](https://github.com/hybridgroup/yzma)
+- Android: [llama.android](/examples/llama.android)
+
+</details>
+
+<details>
+<summary>UIs</summary>
+
+*(to have a project listed here, it should clearly state that it depends on `llama.cpp`)*
+
+- [AI Sublime Text plugin](https://github.com/yaroslavyaroslav/OpenAI-sublime-text) (MIT)
+- [BonzAI App](https://apps.apple.com/us/app/bonzai-your-local-ai-agent/id6752847988) (proprietary)
+- [cztomsik/ava](https://github.com/cztomsik/ava) (MIT)
+- [Dot](https://github.com/alexpinel/Dot) (GPL)
+- [eva](https://github.com/ylsdamxssjxxdd/eva) (MIT)
+- [iohub/collama](https://github.com/iohub/coLLaMA) (Apache-2.0)
+- [janhq/jan](https://github.com/janhq/jan) (AGPL)
+- [johnbean393/Sidekick](https://github.com/johnbean393/Sidekick) (MIT)
+- [KanTV](https://github.com/zhouwg/kantv?tab=readme-ov-file) (Apache-2.0)
+- [KodiBot](https://github.com/firatkiral/kodibot) (GPL)
+- [llama.vim](https://github.com/ggml-org/llama.vim) (MIT)
+- [LARS](https://github.com/abgulati/LARS) (AGPL)
+- [Llama Assistant](https://github.com/vietanhdev/llama-assistant) (GPL)
+- [LlamaLib](https://github.com/undreamai/LlamaLib) (Apache-2.0)
+- [LLMFarm](https://github.com/guinmoon/LLMFarm?tab=readme-ov-file) (MIT)
+- [LLMUnity](https://github.com/undreamai/LLMUnity) (MIT)
+- [LMStudio](https://lmstudio.ai/) (proprietary)
+- [LocalAI](https://github.com/mudler/LocalAI) (MIT)
+- [LostRuins/koboldcpp](https://github.com/LostRuins/koboldcpp) (AGPL)
+- [MindMac](https://mindmac.app) (proprietary)
+- [MindWorkAI/AI-Studio](https://github.com/MindWorkAI/AI-Studio) (FSL-1.1-MIT)
+- [Mobile-Artificial-Intelligence/maid](https://github.com/Mobile-Artificial-Intelligence/maid) (MIT)
+- [Mozilla-Ocho/llamafile](https://github.com/Mozilla-Ocho/llamafile) (Apache-2.0)
+- [nat/openplayground](https://github.com/nat/openplayground) (MIT)
+- [nomic-ai/gpt4all](https://github.com/nomic-ai/gpt4all) (MIT)
+- [ollama/ollama](https://github.com/ollama/ollama) (MIT)
+- [oobabooga/text-generation-webui](https://github.com/oobabooga/text-generation-webui) (AGPL)
+- [PocketPal AI](https://github.com/a-ghorbani/pocketpal-ai) (MIT)
+- [psugihara/FreeChat](https://github.com/psugihara/FreeChat) (MIT)
+- [ptsochantaris/emeltal](https://github.com/ptsochantaris/emeltal) (MIT)
+- [pythops/tenere](https://github.com/pythops/tenere) (AGPL)
+- [ramalama](https://github.com/containers/ramalama) (MIT)
+- [semperai/amica](https://github.com/semperai/amica) (MIT)
+- [withcatai/catai](https://github.com/withcatai/catai) (MIT)
+- [Autopen](https://github.com/blackhole89/autopen) (GPL)
+
+</details>
+
+<details>
+<summary>Tools</summary>
+
+- [akx/ggify](https://github.com/akx/ggify) – download PyTorch models from HuggingFace Hub and convert them to GGML
+- [akx/ollama-dl](https://github.com/akx/ollama-dl) – download models from the Ollama library to be used directly with llama.cpp
+- [crashr/gppm](https://github.com/crashr/gppm) – launch llama.cpp instances utilizing NVIDIA Tesla P40 or P100 GPUs with reduced idle power consumption
+- [gpustack/gguf-parser](https://github.com/gpustack/gguf-parser-go/tree/main/cmd/gguf-parser) - review/check the GGUF file and estimate the memory usage
+- [Styled Lines](https://marketplace.unity.com/packages/tools/generative-ai/styled-lines-llama-cpp-model-292902) (proprietary licensed, async wrapper of inference part for game development in Unity3d with pre-built Mobile and Web platform wrappers and a model example)
+- [unslothai/unsloth](https://github.com/unslothai/unsloth) – 🦥 exports/saves fine-tuned and trained models to GGUF (Apache-2.0)
+
+</details>
+
+<details>
+<summary>Infrastructure</summary>
+
+- [Paddler](https://github.com/intentee/paddler) - Open-source LLMOps platform for hosting and scaling AI in your own infrastructure
+- [GPUStack](https://github.com/gpustack/gpustack) - Manage GPU clusters for running LLMs
+- [llama_cpp_canister](https://github.com/onicai/llama_cpp_canister) - llama.cpp as a smart contract on the Internet Computer, using WebAssembly
+- [llama-swap](https://github.com/mostlygeek/llama-swap) - transparent proxy that adds automatic model switching with llama-server
+- [Kalavai](https://github.com/kalavai-net/kalavai-client) - Crowdsource end to end LLM deployment at any scale
+- [llmaz](https://github.com/InftyAI/llmaz) - ☸️ Easy, advanced inference platform for large language models on Kubernetes.
+</details>
+
+<details>
+<summary>Games</summary>
+
+- [Lucy's Labyrinth](https://github.com/MorganRO8/Lucys_Labyrinth) - A simple maze game where agents controlled by an AI model will try to trick you.
+
+</details>
+
+
+## Supported backends
+
+| Backend | Target devices |
+| --- | --- |
+| [Metal](docs/build.md#metal-build) | Apple Silicon |
+| [BLAS](docs/build.md#blas-build) | All |
+| [BLIS](docs/backend/BLIS.md) | All |
+| [SYCL](docs/backend/SYCL.md) | Intel and Nvidia GPU |
+| [MUSA](docs/build.md#musa) | Moore Threads GPU |
+| [CUDA](docs/build.md#cuda) | Nvidia GPU |
+| [HIP](docs/build.md#hip) | AMD GPU |
+| [ZenDNN](docs/build.md#zendnn) | AMD CPU |
+| [Vulkan](docs/build.md#vulkan) | GPU |
+| [CANN](docs/build.md#cann) | Ascend NPU |
+| [OpenCL](docs/backend/OPENCL.md) | Adreno GPU |
+| [IBM zDNN](docs/backend/zDNN.md) | IBM Z & LinuxONE |
+| [WebGPU [In Progress]](docs/build.md#webgpu) | All |
+| [RPC](https://github.com/ggml-org/llama.cpp/tree/master/tools/rpc) | All |
+| [Hexagon [In Progress]](docs/backend/hexagon/README.md) | Snapdragon |
+| [VirtGPU](docs/backend/VirtGPU.md) | VirtGPU APIR |
+
+## Obtaining and quantizing models
+
+The [Hugging Face](https://huggingface.co) platform hosts a [number of LLMs](https://huggingface.co/models?library=gguf&sort=trending) compatible with `llama.cpp`:
+
+- [Trending](https://huggingface.co/models?library=gguf&sort=trending)
+- [LLaMA](https://huggingface.co/models?sort=trending&search=llama+gguf)
+
+You can either manually download the GGUF file or directly use any `llama.cpp`-compatible models from [Hugging Face](https://huggingface.co/) or other model hosting sites, such as [ModelScope](https://modelscope.cn/), by using this CLI argument: `-hf <user>/<model>[:quant]`. For example:
+
+```sh
+llama-cli -hf ggml-org/gemma-3-1b-it-GGUF
 ```
 
-or for newer NVIDIA GPU's (RTX 5000 series):
-```
-cmake -B build -DGGML_CUDA=1 -DCMAKE_CUDA_ARCHITECTURES="86"
-cmake --build build -j --config Release
-```
+By default, the CLI would download from Hugging Face, you can switch to other options with the environment variable `MODEL_ENDPOINT`. For example, you may opt to downloading model checkpoints from ModelScope or other model sharing communities by setting the environment variable, e.g. `MODEL_ENDPOINT=https://www.modelscope.cn/`.
 
-## Vulkan GPU support
-Cross-vendor solution which allows you to accelerate workload on your GPU.
-First, make sure your graphics card driver provides support for Vulkan API.
+After downloading a model, use the CLI tools to run it locally - see below.
 
-Now build `whisper.cpp` with Vulkan support:
-```
-cmake -B build -DGGML_VULKAN=1
-cmake --build build -j --config Release
-```
+`llama.cpp` requires the model to be stored in the [GGUF](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md) file format. Models in other data formats can be converted to GGUF using the `convert_*.py` Python scripts in this repo.
 
-## BLAS CPU support via OpenBLAS
+The Hugging Face platform provides a variety of online tools for converting, quantizing and hosting models with `llama.cpp`:
 
-Encoder processing can be accelerated on the CPU via OpenBLAS.
-First, make sure you have installed `openblas`: https://www.openblas.net/
+- Use the [GGUF-my-repo space](https://huggingface.co/spaces/ggml-org/gguf-my-repo) to convert to GGUF format and quantize model weights to smaller sizes
+- Use the [GGUF-my-LoRA space](https://huggingface.co/spaces/ggml-org/gguf-my-lora) to convert LoRA adapters to GGUF format (more info: https://github.com/ggml-org/llama.cpp/discussions/10123)
+- Use the [GGUF-editor space](https://huggingface.co/spaces/CISCai/gguf-editor) to edit GGUF meta data in the browser (more info: https://github.com/ggml-org/llama.cpp/discussions/9268)
+- Use the [Inference Endpoints](https://ui.endpoints.huggingface.co/) to directly host `llama.cpp` in the cloud (more info: https://github.com/ggml-org/llama.cpp/discussions/9669)
 
-Now build `whisper.cpp` with OpenBLAS support:
+To learn more about model quantization, [read this documentation](tools/quantize/README.md)
 
-```
-cmake -B build -DGGML_BLAS=1
-cmake --build build -j --config Release
-```
+## [`llama-cli`](tools/cli)
 
-## Ascend NPU support
+#### A CLI tool for accessing and experimenting with most of `llama.cpp`'s functionality.
 
-Ascend NPU provides inference acceleration via [`CANN`](https://www.hiascend.com/en/software/cann) and AI cores.
+- <details open>
+    <summary>Run in conversation mode</summary>
 
-First, check if your Ascend NPU device is supported:
+    Models with a built-in chat template will automatically activate conversation mode. If this doesn't occur, you can manually enable it by adding `-cnv` and specifying a suitable chat template with `--chat-template NAME`
 
-**Verified devices**
-| Ascend NPU                    | Status  |
-|:-----------------------------:|:-------:|
-| Atlas 300T A2                 | Support |
-| Atlas 300I Duo                | Support |
+    ```bash
+    llama-cli -m model.gguf
 
-Then, make sure you have installed [`CANN toolkit`](https://www.hiascend.com/en/software/cann/community) . The lasted version of CANN is recommanded.
+    # > hi, who are you?
+    # Hi there! I'm your helpful assistant! I'm an AI-powered chatbot designed to assist and provide information to users like you. I'm here to help answer your questions, provide guidance, and offer support on a wide range of topics. I'm a friendly and knowledgeable AI, and I'm always happy to help with anything you need. What's on your mind, and how can I assist you today?
+    #
+    # > what is 1+1?
+    # Easy peasy! The answer to 1+1 is... 2!
+    ```
 
-Now build `whisper.cpp` with CANN support:
+    </details>
 
-```
-cmake -B build -DGGML_CANN=1
-cmake --build build -j --config Release
-```
+- <details>
+    <summary>Run in conversation mode with custom chat template</summary>
 
-Run the inference examples as usual, for example:
+    ```bash
+    # use the "chatml" template (use -h to see the list of supported templates)
+    llama-cli -m model.gguf -cnv --chat-template chatml
 
-```
-./build/bin/whisper-cli -f samples/jfk.wav -m models/ggml-base.en.bin -t 8
-```
+    # use a custom template
+    llama-cli -m model.gguf -cnv --in-prefix 'User: ' --reverse-prompt 'User:'
+    ```
 
-*Notes:*
+    </details>
 
-- If you have trouble with Ascend NPU device, please create a issue with **[CANN]** prefix/tag.
-- If you run successfully with your Ascend NPU device, please help update the table `Verified devices`.
+- <details>
+    <summary>Constrain the output with a custom grammar</summary>
 
-## Moore Threads GPU support
+    ```bash
+    llama-cli -m model.gguf -n 256 --grammar-file grammars/json.gbnf -p 'Request: schedule a call at 8pm; Command:'
 
-With Moore Threads cards the processing of the models is done efficiently on the GPU via muBLAS and custom MUSA kernels.
-First, make sure you have installed `MUSA SDK rc4.2.0`: https://developer.mthreads.com/sdk/download/musa?equipment=&os=&driverVersion=&version=4.2.0
+    # {"appointmentTime": "8pm", "appointmentDetails": "schedule a a call"}
+    ```
 
-Now build `whisper.cpp` with MUSA support:
+    The [grammars/](grammars/) folder contains a handful of sample grammars. To write your own, check out the [GBNF Guide](grammars/README.md).
 
-```
-cmake -B build -DGGML_MUSA=1
-cmake --build build -j --config Release
-```
+    For authoring more complex JSON grammars, check out https://grammar.intrinsiclabs.ai/
 
-or specify the architecture for your Moore Threads GPU. For example, if you have a MTT S80 GPU, you can specify the architecture as follows:
+    </details>
 
-```
-cmake -B build -DGGML_MUSA=1 -DMUSA_ARCHITECTURES="21"
-cmake --build build -j --config Release
-```
 
-## FFmpeg support (Linux only)
+## [`llama-server`](tools/server)
 
-If you want to support more audio formats (such as Opus and AAC), you can turn on the `WHISPER_FFMPEG` build flag to enable FFmpeg integration.
+#### A lightweight, [OpenAI API](https://github.com/openai/openai-openapi) compatible, HTTP server for serving LLMs.
 
-First, you need to install required libraries:
+- <details open>
+    <summary>Start a local HTTP server with default configuration on port 8080</summary>
 
-```bash
-# Debian/Ubuntu
-sudo apt install libavcodec-dev libavformat-dev libavutil-dev
+    ```bash
+    llama-server -m model.gguf --port 8080
 
-# RHEL/Fedora
-sudo dnf install libavcodec-free-devel libavformat-free-devel libavutil-free-devel
-```
+    # Basic web UI can be accessed via browser: http://localhost:8080
+    # Chat completion endpoint: http://localhost:8080/v1/chat/completions
+    ```
 
-Then you can build the project as follows:
+    </details>
 
-```bash
-cmake -B build -D WHISPER_FFMPEG=yes
-cmake --build build
-```
+- <details>
+    <summary>Support multiple-users and parallel decoding</summary>
 
-Run the following example to confirm it's working:
+    ```bash
+    # up to 4 concurrent requests, each with 4096 max context
+    llama-server -m model.gguf -c 16384 -np 4
+    ```
 
-```bash
-# Convert an audio file to Opus format
-ffmpeg -i samples/jfk.wav jfk.opus
+    </details>
 
-# Transcribe the audio file
-./build/bin/whisper-cli --model models/ggml-base.en.bin --file jfk.opus
-```
+- <details>
+    <summary>Enable speculative decoding</summary>
 
-## Docker
+    ```bash
+    # the draft.gguf model should be a small variant of the target model.gguf
+    llama-server -m model.gguf -md draft.gguf
+    ```
 
-### Prerequisites
+    </details>
 
-- Docker must be installed and running on your system.
-- Create a folder to store big models & intermediate files (ex. /whisper/models)
+- <details>
+    <summary>Serve an embedding model</summary>
 
-### Images
+    ```bash
+    # use the /embedding endpoint
+    llama-server -m model.gguf --embedding --pooling cls -ub 8192
+    ```
 
-We have multiple Docker images available for this project:
+    </details>
 
-1. `ghcr.io/ggml-org/whisper.cpp:main`: This image includes the main executable file as well as `curl` and `ffmpeg`. (platforms: `linux/amd64`, `linux/arm64`)
-2. `ghcr.io/ggml-org/whisper.cpp:main-cuda`: Same as `main` but compiled with CUDA support. (platforms: `linux/amd64`)
-3. `ghcr.io/ggml-org/whisper.cpp:main-musa`: Same as `main` but compiled with MUSA support. (platforms: `linux/amd64`)
-4. `ghcr.io/ggml-org/whisper.cpp:main-vulkan`: Same as `main` but compiled with Vulkan support. (platforms: `linux/amd64`)
+- <details>
+    <summary>Serve a reranking model</summary>
 
-### Usage
+    ```bash
+    # use the /reranking endpoint
+    llama-server -m model.gguf --reranking
+    ```
 
-```shell
-# download model and persist it in a local folder
-docker run -it --rm \
-  -v path/to/models:/models \
-  whisper.cpp:main "./models/download-ggml-model.sh base /models"
+    </details>
 
-# transcribe an audio file
-docker run -it --rm \
-  -v path/to/models:/models \
-  -v path/to/audios:/audios \
-  whisper.cpp:main "whisper-cli -m /models/ggml-base.bin -f /audios/jfk.wav"
+- <details>
+    <summary>Constrain all outputs with a grammar</summary>
 
-# transcribe an audio file in samples folder
-docker run -it --rm \
-  -v path/to/models:/models \
-  whisper.cpp:main "whisper-cli -m /models/ggml-base.bin -f ./samples/jfk.wav"
+    ```bash
+    # custom grammar
+    llama-server -m model.gguf --grammar-file grammar.gbnf
 
-# run the web server
-docker run -it --rm -p "8080:8080" \
-  -v path/to/models:/models \
-  whisper.cpp:main "whisper-server --host 127.0.0.1 -m /models/ggml-base.bin"
-  
-# run the bench too on the small.en model using 4 threads
-docker run -it --rm \
-  -v path/to/models:/models \
-  whisper.cpp:main "whisper-bench -m /models/ggml-small.en.bin -t 4"
-```
+    # JSON
+    llama-server -m model.gguf --grammar-file grammars/json.gbnf
+    ```
 
-## Installing with Conan
-
-You can install pre-built binaries for whisper.cpp or build it from source using [Conan](https://conan.io/). Use the following command:
-
-```
-conan install --requires="whisper-cpp/[*]" --build=missing
-```
+    </details>
 
-For detailed instructions on how to use Conan, please refer to the [Conan documentation](https://docs.conan.io/2/).
 
-## Limitations
+## [`llama-perplexity`](tools/perplexity)
 
-- Inference only
+#### A tool for measuring the [perplexity](tools/perplexity/README.md) [^1] (and other quality metrics) of a model over a given text.
 
-## Real-time audio input example
+- <details open>
+    <summary>Measure the perplexity over a text file</summary>
 
-This is a naive example of performing real-time inference on audio from your microphone.
-The [stream](examples/stream) tool samples the audio every half a second and runs the transcription continuously.
-More info is available in [issue #10](https://github.com/ggml-org/whisper.cpp/issues/10).
-You will need to have [sdl2](https://wiki.libsdl.org/SDL2/Installation) installed for it to work properly.
+    ```bash
+    llama-perplexity -m model.gguf -f file.txt
 
-```bash
-cmake -B build -DWHISPER_SDL2=ON
-cmake --build build -j --config Release
-./build/bin/whisper-stream -m ./models/ggml-base.en.bin -t 8 --step 500 --length 5000
-```
-
-https://user-images.githubusercontent.com/1991296/194935793-76afede7-cfa8-48d8-a80f-28ba83be7d09.mp4
-
-## Confidence color-coding
-
-Adding the `--print-colors` argument will print the transcribed text using an experimental color coding strategy
-to highlight words with high or low confidence:
-
-```bash
-./build/bin/whisper-cli -m models/ggml-base.en.bin -f samples/gb0.wav --print-colors
-```
-
-<img width="965" alt="image" src="https://user-images.githubusercontent.com/1991296/197356445-311c8643-9397-4e5e-b46e-0b4b4daa2530.png">
-
-## Controlling the length of the generated text segments (experimental)
-
-For example, to limit the line length to a maximum of 16 characters, simply add `-ml 16`:
-
-```text
-$ ./build/bin/whisper-cli -m ./models/ggml-base.en.bin -f ./samples/jfk.wav -ml 16
-
-whisper_model_load: loading model from './models/ggml-base.en.bin'
-...
-system_info: n_threads = 4 / 10 | AVX2 = 0 | AVX512 = 0 | NEON = 1 | FP16_VA = 1 | WASM_SIMD = 0 | BLAS = 1 |
-
-main: processing './samples/jfk.wav' (176000 samples, 11.0 sec), 4 threads, 1 processors, lang = en, task = transcribe, timestamps = 1 ...
-
-[00:00:00.000 --> 00:00:00.850]   And so my
-[00:00:00.850 --> 00:00:01.590]   fellow
-[00:00:01.590 --> 00:00:04.140]   Americans, ask
-[00:00:04.140 --> 00:00:05.660]   not what your
-[00:00:05.660 --> 00:00:06.840]   country can do
-[00:00:06.840 --> 00:00:08.430]   for you, ask
-[00:00:08.430 --> 00:00:09.440]   what you can do
-[00:00:09.440 --> 00:00:10.020]   for your
-[00:00:10.020 --> 00:00:11.000]   country.
-```
-
-## Word-level timestamp (experimental)
-
-The `--max-len` argument can be used to obtain word-level timestamps. Simply use `-ml 1`:
+    # [1]15.2701,[2]5.4007,[3]5.3073,[4]6.2965,[5]5.8940,[6]5.6096,[7]5.7942,[8]4.9297, ...
+    # Final estimate: PPL = 5.4007 +/- 0.67339
+    ```
 
-```text
-$ ./build/bin/whisper-cli -m ./models/ggml-base.en.bin -f ./samples/jfk.wav -ml 1
+    </details>
 
-whisper_model_load: loading model from './models/ggml-base.en.bin'
-...
-system_info: n_threads = 4 / 10 | AVX2 = 0 | AVX512 = 0 | NEON = 1 | FP16_VA = 1 | WASM_SIMD = 0 | BLAS = 1 |
+- <details>
+    <summary>Measure KL divergence</summary>
 
-main: processing './samples/jfk.wav' (176000 samples, 11.0 sec), 4 threads, 1 processors, lang = en, task = transcribe, timestamps = 1 ...
+    ```bash
+    # TODO
+    ```
 
-[00:00:00.000 --> 00:00:00.320]
-[00:00:00.320 --> 00:00:00.370]   And
-[00:00:00.370 --> 00:00:00.690]   so
-[00:00:00.690 --> 00:00:00.850]   my
-[00:00:00.850 --> 00:00:01.590]   fellow
-[00:00:01.590 --> 00:00:02.850]   Americans
-[00:00:02.850 --> 00:00:03.300]  ,
-[00:00:03.300 --> 00:00:04.140]   ask
-[00:00:04.140 --> 00:00:04.990]   not
-[00:00:04.990 --> 00:00:05.410]   what
-[00:00:05.410 --> 00:00:05.660]   your
-[00:00:05.660 --> 00:00:06.260]   country
-[00:00:06.260 --> 00:00:06.600]   can
-[00:00:06.600 --> 00:00:06.840]   do
-[00:00:06.840 --> 00:00:07.010]   for
-[00:00:07.010 --> 00:00:08.170]   you
-[00:00:08.170 --> 00:00:08.190]  ,
-[00:00:08.190 --> 00:00:08.430]   ask
-[00:00:08.430 --> 00:00:08.910]   what
-[00:00:08.910 --> 00:00:09.040]   you
-[00:00:09.040 --> 00:00:09.320]   can
-[00:00:09.320 --> 00:00:09.440]   do
-[00:00:09.440 --> 00:00:09.760]   for
-[00:00:09.760 --> 00:00:10.020]   your
-[00:00:10.020 --> 00:00:10.510]   country
-[00:00:10.510 --> 00:00:11.000]  .
-```
+    </details>
 
-## Speaker segmentation via tinydiarize (experimental)
+[^1]: [https://huggingface.co/docs/transformers/perplexity](https://huggingface.co/docs/transformers/perplexity)
 
-More information about this approach is available here: https://github.com/ggml-org/whisper.cpp/pull/1058
+## [`llama-bench`](tools/llama-bench)
 
-Sample usage:
+#### Benchmark the performance of the inference for various parameters.
 
-```py
-# download a tinydiarize compatible model
-./models/download-ggml-model.sh small.en-tdrz
+- <details open>
+    <summary>Run default benchmark</summary>
 
-# run as usual, adding the "-tdrz" command-line argument
-./build/bin/whisper-cli -f ./samples/a13.wav -m ./models/ggml-small.en-tdrz.bin -tdrz
-...
-main: processing './samples/a13.wav' (480000 samples, 30.0 sec), 4 threads, 1 processors, lang = en, task = transcribe, tdrz = 1, timestamps = 1 ...
-...
-[00:00:00.000 --> 00:00:03.800]   Okay Houston, we've had a problem here. [SPEAKER_TURN]
-[00:00:03.800 --> 00:00:06.200]   This is Houston. Say again please. [SPEAKER_TURN]
-[00:00:06.200 --> 00:00:08.260]   Uh Houston we've had a problem.
-[00:00:08.260 --> 00:00:11.320]   We've had a main beam up on a volt. [SPEAKER_TURN]
-[00:00:11.320 --> 00:00:13.820]   Roger main beam interval. [SPEAKER_TURN]
-[00:00:13.820 --> 00:00:15.100]   Uh uh [SPEAKER_TURN]
-[00:00:15.100 --> 00:00:18.020]   So okay stand, by thirteen we're looking at it. [SPEAKER_TURN]
-[00:00:18.020 --> 00:00:25.740]   Okay uh right now uh Houston the uh voltage is uh is looking good um.
-[00:00:27.620 --> 00:00:29.940]   And we had a a pretty large bank or so.
-```
+    ```bash
+    llama-bench -m model.gguf
 
-## Karaoke-style movie generation (experimental)
+    # Output:
+    # | model               |       size |     params | backend    | threads |          test |                  t/s |
+    # | ------------------- | ---------: | ---------: | ---------- | ------: | ------------: | -------------------: |
+    # | qwen2 1.5B Q4_0     | 885.97 MiB |     1.54 B | Metal,BLAS |      16 |         pp512 |      5765.41 ± 20.55 |
+    # | qwen2 1.5B Q4_0     | 885.97 MiB |     1.54 B | Metal,BLAS |      16 |         tg128 |        197.71 ± 0.81 |
+    #
+    # build: 3e0ba0e60 (4229)
+    ```
 
-The [whisper-cli](examples/cli) example provides support for output of karaoke-style movies, where the
-currently pronounced word is highlighted. Use the `-owts` argument and run the generated bash script.
-This requires to have `ffmpeg` installed.
+    </details>
 
-Here are a few _"typical"_ examples:
+## [`llama-simple`](examples/simple)
 
-```bash
-./build/bin/whisper-cli -m ./models/ggml-base.en.bin -f ./samples/jfk.wav -owts
-source ./samples/jfk.wav.wts
-ffplay ./samples/jfk.wav.mp4
-```
+#### A minimal example for implementing apps with `llama.cpp`. Useful for developers.
 
-https://user-images.githubusercontent.com/1991296/199337465-dbee4b5e-9aeb-48a3-b1c6-323ac4db5b2c.mp4
+- <details>
+    <summary>Basic text completion</summary>
 
----
+    ```bash
+    llama-simple -m model.gguf
 
-```bash
-./build/bin/whisper-cli -m ./models/ggml-base.en.bin -f ./samples/mm0.wav -owts
-source ./samples/mm0.wav.wts
-ffplay ./samples/mm0.wav.mp4
-```
+    # Hello my name is Kaitlyn and I am a 16 year old girl. I am a junior in high school and I am currently taking a class called "The Art of
+    ```
 
-https://user-images.githubusercontent.com/1991296/199337504-cc8fd233-0cb7-4920-95f9-4227de3570aa.mp4
+    </details>
 
----
 
-```bash
-./build/bin/whisper-cli -m ./models/ggml-base.en.bin -f ./samples/gb0.wav -owts
-source ./samples/gb0.wav.wts
-ffplay ./samples/gb0.wav.mp4
-```
+## Contributing
 
-https://user-images.githubusercontent.com/1991296/199337538-b7b0c7a3-2753-4a88-a0cd-f28a317987ba.mp4
+- Contributors can open PRs
+- Collaborators will be invited based on contributions
+- Maintainers can push to branches in the `llama.cpp` repo and merge PRs into the `master` branch
+- Any help with managing issues, PRs and projects is very appreciated!
+- See [good first issues](https://github.com/ggml-org/llama.cpp/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) for tasks suitable for first contributions
+- Read the [CONTRIBUTING.md](CONTRIBUTING.md) for more information
+- Make sure to read this: [Inference at the edge](https://github.com/ggml-org/llama.cpp/discussions/205)
+- A bit of backstory for those who are interested: [Changelog podcast](https://changelog.com/podcast/532)
 
----
+## Other documentation
 
-## Video comparison of different models
+- [cli](tools/cli/README.md)
+- [completion](tools/completion/README.md)
+- [server](tools/server/README.md)
+- [GBNF grammars](grammars/README.md)
 
-Use the [scripts/bench-wts.sh](https://github.com/ggml-org/whisper.cpp/blob/master/scripts/bench-wts.sh) script to generate a video in the following format:
+#### Development documentation
 
-```bash
-./scripts/bench-wts.sh samples/jfk.wav
-ffplay ./samples/jfk.wav.all.mp4
-```
+- [How to build](docs/build.md)
+- [Running on Docker](docs/docker.md)
+- [Build on Android](docs/android.md)
+- [Performance troubleshooting](docs/development/token_generation_performance_tips.md)
+- [GGML tips & tricks](https://github.com/ggml-org/llama.cpp/wiki/GGML-Tips-&-Tricks)
 
-https://user-images.githubusercontent.com/1991296/223206245-2d36d903-cf8e-4f09-8c3b-eb9f9c39d6fc.mp4
+#### Seminal papers and background on the models
 
----
-
-## Benchmarks
-
-In order to have an objective comparison of the performance of the inference across different system configurations,
-use the [whisper-bench](examples/bench) tool. The tool simply runs the Encoder part of the model and prints how much time it
-took to execute it. The results are summarized in the following Github issue:
-
-[Benchmark results](https://github.com/ggml-org/whisper.cpp/issues/89)
-
-Additionally a script to run whisper.cpp with different models and audio files is provided [bench.py](scripts/bench.py).
-
-You can run it with the following command, by default it will run against any standard model in the models folder.
-
-```bash
-python3 scripts/bench.py -f samples/jfk.wav -t 2,4,8 -p 1,2
-```
-
-It is written in python with the intention of being easy to modify and extend for your benchmarking use case.
-
-It outputs a csv file with the results of the benchmarking.
-
-## `ggml` format
-
-The original models are converted to a custom binary format. This allows to pack everything needed into a single file:
-
-- model parameters
-- mel filters
-- vocabulary
-- weights
-
-You can download the converted models using the [models/download-ggml-model.sh](models/download-ggml-model.sh) script
-or manually from here:
-
-- https://huggingface.co/ggerganov/whisper.cpp
-
-For more details, see the conversion script [models/convert-pt-to-ggml.py](models/convert-pt-to-ggml.py) or [models/README.md](models/README.md).
-
-## [Bindings](https://github.com/ggml-org/whisper.cpp/discussions/categories/bindings)
-
-- [x] Rust: [tazz4843/whisper-rs](https://github.com/tazz4843/whisper-rs) | [#310](https://github.com/ggml-org/whisper.cpp/discussions/310)
-- [x] JavaScript: [bindings/javascript](bindings/javascript) | [#309](https://github.com/ggml-org/whisper.cpp/discussions/309)
-  - React Native (iOS / Android): [whisper.rn](https://github.com/mybigday/whisper.rn)
-- [x] Go: [bindings/go](bindings/go) | [#312](https://github.com/ggml-org/whisper.cpp/discussions/312)
-- [x] Java:
-  - [GiviMAD/whisper-jni](https://github.com/GiviMAD/whisper-jni)
-- [x] Ruby: [bindings/ruby](bindings/ruby) | [#507](https://github.com/ggml-org/whisper.cpp/discussions/507)
-- [x] Objective-C / Swift: [ggml-org/whisper.spm](https://github.com/ggml-org/whisper.spm) | [#313](https://github.com/ggml-org/whisper.cpp/discussions/313)
-  - [exPHAT/SwiftWhisper](https://github.com/exPHAT/SwiftWhisper)
-- [x] .NET: | [#422](https://github.com/ggml-org/whisper.cpp/discussions/422)
-  - [sandrohanea/whisper.net](https://github.com/sandrohanea/whisper.net)
-  - [NickDarvey/whisper](https://github.com/NickDarvey/whisper)
-- [x] Python: | [#9](https://github.com/ggml-org/whisper.cpp/issues/9)
-  - [stlukey/whispercpp.py](https://github.com/stlukey/whispercpp.py) (Cython)
-  - [AIWintermuteAI/whispercpp](https://github.com/AIWintermuteAI/whispercpp) (Updated fork of aarnphm/whispercpp)
-  - [aarnphm/whispercpp](https://github.com/aarnphm/whispercpp) (Pybind11)
-  - [abdeladim-s/pywhispercpp](https://github.com/abdeladim-s/pywhispercpp) (Pybind11)
-- [x] R: [bnosac/audio.whisper](https://github.com/bnosac/audio.whisper)
-- [x] Unity: [macoron/whisper.unity](https://github.com/Macoron/whisper.unity)
+If your issue is with model generation quality, then please at least scan the following links and papers to understand the limitations of LLaMA models. This is especially important when choosing an appropriate model size and appreciating both the significant and subtle differences between LLaMA models and ChatGPT:
+- LLaMA:
+    - [Introducing LLaMA: A foundational, 65-billion-parameter large language model](https://ai.facebook.com/blog/large-language-model-llama-meta-ai/)
+    - [LLaMA: Open and Efficient Foundation Language Models](https://arxiv.org/abs/2302.13971)
+- GPT-3
+    - [Language Models are Few-Shot Learners](https://arxiv.org/abs/2005.14165)
+- GPT-3.5 / InstructGPT / ChatGPT:
+    - [Aligning language models to follow instructions](https://openai.com/research/instruction-following)
+    - [Training language models to follow instructions with human feedback](https://arxiv.org/abs/2203.02155)
 
 ## XCFramework
 The XCFramework is a precompiled version of the library for iOS, visionOS, tvOS,
 and macOS. It can be used in Swift projects without the need to compile the
-library from source. For example, the v1.7.5 version of the XCFramework can be
-used as follows:
-
+library from source. For example:
 ```swift
 // swift-tools-version: 5.10
 // The swift-tools-version declares the minimum version of Swift required to build this package.
@@ -733,130 +551,42 @@ used as follows:
 import PackageDescription
 
 let package = Package(
-    name: "Whisper",
+    name: "MyLlamaPackage",
     targets: [
         .executableTarget(
-            name: "Whisper",
+            name: "MyLlamaPackage",
             dependencies: [
-                "WhisperFramework"
+                "LlamaFramework"
             ]),
         .binaryTarget(
-            name: "WhisperFramework",
-            url: "https://github.com/ggml-org/whisper.cpp/releases/download/v1.7.5/whisper-v1.7.5-xcframework.zip",
-            checksum: "c7faeb328620d6012e130f3d705c51a6ea6c995605f2df50f6e1ad68c59c6c4a"
+            name: "LlamaFramework",
+            url: "https://github.com/ggml-org/llama.cpp/releases/download/b5046/llama-b5046-xcframework.zip",
+            checksum: "c19be78b5f00d8d29a25da41042cb7afa094cbf6280a225abe614b03b20029ab"
         )
     ]
 )
 ```
+The above example is using an intermediate build `b5046` of the library. This can be modified
+to use a different version by changing the URL and checksum.
 
-## Voice Activity Detection (VAD)
-Support for Voice Activity Detection (VAD) can be enabled using the `--vad`
-argument to `whisper-cli`. In addition to this option a VAD model is also
-required.
+## Completions
+Command-line completion is available for some environments.
 
-The way this works is that first the audio samples are passed through
-the VAD model which will detect speech segments. Using this information,
-only the speech segments that are detected are extracted from the original audio
-input and passed to whisper for processing. This reduces the amount of audio
-data that needs to be processed by whisper and can significantly speed up the
-transcription process.
-
-The following VAD models are currently supported:
-
-### Silero-VAD
-[Silero-vad](https://github.com/snakers4/silero-vad) is a lightweight VAD model
-written in Python that is fast and accurate.
-
-Models can be downloaded by running the following command on Linux or MacOS:
-```console
-$ ./models/download-vad-model.sh silero-v6.2.0
-Downloading ggml model silero-v6.2.0 from 'https://huggingface.co/ggml-org/whisper-vad' ...
-ggml-silero-v6.2.0.bin        100%[==============================================>] 864.35K  --.-KB/s    in 0.04s
-Done! Model 'silero-v6.2.0' saved in '/path/models/ggml-silero-v6.2.0.bin'
-You can now use it like this:
-
-  $ ./build/bin/whisper-cli -vm /path/models/ggml-silero-v6.2.0.bin --vad -f samples/jfk.wav -m models/ggml-base.en.bin
-
+#### Bash Completion
+```bash
+$ build/bin/llama-cli --completion-bash > ~/.llama-completion.bash
+$ source ~/.llama-completion.bash
 ```
-And the following command on Windows:
+Optionally this can be added to your `.bashrc` or `.bash_profile` to load it
+automatically. For example:
 ```console
-> .\models\download-vad-model.cmd silero-v6.2.0
-Downloading vad model silero-v6.2.0...
-Done! Model silero-v6.2.0 saved in C:\Users\danie\work\ai\whisper.cpp\ggml-silero-v6.2.0.bin
-You can now use it like this:
-
-C:\path\build\bin\Release\whisper-cli.exe -vm C:\path\ggml-silero-v6.2.0.bin --vad -m models/ggml-base.en.bin -f samples\jfk.wav
-
+$ echo "source ~/.llama-completion.bash" >> ~/.bashrc
 ```
 
-To see a list of all available models, run the above commands without any
-arguments.
+## Dependencies
 
-This model can be also be converted manually to ggml using the following command:
-```console
-$ python3 -m venv venv && source venv/bin/activate
-$ (venv) pip install silero-vad
-$ (venv) $ python models/convert-silero-vad-to-ggml.py --output models/silero.bin
-Saving GGML Silero-VAD model to models/silero-v6.2.0-ggml.bin
-```
-And it can then be used with whisper as follows:
-```console
-$ ./build/bin/whisper-cli \
-   --file ./samples/jfk.wav \
-   --model ./models/ggml-base.en.bin \
-   --vad \
-   --vad-model ./models/silero-v6.2.0-ggml.bin
-```
-
-### VAD Options
-
-* --vad-threshold: Threshold probability for speech detection. A probability
-for a speech segment/frame above this threshold will be considered as speech.
-
-* --vad-min-speech-duration-ms: Minimum speech duration in milliseconds. Speech
-segments shorter than this value will be discarded to filter out brief noise or
-false positives.
-
-* --vad-min-silence-duration-ms: Minimum silence duration in milliseconds. Silence
-periods must be at least this long to end a speech segment. Shorter silence
-periods will be ignored and included as part of the speech.
-
-* --vad-max-speech-duration-s: Maximum speech duration in seconds. Speech segments
-longer than this will be automatically split into multiple segments at silence
-points exceeding 98ms to prevent excessively long segments.
-
-* --vad-speech-pad-ms: Speech padding in milliseconds. Adds this amount of padding
-before and after each detected speech segment to avoid cutting off speech edges.
-
-* --vad-samples-overlap: Amount of audio to extend from each speech segment into
-the next one, in seconds (e.g., 0.10 = 100ms overlap). This ensures speech isn't
-cut off abruptly between segments when they're concatenated together.
-
-## Examples
-
-There are various examples of using the library for different projects in the [examples](examples) folder.
-Some of the examples are even ported to run in the browser using WebAssembly. Check them out!
-
-| Example                                             | Web                                   | Description                                                                                                                     |
-| --------------------------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| [whisper-cli](examples/cli)                         | [whisper.wasm](examples/whisper.wasm) | Tool for translating and transcribing audio using Whisper                                                                       |
-| [whisper-bench](examples/bench)                     | [bench.wasm](examples/bench.wasm)     | Benchmark the performance of Whisper on your machine                                                                            |
-| [whisper-stream](examples/stream)                   | [stream.wasm](examples/stream.wasm)   | Real-time transcription of raw microphone capture                                                                               |
-| [whisper-command](examples/command)                 | [command.wasm](examples/command.wasm) | Basic voice assistant example for receiving voice commands from the mic                                                         |
-| [whisper-server](examples/server)                   |                                       | HTTP transcription server with OAI-like API                                                                                     |
-| [whisper-talk-llama](examples/talk-llama)           |                                       | Talk with a LLaMA bot                                                                                                           |
-| [whisper.objc](examples/whisper.objc)               |                                       | iOS mobile application using whisper.cpp                                                                                        |
-| [whisper.swiftui](examples/whisper.swiftui)         |                                       | SwiftUI iOS / macOS application using whisper.cpp                                                                               |
-| [whisper.android](examples/whisper.android)         |                                       | Android mobile application using whisper.cpp                                                                                    |
-| [whisper.nvim](examples/whisper.nvim)               |                                       | Speech-to-text plugin for Neovim                                                                                                |
-| [generate-karaoke.sh](examples/generate-karaoke.sh) |                                       | Helper script to easily [generate a karaoke video](https://youtu.be/uj7hVta4blM) of raw audio capture                           |
-| [livestream.sh](examples/livestream.sh)             |                                       | [Livestream audio transcription](https://github.com/ggml-org/whisper.cpp/issues/185)                                            |
-| [yt-wsp.sh](examples/yt-wsp.sh)                     |                                       | Download + transcribe and/or translate any VOD [(original)](https://gist.github.com/DaniruKun/96f763ec1a037cc92fe1a059b643b818) |
-| [wchess](examples/wchess)                           | [wchess.wasm](examples/wchess)        | Voice-controlled chess                                                                                                          |
-
-## [Discussions](https://github.com/ggml-org/whisper.cpp/discussions)
-
-If you have any kind of feedback about this project feel free to use the Discussions section and open a new topic.
-You can use the [Show and tell](https://github.com/ggml-org/whisper.cpp/discussions/categories/show-and-tell) category
-to share your own projects that use `whisper.cpp`. If you have a question, make sure to check the
-[Frequently asked questions (#126)](https://github.com/ggml-org/whisper.cpp/discussions/126) discussion.
+- [yhirose/cpp-httplib](https://github.com/yhirose/cpp-httplib) - Single-header HTTP server, used by `llama-server` - MIT license
+- [stb-image](https://github.com/nothings/stb) - Single-header image format decoder, used by multimodal subsystem - Public domain
+- [nlohmann/json](https://github.com/nlohmann/json) - Single-header JSON library, used by various tools/examples - MIT License
+- [miniaudio.h](https://github.com/mackron/miniaudio) - Single-header audio format decoder, used by multimodal subsystem - Public domain
+- [subprocess.h](https://github.com/sheredom/subprocess.h) - Single-header process launching solution for C and C++ - Public domain

@@ -8,17 +8,18 @@ Tooling scripts for pyannote model conversion and GGUF packaging.
 - `convert_pyannote_npz_to_gguf.py`
 - `convert_pyannote_to_gguf.ps1`
 - `update_upstreams.ps1`
-- `license_audit.ps1`
-- `extract_cpp_licenses.ps1`
-- `extract_cpp_embedded_licenses.ps1`
+- `release_inventory.ps1`
 
-### Update third_party subtrees
+### Update third_party upstream sources
 
 From `extras` folder:
 
-- `.\update_upstreams.ps1` updates both `third_party/llama.cpp` and `third_party/whisper.cpp`.
-- `.\update_upstreams.ps1 -Commit` updates and commits both subtree updates.
-- `.\update_upstreams.ps1 -Commit -Push` additionally pushes the commit.
+- `.\update_upstreams.ps1` syncs both `third_party/llama.cpp` and `third_party/whisper.cpp` from upstream refs.
+- `.\update_upstreams.ps1 -LlamaOnly` syncs only `third_party/llama.cpp`.
+- `.\update_upstreams.ps1 -WhisperOnly` syncs only `third_party/whisper.cpp`.
+- `.\update_upstreams.ps1 -LlamaRef <ref> -WhisperRef <ref>` pins branches/tags/commits.
+- `.\update_upstreams.ps1 -Commit` stages and commits synced folders.
+- `.\update_upstreams.ps1 -Commit -Push` also pushes.
 
 These scripts are tooling-only and not part of runtime inference.
 
@@ -30,51 +31,29 @@ These scripts are tooling-only and not part of runtime inference.
 ## Licenses and notices
 
 - [`third_party/licenses/README.md`](https://github.com/openresearchtools/engine/blob/main/third_party/licenses/README.md)
-- [`third_party/licenses/torch-LICENSE.txt`](https://github.com/openresearchtools/engine/blob/main/third_party/licenses/torch-LICENSE.txt)
-- [`third_party/licenses/torchaudio-LICENSE.txt`](https://github.com/openresearchtools/engine/blob/main/third_party/licenses/torchaudio-LICENSE.txt)
-- [`third_party/licenses/numpy-LICENSE.txt`](https://github.com/openresearchtools/engine/blob/main/third_party/licenses/numpy-LICENSE.txt)
-- [`third_party/licenses/tooling-full/`](https://github.com/openresearchtools/engine/tree/main/third_party/licenses/tooling-full/)
 
-### License audit
+## Release inventory tracking
 
-Run before release to enumerate files carrying embedded license markers:
+Use this after packaging to capture exact shipped files, hashes, and PE dependency lists.
 
 ```
-.\extras\license_audit.ps1
+powershell -ExecutionPolicy Bypass -File .\extras\release_inventory.ps1 -ArtifactDir "..\ENGINEbuilds\my-release"
 ```
 
-Outputs:
+Output:
 
-- `../ENGINEbuilds/license-audits/license-audit-<timestamp>.csv`
+- `..\ENGINEbuilds\release-inventory\run-<timestamp>\artifact-files.csv`
+- `..\ENGINEbuilds\release-inventory\run-<timestamp>\allowlist.txt`
+- `..\ENGINEbuilds\release-inventory\run-<timestamp>\binary-dependents.txt`
 
-Use `-NoThirdParty` if you want to exclude `third_party`.
-Use `-OnlyFirstParty` to isolate only files outside `third_party`.
-Use `-Strict -FailOnUnknown` for a stricter release check.
-Use `-FailOnFirstParty` to fail if any first-party files contain license markers.
-
-## C++ licenses snapshot
-
-Run this to export upstream **license notice files**:
-
-- `third_party/licenses/cpp_licenses/llama.cpp/`
-- `third_party/licenses/cpp_licenses/whisper.cpp/`
+Create baseline:
 
 ```
-.\extras\extract_cpp_licenses.ps1
+powershell -ExecutionPolicy Bypass -File .\extras\release_inventory.ps1 -ArtifactDir "..\ENGINEbuilds\my-release" -WriteBaseline -BaselineName "win-x64-release"
 ```
 
-Use `-IncludeNested` to also copy nested `LICENSE`/`COPYING`/`NOTICE` files.
-
-## CPP embedded license dump
-
-Run this to dump **only files in `third_party/llama.cpp` and `third_party/whisper.cpp` that contain embedded license markers**:
+Compare against baseline:
 
 ```
-.\extras\extract_cpp_embedded_licenses.ps1
+powershell -ExecutionPolicy Bypass -File .\extras\release_inventory.ps1 -ArtifactDir "..\ENGINEbuilds\my-release" -CompareBaseline -BaselineName "win-x64-release"
 ```
-
-Output is written to:
-
-- `..\ENGINEbuilds\cpp-license-snippets\cpp-license-snippets.txt`
-- `..\ENGINEbuilds\cpp-license-snippets\files\*.license-snippets.txt`
-- `..\ENGINEbuilds\cpp-license-snippets\cpp-license-embedded-manifest.csv`

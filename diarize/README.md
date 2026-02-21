@@ -20,6 +20,27 @@ This folder contains the native audio patch layer to apply on top of `llama.cpp`
 powershell -ExecutionPolicy Bypass -File .\diarize\scripts\apply_llama_overlay.ps1
 ```
 
+If overlay files moved, pass explicit path:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\diarize\scripts\apply_llama_overlay.ps1 `
+  -OverlayRoot ".\diarize\addons\overlay\llama.cpp"
+```
+
+## Build unified CUDA audio stack
+
+All build outputs are staged outside the repo by default:
+
+- `..\ENGINEbuilds\audio\llama-cuda-release\`
+- `..\ENGINEbuilds\audio\whisper-cuda-release\`
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\diarize\scripts\build_unified_audio_stack_cuda.ps1 `
+  -Config Release `
+  -ApplyOverlay $true `
+  -BuildWhisperCli $true
+```
+
 ## Licenses and notices
 
 - [`third_party/licenses/README.md`](https://github.com/openresearchtools/engine/blob/main/third_party/licenses/README.md)
