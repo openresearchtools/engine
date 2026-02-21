@@ -112,7 +112,7 @@ This example runs “image → Markdown” conversion with the default extractio
 ```powershell
 # VLM markdown conversion (default prompt = markdown extraction)
 engine.exe vlm `
-  --model ".\models\qwen3vl.gguf" `
+  --model ".\models\vision.gguf" `
   --mmproj ".\models\mmproj.gguf" `
   --image ".\page.png" `
   --out ".\page.md" `
@@ -125,7 +125,7 @@ If you want the model to answer a specific question about an image, provide your
 ```powershell
 # VLM image chat (set your own prompt)
 engine.exe vlm `
-  --model ".\models\qwen3vl.gguf" `
+  --model ".\models\vision.gguf" `
   --mmproj ".\models\mmproj.gguf" `
   --image ".\image.png" `
   --prompt "Describe this image and summarize key elements." `
@@ -140,7 +140,7 @@ If a model is too large for one GPU, you can split across multiple devices. This
 ```powershell
 # Multi-GPU split
 engine.exe chat `
-  --model ".\models\big.gguf" `
+  --model ".\models\model.gguf" `
   --markdown ".\input.md" `
   --devices 0,1 `
   --split-mode layer `
@@ -201,7 +201,7 @@ You can also optionally set:
 * `--diarization-device <value>` (defaults to `auto`)
 
 A repository of converted GGUF diarization models is available here:
-`https://huggingface.co/openresearchtools/speaker-diarization-community-1-GGUF`
+[https://huggingface.co/openresearchtools/speaker-diarization-community-1-GGUF](https://huggingface.co/openresearchtools/speaker-diarization-community-1-GGUF)
 
 ### Advanced diarization knobs (JSON only via `--body-json`)
 
@@ -267,7 +267,7 @@ engine.exe audio `
   --mode transcript `
   --custom 3 `
   --whisper-hf-repo ggerganov/whisper.cpp `
-  --whisper-hf-file ggml-large-v3-turbo.bin `
+  --whisper-hf-file your-whisper-hf-file.bin `
   --diarization-hf-repo openresearchtools/speaker-diarization-community-1-GGUF `
   --diarization-device cuda
 ```
@@ -303,22 +303,22 @@ VLM PDF conversion (PDF → render → VLM → Markdown). Choose the option that
 engine.exe pdfvlm `
   --pdf ".\paper.pdf" `
   --pdfium-dll ".\third_party\pdfium\bin\pdfium.dll" `
-  --model ".\models\qwen3vl.gguf" `
+  --model ".\models\vision.gguf" `
   --mmproj ".\models\mmproj.gguf" `
   --out ".\paper_vlm.md"
 
 # Option B: bundled app - if pdfium.dll is next to engine.exe, omit --pdfium-dll
-engine.exe pdfvlm --pdf ".\paper.pdf" --model ".\models\qwen3vl.gguf" --mmproj ".\models\mmproj.gguf" --out ".\paper_vlm.md"
+engine.exe pdfvlm --pdf ".\paper.pdf" --model ".\models\vision.gguf" --mmproj ".\models\mmproj.gguf" --out ".\paper_vlm.md"
 
 # Option C: set env var once
 $env:PDFIUM_DLL=".\third_party\pdfium\bin\pdfium.dll"
-engine.exe pdfvlm --pdf ".\paper.pdf" --model ".\models\qwen3vl.gguf" --mmproj ".\models\mmproj.gguf" --out ".\paper_vlm.md"
+engine.exe pdfvlm --pdf ".\paper.pdf" --model ".\models\vision.gguf" --mmproj ".\models\mmproj.gguf" --out ".\paper_vlm.md"
 ```
 
 ### VLM model note (tested configuration)
 
 For scientific PDF → Markdown conversion, we tested the Qwen3-VL GGUF release:
-`https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/tree/main`
+[https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/tree/main](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/tree/main)
 
 In our testing, we got **reasonably high quality results** with:
 
@@ -350,7 +350,7 @@ Batched embeddings from a file (separate vectors per input row):
 '@ | Set-Content .\embed_request.json
 
 engine.exe embed `
-  --model ".\models\qwen3-embed.gguf" `
+  --model ".\models\embedding.gguf" `
   --body-json ".\embed_request.json" `
   --out ".\embed_response.json" `
   --devices 0 `
@@ -361,7 +361,7 @@ Batched embeddings with inline JSON (useful for quick tests):
 
 ```powershell
 engine.exe embed `
-  --model ".\models\qwen3-embed.gguf" `
+  --model ".\models\embedding.gguf" `
   --body-json '{"input":["a","b","c"],"encoding_format":"float"}'
 ```
 
@@ -387,7 +387,7 @@ Rerank from a file:
 '@ | Set-Content .\rerank_request.json
 
 engine.exe rerank `
-  --model ".\models\qwen3-reranker.gguf" `
+  --model ".\models\reranker.gguf" `
   --body-json ".\rerank_request.json" `
   --out ".\rerank_response.json" `
   --devices 0 `
@@ -398,7 +398,7 @@ Rerank with inline JSON:
 
 ```powershell
 engine.exe rerank `
-  --model ".\models\qwen3-reranker.gguf" `
+  --model ".\models\reranker.gguf" `
   --body-json '{"query":"table extraction quality","documents":["doc1","doc2","doc3"],"top_n":2}'
 ```
 
@@ -406,7 +406,7 @@ Another inline example (same shape, different query/documents):
 
 ```powershell
 engine.exe rerank `
-  --model ".\models\qwen3-reranker.gguf" `
+  --model ".\models\reranker.gguf" `
   --body-json '{"query":"find adverse effects","documents":["row A text","row B text","row C text"],"top_n":3}' `
   --devices 0 `
   --n-gpu-layers -1
@@ -416,7 +416,7 @@ With multi-GPU split:
 
 ```powershell
 engine.exe rerank `
-  --model ".\models\qwen3-reranker.gguf" `
+  --model ".\models\reranker.gguf" `
   --body-json '{"query":"find adverse effects","documents":["row A text","row B text","row C text"],"top_n":3}' `
   --devices 0,1 `
   --split-mode layer `

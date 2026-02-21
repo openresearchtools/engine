@@ -11,8 +11,8 @@ This folder contains the native audio patch layer to apply on top of `llama.cpp`
 
 ## Expected source layout
 
-- `../third_party/llama.cpp/`
-- `../third_party/whisper.cpp/`
+- [`third_party/llama.cpp/`](https://github.com/openresearchtools/engine/tree/main/third_party/llama.cpp/)
+- [`third_party/whisper.cpp/`](https://github.com/openresearchtools/engine/tree/main/third_party/whisper.cpp/)
 
 ## Apply overlay
 
@@ -22,9 +22,9 @@ powershell -ExecutionPolicy Bypass -File .\diarize\scripts\apply_llama_overlay.p
 
 ## Licenses and notices
 
-- `../third_party/licenses/README.md`
-- `../third_party/licenses/llama.cpp-LICENSE.txt`
-- `../third_party/licenses/whisper.cpp-LICENSE.txt`
-- `../third_party/licenses/pyannote.audio-LICENSE.txt`
-- `../third_party/licenses/WeSpeaker-LICENSE.txt`
-- `../third_party/licenses/tooling-full/`
+- [`third_party/licenses/README.md`](https://github.com/openresearchtools/engine/blob/main/third_party/licenses/README.md)
+- [`third_party/licenses/llama.cpp-LICENSE.txt`](https://github.com/openresearchtools/engine/blob/main/third_party/licenses/llama.cpp-LICENSE.txt)
+- [`third_party/licenses/whisper.cpp-LICENSE.txt`](https://github.com/openresearchtools/engine/blob/main/third_party/licenses/whisper.cpp-LICENSE.txt)
+- [`third_party/licenses/pyannote.audio-LICENSE.txt`](https://github.com/openresearchtools/engine/blob/main/third_party/licenses/pyannote.audio-LICENSE.txt)
+- [`third_party/licenses/WeSpeaker-LICENSE.txt`](https://github.com/openresearchtools/engine/blob/main/third_party/licenses/WeSpeaker-LICENSE.txt)
+- [`third_party/licenses/tooling-full/`](https://github.com/openresearchtools/engine/tree/main/third_party/licenses/tooling-full/)

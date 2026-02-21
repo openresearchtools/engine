@@ -7,12 +7,12 @@ This repository contains runtime integration code and conversion/parity tooling 
 ### 1) llama.cpp
 
 - Role: Core C/C++ inference/runtime framework and server base.
-- Source location in this repository layout: `../llama.cpp`
+- Source location in this repository layout: [`third_party/llama.cpp`](https://github.com/openresearchtools/engine/tree/main/third_party/llama.cpp)
 - Add-on integration files in this repository:
-  - `../diarize/addons/overlay/llama.cpp/tools/CMakeLists.txt`
-  - `../diarize/addons/overlay/llama.cpp/tools/server/*`
-  - `../diarize/addons/overlay/llama.cpp/tools/pyannote/*`
-  - `../diarize/addons/overlay/llama.cpp/tools/whisper/*`
+  - [`diarize/addons/overlay/llama.cpp/tools/CMakeLists.txt`](https://github.com/openresearchtools/engine/blob/main/diarize/addons/overlay/llama.cpp/tools/CMakeLists.txt)
+  - [`diarize/addons/overlay/llama.cpp/tools/server/`](https://github.com/openresearchtools/engine/tree/main/diarize/addons/overlay/llama.cpp/tools/server/)
+  - [`diarize/addons/overlay/llama.cpp/tools/pyannote/`](https://github.com/openresearchtools/engine/tree/main/diarize/addons/overlay/llama.cpp/tools/pyannote/)
+  - [`diarize/addons/overlay/llama.cpp/tools/whisper/`](https://github.com/openresearchtools/engine/tree/main/diarize/addons/overlay/llama.cpp/tools/whisper/)
 - License: MIT
 - License type: MIT
 - License file: `llama.cpp-LICENSE.txt`
@@ -20,7 +20,7 @@ This repository contains runtime integration code and conversion/parity tooling 
 ### 2) whisper.cpp
 
 - Role: Native whisper transcription implementation integrated into `llama-server` in-process for audio flow.
-- Source location in this repository layout: `../whisper.cpp`
+- Source location in this repository layout: [`third_party/whisper.cpp`](https://github.com/openresearchtools/engine/tree/main/third_party/whisper.cpp)
 - License: MIT
 - License type: MIT
 - License file: `whisper.cpp-LICENSE.txt`
@@ -29,7 +29,7 @@ This repository contains runtime integration code and conversion/parity tooling 
 
 - Role: reference/source for diarization pipeline structure and tensor naming/metadata semantics used by native C++ reimplementation.
 - Native C++ runtime implementation is provided through overlayed pyannote integration under:
-  - `../diarize/addons/overlay/llama.cpp/tools/pyannote/`
+  - [`diarize/addons/overlay/llama.cpp/tools/pyannote/`](https://github.com/openresearchtools/engine/tree/main/diarize/addons/overlay/llama.cpp/tools/pyannote/)
 - Runtime endpoint path does not invoke Python.
 - License: MIT
 - License type: MIT
@@ -49,7 +49,7 @@ This repository contains runtime integration code and conversion/parity tooling 
 - License type: MIT
 - License file: `docling-LICENSE.txt`
 - Attribution note: parts of VLM preprocessing logic were borrowed/adapted, including prompting, page-wise image rendering, scale/oversample flow, and Catmull-Rom (bicubic-style) downscale before inference.
-- Borrowed/adapted scaling behavior used in `ENGINE/pdfvlm/src/pdf_to_markdown.rs` includes:
+- Borrowed/adapted scaling behavior used in [`engine/pdfvlm/src/pdf_to_markdown.rs`](https://github.com/openresearchtools/engine/blob/main/engine/pdfvlm/src/pdf_to_markdown.rs) includes:
   - page-wise rasterization before VLM inference
   - target page scaling (`--scale`, default `2.0`)
   - temporary oversample (`--oversample`, default `1.5`)
@@ -63,7 +63,7 @@ This repository contains runtime integration code and conversion/parity tooling 
 
 ### 7) PDFium runtime binaries
 
-- Runtime location: `../pdfium`
+- Runtime location: [`third_party/pdfium`](https://github.com/openresearchtools/engine/tree/main/third_party/pdfium)
 - License type: BSD-3-Clause + Apache-2.0 + additional third-party notices
 - License file: `pdfium-LICENSE.txt`
 - Binary source used in this project: `https://github.com/bblanchon/pdfium-binaries`
@@ -77,8 +77,8 @@ This repository contains runtime integration code and conversion/parity tooling 
 - Binary fetch source: `https://github.com/BtbN/FFmpeg-Builds`
 - Binary fetch source license type: MIT
 - Binary fetch source license file: `ffmpeg-builds-LICENSE.txt`
-- Fetch script: `../build/download-ffmpeg-lgpl-win-x64.ps1`
-- Expected runtime location: `../third_party/ffmpeg/`
+- Fetch script: [`build/download-ffmpeg-lgpl-win-x64.ps1`](https://github.com/openresearchtools/engine/blob/main/build/download-ffmpeg-lgpl-win-x64.ps1)
+- Expected runtime location: [`third_party/ffmpeg`](https://github.com/openresearchtools/engine/tree/main/third_party/ffmpeg)
 - License type (intended build): LGPL (LGPL-only shared build)
 - License file: `ffmpeg-LGPL-2.1.txt`
 - Source/provenance note: `ffmpeg-SOURCE.txt`
@@ -90,9 +90,9 @@ These packages/scripts are used by local conversion or parity scripts and are no
 
 Tooling scripts:
 
-- `../extras/convert_pyannote_checkpoint_to_gguf.py`
-- `../extras/convert_pyannote_npz_to_gguf.py`
-- `../extras/convert_pyannote_to_gguf.ps1`
+- [`extras/convert_pyannote_checkpoint_to_gguf.py`](https://github.com/openresearchtools/engine/blob/main/extras/convert_pyannote_checkpoint_to_gguf.py)
+- [`extras/convert_pyannote_npz_to_gguf.py`](https://github.com/openresearchtools/engine/blob/main/extras/convert_pyannote_npz_to_gguf.py)
+- [`extras/convert_pyannote_to_gguf.ps1`](https://github.com/openresearchtools/engine/blob/main/extras/convert_pyannote_to_gguf.ps1)
 
 Primary tooling dependencies with dedicated top-level license files:
 
@@ -111,13 +111,13 @@ Primary tooling dependencies with dedicated top-level license files:
 
 Full transitive tooling export:
 
-- `tooling-full/`
+- [`tooling-full/`](https://github.com/openresearchtools/engine/tree/main/third_party/licenses/tooling-full/)
 
 ## Runtime integration notes
 
-- Audio patch/overlay mechanism for upstream sync is maintained in `../diarize/addons/overlay/llama.cpp/`.
-- Bridge runtime integration code is maintained in `../bridge/`.
-- PDF orchestration modules are in `../pdf/` and `../pdfvlm/`.
+- Audio patch/overlay mechanism for upstream sync is maintained in [`diarize/addons/overlay/llama.cpp/`](https://github.com/openresearchtools/engine/tree/main/diarize/addons/overlay/llama.cpp/).
+- Bridge runtime integration code is maintained in [`bridge/`](https://github.com/openresearchtools/engine/tree/main/bridge/).
+- PDF orchestration modules are in [`pdf/`](https://github.com/openresearchtools/engine/tree/main/pdf/) and [`pdfvlm/`](https://github.com/openresearchtools/engine/tree/main/pdfvlm/).
 - Bridge raw-audio path supports in-memory conversion via FFmpeg when bridge is built with `LLAMA_SERVER_BRIDGE_ENABLE_FFMPEG=ON`.
 
 ## Dependency mapping (Rust workspace direct deps)

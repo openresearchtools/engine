@@ -21,13 +21,13 @@ These scripts are tooling-only and not part of runtime inference.
 
 ## Local dependencies
 
-- `../third_party/llama.cpp/gguf-py/` for GGUF writer import
+- [`third_party/llama.cpp/gguf-py/`](https://github.com/openresearchtools/engine/tree/main/third_party/llama.cpp/gguf-py/) for GGUF writer import
 - Python environment with conversion dependencies
 
 ## Licenses and notices
 
-- `../third_party/licenses/README.md`
-- `../third_party/licenses/torch-LICENSE.txt`
-- `../third_party/licenses/torchaudio-LICENSE.txt`
-- `../third_party/licenses/numpy-LICENSE.txt`
-- `../third_party/licenses/tooling-full/`
+- [`third_party/licenses/README.md`](https://github.com/openresearchtools/engine/blob/main/third_party/licenses/README.md)
+- [`third_party/licenses/torch-LICENSE.txt`](https://github.com/openresearchtools/engine/blob/main/third_party/licenses/torch-LICENSE.txt)
+- [`third_party/licenses/torchaudio-LICENSE.txt`](https://github.com/openresearchtools/engine/blob/main/third_party/licenses/torchaudio-LICENSE.txt)
+- [`third_party/licenses/numpy-LICENSE.txt`](https://github.com/openresearchtools/engine/blob/main/third_party/licenses/numpy-LICENSE.txt)
+- [`third_party/licenses/tooling-full/`](https://github.com/openresearchtools/engine/tree/main/third_party/licenses/tooling-full/)
