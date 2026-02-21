@@ -8,6 +8,7 @@ Tooling scripts for pyannote model conversion and GGUF packaging.
 - `convert_pyannote_npz_to_gguf.py`
 - `convert_pyannote_to_gguf.ps1`
 - `update_upstreams.ps1`
+- `license_audit.ps1`
 
 ### Update third_party subtrees
 
@@ -31,3 +32,20 @@ These scripts are tooling-only and not part of runtime inference.
 - [`third_party/licenses/torchaudio-LICENSE.txt`](https://github.com/openresearchtools/engine/blob/main/third_party/licenses/torchaudio-LICENSE.txt)
 - [`third_party/licenses/numpy-LICENSE.txt`](https://github.com/openresearchtools/engine/blob/main/third_party/licenses/numpy-LICENSE.txt)
 - [`third_party/licenses/tooling-full/`](https://github.com/openresearchtools/engine/tree/main/third_party/licenses/tooling-full/)
+
+### License audit
+
+Run before release to enumerate files carrying embedded license markers:
+
+```
+.\extras\license_audit.ps1
+```
+
+Outputs:
+
+- `../ENGINEbuilds/license-audits/license-audit-<timestamp>.csv`
+
+Use `-NoThirdParty` if you want to exclude `third_party`.
+Use `-OnlyFirstParty` to isolate only files outside `third_party`.
+Use `-Strict -FailOnUnknown` for a stricter release check.
+Use `-FailOnFirstParty` to fail if any first-party files contain license markers.
