@@ -2,6 +2,12 @@
 
 This repository contains runtime integration code and conversion/parity tooling that reference third-party projects.
 
+## Backend key-license bundles
+
+- CUDA bundle key licenses: `LICENSES-cuda.txt`
+- Vulkan bundle key licenses: `LICENSES-vulkan.txt`
+- Legacy/default key bundle (full): `LICENSES.txt`
+
 ## Runtime (shipped engine)
 
 ### 1) llama.cpp
@@ -62,6 +68,69 @@ Build-note: BoringSSL is fetched by CMake in this build profile (`LLAMA_BUILD_BO
 - License: dual option (Public Domain / MIT No Attribution)
 - License type: Public Domain (Unlicense-style) OR MIT-0
 - License file: `miniaudio-LICENSE.txt`
+
+### 1d) Additional ggml CPU-component attributions used by CPU backend variants
+
+- YaRN reference implementation attribution inside ggml CPU rope path:
+  - Source location: [`third_party/llama.cpp/ggml/src/ggml-cpu/ops.cpp`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/ggml/src/ggml-cpu/ops.cpp)
+  - Upstream reference: `https://github.com/jquesnelle/yarn`
+  - License type: MIT
+  - License file: `yarn-LICENSE.txt`
+- llamafile SGEMM component used by ggml CPU backend:
+  - Source location: [`third_party/llama.cpp/ggml/src/ggml-cpu/llamafile/sgemm.cpp`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/ggml/src/ggml-cpu/llamafile/sgemm.cpp)
+  - Upstream reference: `https://github.com/Mozilla-Ocho/llamafile`
+  - License type: MIT
+  - License file: `llamafile-sgemm-LICENSE.txt`
+- KleidiAI source attribution (used by ggml CPU backend when enabled):
+  - Source locations:
+    - [`third_party/llama.cpp/ggml/src/ggml-cpu/kleidiai/kleidiai.cpp`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/ggml/src/ggml-cpu/kleidiai/kleidiai.cpp)
+    - [`third_party/llama.cpp/ggml/src/ggml-cpu/kleidiai/kernels.cpp`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/ggml/src/ggml-cpu/kleidiai/kernels.cpp)
+  - Upstream reference: `https://github.com/ARM-software/kleidiai`
+  - License type: MIT
+  - License file: `kleidiai-LICENSE.txt`
+
+### 1e) Additional C/C++ source-attribution licenses (upstream originals)
+
+- Repository: `openvinotoolkit/openvino`
+  - Upstream: `https://github.com/openvinotoolkit/openvino`
+  - Source-attribution locations:
+    - [`third_party/llama.cpp/ggml/src/ggml-cpu/vec.h`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/ggml/src/ggml-cpu/vec.h)
+    - [`third_party/whisper.cpp/ggml/src/ggml-cpu/vec.h`](https://github.com/openresearchtools/engine/blob/main/third_party/whisper.cpp/ggml/src/ggml-cpu/vec.h)
+  - License type: Apache-2.0
+  - License file in this folder: `openvino-LICENSE.txt`
+- Repository: `ARM-software/optimized-routines`
+  - Upstream: `https://github.com/ARM-software/optimized-routines`
+  - Source-attribution locations:
+    - [`third_party/llama.cpp/ggml/src/ggml-cpu/vec.h`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/ggml/src/ggml-cpu/vec.h)
+    - [`third_party/whisper.cpp/ggml/src/ggml-cpu/vec.h`](https://github.com/openresearchtools/engine/blob/main/third_party/whisper.cpp/ggml/src/ggml-cpu/vec.h)
+  - License type: MIT OR Apache-2.0 WITH LLVM-exception
+  - License file in this folder: `arm-optimized-routines-LICENSE.txt`
+- Repository: `cmp-nct/ggllm.cpp`
+  - Upstream: `https://github.com/cmp-nct/ggllm.cpp`
+  - Source-attribution location:
+    - [`third_party/llama.cpp/src/llama-vocab.cpp`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/src/llama-vocab.cpp)
+  - License type: MIT
+  - License file in this folder: `ggllm.cpp-LICENSE.txt`
+- Repository: `ivanyu/string-algorithms`
+  - Upstream: `https://github.com/ivanyu/string-algorithms`
+  - Source-attribution location:
+    - [`third_party/llama.cpp/src/llama-sampler.cpp`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/src/llama-sampler.cpp)
+  - License type: Public Domain (Unlicense text)
+  - License file in this folder: `string-algorithms-LICENSE.txt`
+- Repository: `LostRuins/koboldcpp`
+  - Upstream: `https://github.com/LostRuins/koboldcpp`
+  - Source-attribution location:
+    - [`third_party/llama.cpp/src/llama-sampler.cpp`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/src/llama-sampler.cpp)
+  - License type: MIT (current upstream repository license)
+  - License file in this folder: `koboldcpp-LICENSE.txt`
+- Repository: `llvm/llvm-project`
+  - Upstream: `https://github.com/llvm/llvm-project`
+  - Source-attribution locations:
+    - [`third_party/llama.cpp/ggml/src/ggml-sycl/`](https://github.com/openresearchtools/engine/tree/main/third_party/llama.cpp/ggml/src/ggml-sycl)
+    - [`third_party/whisper.cpp/ggml/src/ggml-sycl/`](https://github.com/openresearchtools/engine/tree/main/third_party/whisper.cpp/ggml/src/ggml-sycl)
+  - License type: Apache-2.0 WITH LLVM-exception
+  - License file in this folder: `llvm-project-LICENSE.TXT`
+  - Build note: SYCL backend sources are present in tree, but are not used in the current Windows CUDA release profile.
 
 ### 2) whisper.cpp
 

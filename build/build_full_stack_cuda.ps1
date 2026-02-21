@@ -1,6 +1,8 @@
 param(
     [ValidateSet("Debug", "Release", "RelWithDebInfo", "MinSizeRel")]
     [string]$CmakeConfig = "Release",
+    [ValidateSet("cuda", "vulkan")]
+    [string]$Backend = "cuda",
     [ValidateSet("Debug", "Release")]
     [string]$CargoProfile = "Release",
     [string]$CmakeExe = "cmake",
@@ -178,7 +180,7 @@ $CmakeExe = Resolve-CmakeExecutable -ToolValue $CmakeExe
 $repoLlamaDir = Join-Path $repoRoot "third_party\\llama.cpp"
 
 if ([string]::IsNullOrWhiteSpace($BuildRoot)) {
-    $BuildRoot = Join-Path $buildsRoot "full-stack-cuda"
+    $BuildRoot = Join-Path $buildsRoot ("full-stack-" + $Backend)
 }
 $BuildRoot = Resolve-AbsolutePath -PathValue $BuildRoot -RepoRoot $repoRoot
 
@@ -338,7 +340,7 @@ if ($FetchRuntimeDeps) {
 $bridgeArgs = @{
     CmakeExe = $CmakeExe
     Config = $CmakeConfig
-    Backend = "cuda"
+    Backend = $Backend
     HttpsBackend = $HttpsBackend
     LlamaCppDir = $LlamaCppDir
     BuildDir = $LlamaBuildDir
@@ -360,10 +362,13 @@ if ($EnableFfmpeg) {
 
 & $bridgeScript @bridgeArgs
 if ($LASTEXITCODE -ne 0) {
-    throw "Bridge/llama CUDA build failed."
+    throw "Bridge/llama build failed for backend '$Backend'."
 }
 
 if ($BuildWhisperCli) {
+    if ($Backend -ne "cuda") {
+        throw "BuildWhisperCli currently supports only Backend=cuda."
+    }
     Invoke-WhisperBuild -Cmake $CmakeExe -SourceDir $WhisperCppDir -BuildDir $WhisperBuildDir -ConfigName $CmakeConfig -ParallelJobs $Jobs
 }
 
@@ -380,6 +385,7 @@ $engineArgs = @{
     StageCmakeRuntime = $true
     StageFfmpegRuntime = $EnableFfmpeg.IsPresent
     StageCudaRuntime = $StageCudaRuntime
+    LicenseProfile = $Backend
 }
 
 & $engineScript @engineArgs
@@ -387,7 +393,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Engine build/stage failed."
 }
 
-Write-Host "Full CUDA stack build completed."
+Write-Host "Full stack build completed for backend: $Backend"
 Write-Host "llama/bridge build: $LlamaBuildDir"
 if ($BuildWhisperCli) {
     Write-Host "whisper build: $WhisperBuildDir"

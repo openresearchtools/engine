@@ -13,7 +13,9 @@ param(
     [bool]$StageCmakeRuntime = $true,
     [bool]$StageFfmpegRuntime = $true,
     [bool]$StageCudaRuntime = $true,
-    [bool]$StageRepoLicenseFiles = $true
+    [bool]$StageRepoLicenseFiles = $true,
+    [ValidateSet("default", "cuda", "vulkan")]
+    [string]$LicenseProfile = "default"
 )
 
 $ErrorActionPreference = "Stop"
@@ -153,7 +155,8 @@ function Stage-RepoLicenseFiles {
     param(
         [string]$RepoRoot,
         [string]$BundleOutDir,
-        [string]$BundleLicenseRoot
+        [string]$BundleLicenseRoot,
+        [string]$LicenseProfile
     )
 
     $sourceDir = Join-Path $RepoRoot "third_party\\licenses"
@@ -172,6 +175,12 @@ function Stage-RepoLicenseFiles {
         "numpy-LICENSE.txt",
         "ffmpeg-SOURCE.txt"
     )
+    if ($LicenseProfile -eq "vulkan") {
+        $excludedTopLevelFiles += @(
+            "nvidia-cuda-EULA.txt",
+            "nvidia-cuda-runtime-NOTICE.txt"
+        )
+    }
 
     # Copy curated, top-level license files only. Skip tooling-only files.
     $topLevelFiles = Get-ChildItem -Path $sourceDir -File -ErrorAction SilentlyContinue
@@ -188,11 +197,25 @@ function Stage-RepoLicenseFiles {
     }
 
     $bundleKeyLicenses = Join-Path $BundleOutDir "LICENSES.txt"
-    $repoKeyLicenses = Join-Path $sourceDir "LICENSES.txt"
-    if (Test-Path -LiteralPath $repoKeyLicenses) {
-        Copy-Item -LiteralPath $repoKeyLicenses -Destination $bundleKeyLicenses -Force
+    $licenseCandidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($LicenseProfile) -and $LicenseProfile -ne "default") {
+        $licenseCandidates += "LICENSES-$LicenseProfile.txt"
+    }
+    $licenseCandidates += "LICENSES.txt"
+
+    $selectedLicensePath = ""
+    foreach ($candidateName in $licenseCandidates) {
+        $candidatePath = Join-Path $sourceDir $candidateName
+        if (Test-Path -LiteralPath $candidatePath) {
+            $selectedLicensePath = $candidatePath
+            break
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($selectedLicensePath)) {
+        Copy-Item -LiteralPath $selectedLicensePath -Destination $bundleKeyLicenses -Force
     } else {
-        Write-Warning "Key release licenses file not found at '$repoKeyLicenses'"
+        Write-Warning "Key release licenses file not found (candidates: $($licenseCandidates -join ', '))"
     }
 
     $noticePath = Join-Path $BundleOutDir "THIRD_PARTY_NOTICES.md"
@@ -358,7 +381,7 @@ if (Test-Path -LiteralPath $PdfiumDll) {
 
 $bundleLicenseRoot = Join-Path $OutDir "licenses"
 if ($StageRepoLicenseFiles) {
-    Stage-RepoLicenseFiles -RepoRoot $repoRoot -BundleOutDir $OutDir -BundleLicenseRoot $bundleLicenseRoot
+    Stage-RepoLicenseFiles -RepoRoot $repoRoot -BundleOutDir $OutDir -BundleLicenseRoot $bundleLicenseRoot -LicenseProfile $LicenseProfile
 }
 
 $pdfiumRoot = Resolve-PdfiumRoot -PdfiumDllPath $PdfiumDll

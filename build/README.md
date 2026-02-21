@@ -47,13 +47,26 @@ Defaults:
 - Prepared source: `..\ENGINEbuilds\sources\llama.cpp\`
 - Patch: latest `..\ENGINEbuilds\patches\llama-working-overlay-*.patch`
 
-## One-command full CUDA flow
+## One-command full backend flow (CUDA or Vulkan)
 
-This applies overlay/bridge patching, builds patched llama+bridge with CUDA, fetches runtime deps, then builds/stages engine bundle.
+This applies overlay/bridge patching, builds patched llama+bridge for the selected backend, fetches runtime deps, then builds/stages engine bundle.
 By default it does not build extra CLI binaries (only `engine.exe` is staged).
 
 ```powershell
 .\build\build_full_stack_cuda.ps1 `
+  -Backend cuda `
+  -CmakeConfig Release `
+  -CargoProfile Release `
+  -BuildWhisperCli $false `
+  -ApplyDiarizeOverlay $true `
+  -EnableFfmpeg
+```
+
+Vulkan example:
+
+```powershell
+.\build\build_full_stack_cuda.ps1 `
+  -Backend vulkan `
   -CmakeConfig Release `
   -CargoProfile Release `
   -BuildWhisperCli $false `
@@ -72,9 +85,9 @@ Optional FFmpeg source override in one-command flow:
 
 Default outputs:
 
-- `..\ENGINEbuilds\full-stack-cuda\llama-build\`
-- `..\ENGINEbuilds\full-stack-cuda\cargo-target\`
-- `..\ENGINEbuilds\full-stack-cuda\bundle\`
+- `..\ENGINEbuilds\full-stack-<backend>\llama-build\`
+- `..\ENGINEbuilds\full-stack-<backend>\cargo-target\`
+- `..\ENGINEbuilds\full-stack-<backend>\bundle\`
 
 ## Step-by-step flow (manual)
 
@@ -105,6 +118,7 @@ If your overlay folder moved, pass:
   -CmakeBuildDir "..\ENGINEbuilds\llama\cmake-cuda-release" `
   -CargoTargetDir "..\ENGINEbuilds\cargo-target" `
   -OutDir "..\ENGINEbuilds\bundle-release" `
+  -LicenseProfile cuda `
   -StageCmakeRuntime $true `
   -StageFfmpegRuntime $true
 ```
