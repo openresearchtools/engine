@@ -359,6 +359,11 @@ jobs:
           copy_license_files "$BUILD_ROOT/runtime-deps/pdfium" "$bundle_pdfium"
           copy_license_files "$BUILD_ROOT/runtime-deps/ffmpeg" "$bundle_ffmpeg_root"
 
+          # Always include authoritative FFmpeg LGPL text from this repo.
+          ffmpeg_lgpl="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-LGPL-2.1.txt"
+          [[ -f "$ffmpeg_lgpl" ]] || { echo "Missing required FFmpeg LGPL file: $ffmpeg_lgpl"; exit 1; }
+          cp "$ffmpeg_lgpl" "$bundle_ffmpeg_root/ffmpeg-LGPL-2.1.txt"
+
           # Always include authoritative PDFium license texts from this repo.
           pdfium_primary="$GITHUB_WORKSPACE/third_party/licenses/pdfium-LICENSE.txt"
           pdfium_source="$GITHUB_WORKSPACE/third_party/licenses/pdfium-binaries-LICENSE.txt"
@@ -535,6 +540,8 @@ jobs:
           ffmpeg_licenses="$bundle/vendor/ffmpeg"
           [[ -d "$ffmpeg_licenses" ]] || { echo "Missing FFmpeg vendor directory: $ffmpeg_licenses"; exit 1; }
           find "$ffmpeg_licenses" -type f \( -iname '*LICENSE*' -o -iname '*LICENCE*' -o -iname '*COPYING*' -o -iname '*COPYRIGHT*' -o -iname '*NOTICE*' -o -iname '*PATENTS*' -o -iname '*EULA*' -o -iname '*SOURCE*' \) | grep -q . || { echo "No FFmpeg license files found in $ffmpeg_licenses"; exit 1; }
+          [[ -f "$bundle/vendor/ffmpeg/ffmpeg-LGPL-2.1.txt" ]] || { echo "Missing required FFmpeg LGPL text: vendor/ffmpeg/ffmpeg-LGPL-2.1.txt"; exit 1; }
+          [[ -f "$bundle/vendor/ffmpeg/ffmpeg-SOURCE.txt" ]] || { echo "Missing required FFmpeg source notice: vendor/ffmpeg/ffmpeg-SOURCE.txt"; exit 1; }
 
           pdfium_licenses="$bundle/vendor/pdfium"
           [[ -d "$pdfium_licenses" ]] || { echo "Missing PDFium vendor directory: $pdfium_licenses"; exit 1; }
