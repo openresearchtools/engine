@@ -215,10 +215,16 @@ function Stage-RepoLicenseFiles {
     $licenseCandidates += "LICENSES.txt"
 
     $selectedLicensePath = ""
-    foreach ($candidateName in $licenseCandidates) {
-        $candidatePath = Join-Path $sourceDir $candidateName
-        if (Test-Path -LiteralPath $candidatePath) {
-            $selectedLicensePath = $candidatePath
+    $licenseSearchRoots = @($BundleLicenseRoot, $destDir)
+    foreach ($searchRoot in $licenseSearchRoots) {
+        foreach ($candidateName in $licenseCandidates) {
+            $candidatePath = Join-Path $searchRoot $candidateName
+            if (Test-Path -LiteralPath $candidatePath) {
+                $selectedLicensePath = $candidatePath
+                break
+            }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($selectedLicensePath)) {
             break
         }
     }
@@ -226,7 +232,7 @@ function Stage-RepoLicenseFiles {
     if (-not [string]::IsNullOrWhiteSpace($selectedLicensePath)) {
         Copy-Item -LiteralPath $selectedLicensePath -Destination $bundleKeyLicenses -Force
     } else {
-        Write-Warning "Key release licenses file not found (candidates: $($licenseCandidates -join ', '))"
+        Write-Warning "Key release licenses file not found in bundle license roots (candidates: $($licenseCandidates -join ', '))"
     }
 
     $noticePath = Join-Path $BundleLicenseRoot "THIRD_PARTY_NOTICES.md"
@@ -346,6 +352,27 @@ if (-not [string]::IsNullOrWhiteSpace($BridgeBinDir)) {
 New-Item -ItemType Directory -Force -Path $CargoTargetDir | Out-Null
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
+$vendorRoot = Join-Path $OutDir "vendor"
+$pdfiumVendorDir = Join-Path $vendorRoot "pdfium"
+$ffmpegVendorBinDir = Join-Path $vendorRoot "ffmpeg\\bin"
+New-Item -ItemType Directory -Force -Path $vendorRoot | Out-Null
+
+# Remove legacy root-level runtime files so output remains vendor-scoped.
+$legacyRuntimePatterns = @(
+    "pdfium.dll",
+    "avcodec*.dll",
+    "avformat*.dll",
+    "avutil*.dll",
+    "swresample*.dll",
+    "swscale*.dll"
+)
+foreach ($pattern in $legacyRuntimePatterns) {
+    $legacyFiles = Get-ChildItem -Path $OutDir -Filter $pattern -File -ErrorAction SilentlyContinue
+    foreach ($legacyFile in $legacyFiles) {
+        Remove-Item -LiteralPath $legacyFile.FullName -Force -ErrorAction SilentlyContinue
+    }
+}
+
 $originalCargoTargetDir = [Environment]::GetEnvironmentVariable("CARGO_TARGET_DIR", "Process")
 [Environment]::SetEnvironmentVariable("CARGO_TARGET_DIR", $CargoTargetDir, "Process")
 
@@ -390,9 +417,14 @@ if (-not (Copy-IfExists -SourcePath $pdfvlmDll -DestPath (Join-Path $OutDir "pdf
 }
 
 if (Test-Path -LiteralPath $PdfiumDll) {
-    Copy-Item -LiteralPath $PdfiumDll -Destination (Join-Path $OutDir "pdfium.dll") -Force
+    if (Test-Path -LiteralPath $pdfiumVendorDir) {
+        Remove-Item -LiteralPath $pdfiumVendorDir -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $pdfiumVendorDir | Out-Null
+    $pdfiumFileName = Split-Path -Leaf $PdfiumDll
+    Copy-Item -LiteralPath $PdfiumDll -Destination (Join-Path $pdfiumVendorDir $pdfiumFileName) -Force
 } else {
-    Write-Warning "pdfium.dll not found at '$PdfiumDll' (skipping copy)"
+    Write-Warning "PDFium library not found at '$PdfiumDll' (skipping copy)"
 }
 
 $bundleLicenseRoot = Join-Path $OutDir "licenses"
@@ -407,6 +439,10 @@ if (-not [string]::IsNullOrWhiteSpace($pdfiumRoot)) {
 
 if ($StageFfmpegRuntime) {
     if (Test-Path -LiteralPath $FfmpegBinDir) {
+        if (Test-Path -LiteralPath $ffmpegVendorBinDir) {
+            Remove-Item -LiteralPath $ffmpegVendorBinDir -Recurse -Force
+        }
+        New-Item -ItemType Directory -Force -Path $ffmpegVendorBinDir | Out-Null
         $ffmpegPatterns = @(
             "avcodec*.dll",
             "avformat*.dll",
@@ -417,7 +453,7 @@ if ($StageFfmpegRuntime) {
         foreach ($pattern in $ffmpegPatterns) {
             $ffmpegDlls = Get-ChildItem -Path $FfmpegBinDir -Filter $pattern -File -ErrorAction SilentlyContinue
             foreach ($dll in $ffmpegDlls) {
-                Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $OutDir $dll.Name) -Force
+                Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $ffmpegVendorBinDir $dll.Name) -Force
             }
         }
 

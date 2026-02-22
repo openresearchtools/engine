@@ -18,7 +18,7 @@ struct Cli {
         long,
         global = true,
         value_name = "PATH",
-        help = "Path to pdfium.dll, or a folder containing pdfium.dll"
+        help = "Path to PDFium library file (e.g. pdfium.dll/libpdfium.dylib), or a folder containing it"
     )]
     pdfium_lib: Option<PathBuf>,
 

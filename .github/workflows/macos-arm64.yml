@@ -9,7 +9,6 @@ on:
         type: choice
         options:
           - metal
-          - cpu
         default: metal
 
 concurrency:
@@ -26,7 +25,7 @@ jobs:
     env:
       BACKEND: ${{ inputs.backend }}
       FFMPEG_TAG: "n8.0.1"
-      FFMPEG_SHA: "d22ecc4f6f3fca77b3e71b18641ceddb25973e97"
+      FFMPEG_SHA: "894da5ca7d742e4429ffb2af534fcda0103ef593"
       PDFIUM_RELEASE_API: "https://api.github.com/repos/bblanchon/pdfium-binaries/releases/latest"
     steps:
       - name: Checkout
@@ -45,6 +44,11 @@ jobs:
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Install Build Dependencies
         shell: bash
         run: |
@@ -62,7 +66,7 @@ jobs:
           mkdir -p "$(dirname "$ffmpeg_src")" "$ffmpeg_out"
 
           git clone --depth 1 --branch "$FFMPEG_TAG" https://github.com/FFmpeg/FFmpeg "$ffmpeg_src"
-          actual_sha="$(git -C "$ffmpeg_src" rev-parse HEAD)"
+          actual_sha="$(git -C "$ffmpeg_src" rev-parse "HEAD^{commit}")"
           if [[ "$actual_sha" != "$FFMPEG_SHA" ]]; then
             echo "Pinned SHA mismatch. Expected $FFMPEG_SHA, got $actual_sha"
             exit 1
@@ -116,67 +120,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          llama_src="$BUILD_ROOT/llama-src"
-          whisper_sibling="$BUILD_ROOT/whisper.cpp"
-          patch_file="$GITHUB_WORKSPACE/diarize/addons/patches/0300-llama-unified-audio.patch"
-
-          if [[ ! -f "$patch_file" ]]; then
-            echo "Missing patch: $patch_file"
-            exit 1
-          fi
-
-          rm -rf "$llama_src" "$whisper_sibling"
-          mkdir -p "$llama_src"
-
-          rsync -a --delete "$GITHUB_WORKSPACE/third_party/llama.cpp/" "$llama_src/"
-          rsync -a --delete "$GITHUB_WORKSPACE/third_party/whisper.cpp/" "$llama_src/whisper.cpp/"
-          rsync -a --delete "$GITHUB_WORKSPACE/third_party/whisper.cpp/" "$whisper_sibling/"
-
-          mkdir -p "$llama_src/MARKDOWN/bridge"
-          rsync -a --delete "$GITHUB_WORKSPACE/bridge/" "$llama_src/MARKDOWN/bridge/"
-
-          extra_root="$GITHUB_WORKSPACE/diarize/addons/overlay/llama.cpp/tools"
-          extra_files=(
-            "pyannote/CMakeLists.txt"
-            "pyannote/pyannote-align.cpp"
-            "pyannote/pyannote-diarize.cpp"
-            "pyannote/pyannote-entrypoints.h"
-            "pyannote/pyannote-inspect.cpp"
-            "server/inproc-pipeline-repro.cpp"
-            "whisper/whisper-cli-entrypoint.cpp"
-            "whisper/whisper-cli-entrypoint.h"
-            "whisper/whisper-common-audio.cpp"
-          )
-          for rel in "${extra_files[@]}"; do
-            src="$extra_root/$rel"
-            dst="$llama_src/tools/$rel"
-            if [[ ! -f "$src" ]]; then
-              echo "Missing required add-on source file: $src"
-              exit 1
-            fi
-            mkdir -p "$(dirname "$dst")"
-            if [[ -e "$dst" ]]; then
-              echo "Refusing to overwrite existing llama.cpp file: $dst"
-              exit 1
-            fi
-            cp "$src" "$dst"
-          done
-
-          cmake_top="$llama_src/CMakeLists.txt"
-          if [[ ! -f "$cmake_top" ]]; then
-            echo "Missing CMakeLists.txt in staged llama source: $cmake_top"
-            exit 1
-          fi
-          if ! grep -q "LLAMA_BUILD_MARKDOWN_BRIDGE" "$cmake_top"; then
-            perl -0pi -e 's/(option\(LLAMA_BUILD_SERVER\s+"[^"]+"\s+\$\{LLAMA_STANDALONE\}\)\R)/$1option(LLAMA_BUILD_MARKDOWN_BRIDGE "llama: build markdown in-process bridge library" OFF)\n/' "$cmake_top"
-          fi
-          if ! grep -q "add_subdirectory(MARKDOWN/bridge)" "$cmake_top"; then
-            perl -0pi -e 's/(if \(LLAMA_BUILD_COMMON AND LLAMA_BUILD_TOOLS\)\s*add_subdirectory\(tools\)\s*endif\(\))/\1\nif (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TOOLS AND LLAMA_BUILD_MARKDOWN_BRIDGE)\n    add_subdirectory(MARKDOWN\/bridge)\nendif()/s' "$cmake_top"
-          fi
-
-          git -C "$llama_src" init
-          git -C "$llama_src" apply --check --ignore-space-change --ignore-whitespace "$patch_file"
-          git -C "$llama_src" apply --whitespace=nowarn --ignore-space-change --ignore-whitespace "$patch_file"
+          python3 "$GITHUB_WORKSPACE/build/prepare_llama_source_from_patch.py" \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --out-dir "$BUILD_ROOT/llama-src" \
+            --force
 
       - name: Configure and Build llama Bridge
         shell: bash
@@ -205,9 +152,7 @@ jobs:
             -DLLAMA_SERVER_BRIDGE_FFMPEG_ROOT="$ffmpeg_root"
             -DGGML_NATIVE=OFF
           )
-          if [[ "$BACKEND" == "metal" ]]; then
-            cmake_args+=(-DGGML_METAL=ON)
-          fi
+          cmake_args+=(-DGGML_METAL=ON)
 
           cmake "${cmake_args[@]}"
           cmake --build "$llama_build" --parallel --target llama-server-bridge
@@ -234,33 +179,43 @@ jobs:
           set -euo pipefail
           bundle="$BUILD_ROOT/bundle"
           bundle_licenses="$bundle/licenses"
+          bundle_vendor="$bundle/vendor"
+          bundle_pdfium="$bundle_vendor/pdfium"
+          bundle_ffmpeg="$bundle_vendor/ffmpeg/lib"
           cargo_release="$BUILD_ROOT/cargo-target/release"
 
           rm -rf "$bundle"
-          mkdir -p "$bundle" "$bundle_licenses"
+          mkdir -p "$bundle" "$bundle_licenses" "$bundle_pdfium" "$bundle_ffmpeg"
 
           cp "$cargo_release/engine" "$bundle/engine"
           cp "$cargo_release/libpdf.dylib" "$bundle/libpdf.dylib"
           cp "$cargo_release/libpdfvlm.dylib" "$bundle/libpdfvlm.dylib"
 
+          # Keep bridge/llama/ggml dylibs at bundle root and preserve symlink aliases
+          # (e.g. libfoo.0.dylib -> libfoo.0.0.0.dylib) for stable loader resolution.
+          llama_lib_dir="$BUILD_ROOT/llama-build/bin"
+          [[ -d "$llama_lib_dir" ]] || { echo "Missing llama build output dir: $llama_lib_dir"; exit 1; }
           while IFS= read -r -d '' lib; do
-            cp -L "$lib" "$bundle/$(basename "$lib")"
-          done < <(find "$BUILD_ROOT/llama-build" -type f \( \
+            cp -a "$lib" "$bundle/$(basename "$lib")"
+          done < <(find "$llama_lib_dir" \( \
             -name "libllama-server-bridge*.dylib" -o \
             -name "libllama*.dylib" -o \
             -name "libggml*.dylib" -o \
             -name "libmtmd*.dylib" \
           \) -print0)
 
-          cp -L "$PDFIUM_LIB" "$bundle/libpdfium.dylib"
+          cp -L "$PDFIUM_LIB" "$bundle_pdfium/$(basename "$PDFIUM_LIB")"
 
           for name in avcodec avformat avutil swresample swscale; do
-            src="$(find "$BUILD_ROOT/runtime-deps/ffmpeg/lib" -type f -name "lib${name}*.dylib" | sort | head -n1 || true)"
-            if [[ -z "$src" ]]; then
+            found=0
+            while IFS= read -r -d '' src; do
+              cp -a "$src" "$bundle_ffmpeg/$(basename "$src")"
+              found=1
+            done < <(find "$BUILD_ROOT/runtime-deps/ffmpeg/lib" -name "lib${name}*.dylib" -print0)
+            if [[ "$found" -eq 0 ]]; then
               echo "Missing FFmpeg runtime dylib for lib${name}"
               exit 1
             fi
-            cp -L "$src" "$bundle/$(basename "$src")"
           done
 
           mkdir -p "$bundle_licenses/third_party"
@@ -278,7 +233,23 @@ jobs:
           rm -rf "$bundle_licenses/rust-full"
           cp -R "$GITHUB_WORKSPACE/third_party/licenses/rust-full" "$bundle_licenses/rust-full"
           cp "$GITHUB_WORKSPACE/LICENSE" "$bundle/LICENSE-ENGINE.txt"
-          cp "$GITHUB_WORKSPACE/third_party/licenses/LICENSES.txt" "$bundle_licenses/LICENSES.txt"
+
+          # Select backend-appropriate key license bundle.
+          # macOS metal backend is non-CUDA and should not stage CUDA EULA notices.
+          key_profile="$BACKEND"
+          selected_key=""
+          for candidate in "LICENSES-${key_profile}.txt" "LICENSES-vulkan.txt" "LICENSES.txt"; do
+            candidate_path="$GITHUB_WORKSPACE/third_party/licenses/$candidate"
+            if [[ -f "$candidate_path" ]]; then
+              selected_key="$candidate_path"
+              break
+            fi
+          done
+          if [[ -z "$selected_key" ]]; then
+            echo "No key LICENSES file found for profile '$key_profile'"
+            exit 1
+          fi
+          cp "$selected_key" "$bundle_licenses/LICENSES.txt"
 
           printf '%s\n' \
             '# Third-Party Notices' \
@@ -327,6 +298,129 @@ jobs:
           copy_license_files "$BUILD_ROOT/runtime-deps/pdfium" "$bundle_licenses/pdfium"
           copy_license_files "$BUILD_ROOT/runtime-deps/ffmpeg" "$bundle_licenses/ffmpeg"
 
+          # Source FFmpeg installs may not contain copied license files.
+          # Ensure bundle/licenses/ffmpeg is never empty.
+          if ! find "$bundle_licenses/ffmpeg" -type f | grep -q .; then
+            ffmpeg_lgpl="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-LGPL-2.1.txt"
+            ffmpeg_source="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-SOURCE.txt"
+            [[ -f "$ffmpeg_lgpl" ]] || { echo "Missing fallback FFmpeg license file: $ffmpeg_lgpl"; exit 1; }
+            [[ -f "$ffmpeg_source" ]] || { echo "Missing fallback FFmpeg source notice file: $ffmpeg_source"; exit 1; }
+            cp "$ffmpeg_lgpl" "$bundle_licenses/ffmpeg/ffmpeg-LGPL-2.1.txt"
+            cp "$ffmpeg_source" "$bundle_licenses/ffmpeg/ffmpeg-SOURCE.txt"
+          fi
+
+      - name: Fixup and Verify Mach-O Load Paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$BUILD_ROOT/bundle"
+          ffmpeg_dir="$bundle/vendor/ffmpeg/lib"
+          pdfium_dir="$bundle/vendor/pdfium"
+          macho_files="$RUNNER_TEMP/macho-files.txt"
+          dylib_files="$RUNNER_TEMP/macho-dylib-files.txt"
+
+          : > "$macho_files"
+          : > "$dylib_files"
+
+          echo "$bundle/engine" >> "$macho_files"
+
+          find "$bundle" -maxdepth 1 -type f -name "*.dylib" -print >> "$macho_files"
+          find "$bundle" -maxdepth 1 -type f -name "*.dylib" -print >> "$dylib_files"
+          find "$ffmpeg_dir" -type f -name "*.dylib" -print >> "$macho_files"
+          find "$ffmpeg_dir" -type f -name "*.dylib" -print >> "$dylib_files"
+          find "$pdfium_dir" -type f -name "*.dylib" -print >> "$macho_files"
+          find "$pdfium_dir" -type f -name "*.dylib" -print >> "$dylib_files"
+
+          sort -u "$macho_files" -o "$macho_files"
+          sort -u "$dylib_files" -o "$dylib_files"
+
+          while IFS= read -r file; do
+            [[ -n "$file" ]] || continue
+            base="$(basename "$file")"
+            install_name_tool -id "@loader_path/$base" "$file"
+          done < "$dylib_files"
+
+          resolve_bundled_target() {
+            local dep_base="$1"
+            if [[ -f "$bundle/$dep_base" ]]; then
+              echo "$bundle/$dep_base"
+              return
+            fi
+            if [[ -f "$ffmpeg_dir/$dep_base" ]]; then
+              echo "$ffmpeg_dir/$dep_base"
+              return
+            fi
+            if [[ -f "$pdfium_dir/$dep_base" ]]; then
+              echo "$pdfium_dir/$dep_base"
+              return
+            fi
+          }
+
+          to_loader_path() {
+            local from_file="$1"
+            local to_file="$2"
+            python3 - "$from_file" "$to_file" <<'PY'
+            import os
+            import sys
+
+            from_dir = os.path.dirname(os.path.abspath(sys.argv[1]))
+            to_path = os.path.abspath(sys.argv[2])
+            rel = os.path.relpath(to_path, from_dir).replace("\\", "/")
+            print(f"@loader_path/{rel}")
+            PY
+          }
+
+          while IFS= read -r file; do
+            [[ -n "$file" ]] || continue
+            while IFS= read -r dep; do
+              [[ -n "$dep" ]] || continue
+              dep_base="$(basename "$dep")"
+              target="$(resolve_bundled_target "$dep_base" || true)"
+              if [[ -n "$target" ]]; then
+                new_dep="$(to_loader_path "$file" "$target")"
+                if [[ "$dep" != "$new_dep" ]]; then
+                  install_name_tool -change "$dep" "$new_dep" "$file"
+                fi
+              fi
+            done < <(otool -L "$file" | awk 'NR > 1 { print $1 }')
+          done < "$macho_files"
+
+          while IFS= read -r file; do
+            [[ -n "$file" ]] || continue
+            deps="$(otool -L "$file" | awk 'NR > 1 { print $1 }')"
+            if printf '%s\n' "$deps" | grep -F "$BUILD_ROOT" >/dev/null; then
+              echo "Found non-relocatable dependency path using BUILD_ROOT in $file"
+              otool -L "$file"
+              exit 1
+            fi
+            if printf '%s\n' "$deps" | grep -F "$GITHUB_WORKSPACE" >/dev/null; then
+              echo "Found non-relocatable dependency path using GITHUB_WORKSPACE in $file"
+              otool -L "$file"
+              exit 1
+            fi
+            if printf '%s\n' "$deps" | grep -F "/runtime-deps/" >/dev/null; then
+              echo "Found leaked runtime-deps dependency path in $file"
+              otool -L "$file"
+              exit 1
+            fi
+            unexpected="$(printf '%s\n' "$deps" | awk '
+              $1 ~ /^@loader_path\// { next }
+              $1 ~ /^\/System\/Library\// { next }
+              $1 ~ /^\/usr\/lib\// { next }
+              { print }
+            ')"
+            if [[ -n "$unexpected" ]]; then
+              echo "Found unexpected dependency path(s) in $file:"
+              printf '%s\n' "$unexpected"
+              otool -L "$file"
+              exit 1
+            fi
+          done < "$macho_files"
+
+          otool -L "$bundle/engine"
+          bridge_lib="$(ls "$bundle"/libllama-server-bridge*.dylib | head -n1)"
+          otool -L "$bridge_lib"
+
       - name: Validate Bundle Contents
         shell: bash
         run: |
@@ -338,7 +432,7 @@ jobs:
             "engine"
             "libpdf.dylib"
             "libpdfvlm.dylib"
-            "libpdfium.dylib"
+            "vendor/pdfium/libpdfium.dylib"
             "LICENSE-ENGINE.txt"
             "licenses/LICENSES.txt"
             "licenses/THIRD_PARTY_NOTICES.md"
@@ -349,13 +443,74 @@ jobs:
 
           ls "$bundle"/libllama-server-bridge*.dylib >/dev/null 2>&1 || { echo "Missing libllama-server-bridge*.dylib"; exit 1; }
           ls "$bundle"/libggml-cpu*.dylib >/dev/null 2>&1 || { echo "Missing libggml-cpu*.dylib"; exit 1; }
-          if [[ "$BACKEND" == "metal" ]]; then
-            ls "$bundle"/libggml-metal*.dylib >/dev/null 2>&1 || { echo "Missing libggml-metal*.dylib for metal backend"; exit 1; }
+          ls "$bundle"/libggml-metal*.dylib >/dev/null 2>&1 || { echo "Missing libggml-metal*.dylib for metal backend"; exit 1; }
+
+          ffmpeg_dir="$bundle/vendor/ffmpeg/lib"
+          [[ -d "$ffmpeg_dir" ]] || { echo "Missing FFmpeg vendor directory: $ffmpeg_dir"; exit 1; }
+          for lib in avcodec avformat avutil swresample swscale; do
+            ls "$ffmpeg_dir"/lib${lib}*.dylib >/dev/null 2>&1 || { echo "Missing FFmpeg runtime dylib: lib${lib}*.dylib"; exit 1; }
+          done
+
+          ffmpeg_licenses="$bundle/licenses/ffmpeg"
+          [[ -d "$ffmpeg_licenses" ]] || { echo "Missing FFmpeg license directory: $ffmpeg_licenses"; exit 1; }
+          find "$ffmpeg_licenses" -type f | grep -q . || { echo "No FFmpeg license files found in $ffmpeg_licenses"; exit 1; }
+
+          if grep -Eiq "nvidia-cuda-EULA|nvidia-cuda-runtime-NOTICE" "$bundle/licenses/LICENSES.txt"; then
+            echo "Non-CUDA macOS bundle staged CUDA key-license entries in licenses/LICENSES.txt"
+            exit 1
           fi
 
-          for lib in avcodec avformat avutil swresample swscale; do
-            ls "$bundle"/lib${lib}*.dylib >/dev/null 2>&1 || { echo "Missing FFmpeg runtime dylib: lib${lib}*.dylib"; exit 1; }
-          done
+      - name: Smoke Test Bundle Runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$BUILD_ROOT/bundle"
+          smoke_out="$RUNNER_TEMP/engine-list-devices.txt"
+
+          cd "$bundle"
+          chmod +x ./engine
+          unset DYLD_LIBRARY_PATH
+          ./engine list-devices > "$smoke_out" 2>&1 || {
+            cat "$smoke_out"
+            echo "engine list-devices failed"
+            exit 1
+          }
+          cat "$smoke_out"
+
+          grep -q "devices_count=" "$smoke_out" || {
+            echo "Unexpected list-devices output (missing devices_count)"
+            exit 1
+          }
+
+          if ! grep -Eiq "metal|backend=.*metal" "$smoke_out"; then
+            echo "Metal backend was requested but not reported by list-devices output."
+            exit 1
+          fi
+
+          BUNDLE_ROOT="$bundle" python3 - <<'PY'
+          import ctypes
+          import glob
+          import os
+
+          bundle = os.environ["BUNDLE_ROOT"]
+          mode = getattr(os, "RTLD_NOW", None)
+          bridge = sorted(glob.glob(os.path.join(bundle, "libllama-server-bridge*.dylib")))
+          if not bridge:
+              raise SystemExit("Missing libllama-server-bridge*.dylib for ctypes smoke test")
+          targets = [
+              bridge[0],
+              os.path.join(bundle, "libpdf.dylib"),
+              os.path.join(bundle, "libpdfvlm.dylib"),
+          ]
+          for path in targets:
+              if not os.path.exists(path):
+                  raise SystemExit(f"Missing smoke library: {path}")
+              if mode is None:
+                  ctypes.CDLL(path)
+              else:
+                  ctypes.CDLL(path, mode=mode)
+          print("ctypes-load-ok")
+          PY
 
       - name: Pack Bundle
         shell: bash

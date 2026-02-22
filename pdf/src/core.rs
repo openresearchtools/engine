@@ -189,10 +189,12 @@ fn bind_pdfium(pdfium_lib: Option<&Path>) -> Result<Pdfium> {
         return Ok(Pdfium::new(bindings));
     }
 
-    if let Ok(env_pdfium) = std::env::var("PDFIUM_DLL") {
-        let lib_path = resolve_pdfium_library_path(Path::new(&env_pdfium))?;
-        if let Ok(bindings) = Pdfium::bind_to_library(&lib_path) {
-            return Ok(Pdfium::new(bindings));
+    for env_key in ["PDFIUM_LIB", "PDFIUM_DLL"] {
+        if let Ok(env_pdfium) = std::env::var(env_key) {
+            let lib_path = resolve_pdfium_library_path(Path::new(&env_pdfium))?;
+            if let Ok(bindings) = Pdfium::bind_to_library(&lib_path) {
+                return Ok(Pdfium::new(bindings));
+            }
         }
     }
 
@@ -210,7 +212,7 @@ fn bind_pdfium(pdfium_lib: Option<&Path>) -> Result<Pdfium> {
 
     let bindings = Pdfium::bind_to_system_library().map_err(|err| {
         anyhow!(
-            "Unable to bind PDFium. Provide --pdfium-lib PATH to pdfium.dll or containing folder. Error: {err:?}"
+            "Unable to bind PDFium. Provide --pdfium-lib PATH to a PDFium library file (or containing folder). Error: {err:?}"
         )
     })?;
 
@@ -221,12 +223,15 @@ fn default_pdfium_candidates() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
     if let Ok(cwd) = std::env::current_dir() {
+        paths.push(cwd.join("vendor").join("pdfium"));
+        paths.push(cwd.clone());
         paths.push(cwd.join("third_party").join("pdfium").join("bin"));
         paths.push(cwd.join("third_party").join("pdfium"));
     }
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
+            paths.push(exe_dir.join("vendor").join("pdfium"));
             paths.push(exe_dir.to_path_buf());
             paths.push(exe_dir.join("third_party").join("pdfium").join("bin"));
             paths.push(exe_dir.join("third_party").join("pdfium"));

@@ -39,24 +39,24 @@ if (LLAMA_SERVER_BRIDGE_ENABLE_FFMPEG)
 
     target_compile_definitions(${TARGET} PRIVATE LLAMA_SERVER_BRIDGE_USE_FFMPEG)
     target_include_directories(${TARGET} PRIVATE "${LLAMA_SERVER_BRIDGE_FFMPEG_ROOT}/include")
+    target_link_directories(${TARGET} PRIVATE "${LLAMA_SERVER_BRIDGE_FFMPEG_ROOT}/lib")
+    target_link_libraries(${TARGET}
+        PRIVATE
+            avformat
+            avcodec
+            avutil
+            swresample
+            swscale
+    )
 
-    if (WIN32)
-        target_link_directories(${TARGET} PRIVATE "${LLAMA_SERVER_BRIDGE_FFMPEG_ROOT}/lib")
-        target_link_libraries(${TARGET}
-            PRIVATE
-                avformat
-                avcodec
-                avutil
-                swresample
-        )
-    else()
-        target_link_libraries(${TARGET}
-            PRIVATE
-                avformat
-                avcodec
-                avutil
-                swresample
-        )
+    if (APPLE)
+        set_target_properties(${TARGET} PROPERTIES
+            BUILD_RPATH "@loader_path/vendor/ffmpeg/lib"
+            INSTALL_RPATH "@loader_path/vendor/ffmpeg/lib")
+    elseif(UNIX)
+        set_target_properties(${TARGET} PROPERTIES
+            BUILD_RPATH "\$ORIGIN/vendor/ffmpeg/lib"
+            INSTALL_RPATH "\$ORIGIN/vendor/ffmpeg/lib")
     endif()
 endif()
 

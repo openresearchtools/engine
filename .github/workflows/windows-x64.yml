@@ -48,6 +48,11 @@ jobs:
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Install Ninja
         shell: pwsh
         run: |
@@ -126,10 +131,10 @@ jobs:
               "engine.exe",
               "pdf.dll",
               "pdfvlm.dll",
-              "pdfium.dll",
+              "vendor\\pdfium\\pdfium.dll",
               "LICENSE-ENGINE.txt",
-              "LICENSES.txt",
-              "THIRD_PARTY_NOTICES.md"
+              "licenses\\LICENSES.txt",
+              "licenses\\THIRD_PARTY_NOTICES.md"
           )
           foreach ($required in $requiredFiles) {
               if (-not (Test-Path -LiteralPath (Join-Path $bundle $required))) {
@@ -153,9 +158,14 @@ jobs:
               throw "Missing backend runtime DLL matching $backendDllPrefix*.dll"
           }
 
+          $ffmpegDir = Join-Path $bundle "vendor\\ffmpeg\\bin"
+          if (-not (Test-Path -LiteralPath $ffmpegDir)) {
+              throw "Missing FFmpeg vendor directory: $ffmpegDir"
+          }
+
           $ffmpegPrefixes = @("avcodec", "avformat", "avutil", "swresample", "swscale")
           foreach ($prefix in $ffmpegPrefixes) {
-              $matches = Get-ChildItem -Path $bundle -File -Filter "$prefix*.dll" -ErrorAction SilentlyContinue
+              $matches = Get-ChildItem -Path $ffmpegDir -File -Filter "$prefix*.dll" -ErrorAction SilentlyContinue
               if (-not $matches) {
                   throw "Missing FFmpeg runtime DLL matching $prefix*.dll"
               }

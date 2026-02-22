@@ -634,29 +634,31 @@ static bool ffmpeg_convert_to_wav_pcm16_mono_16k(
 
     in_rate = codec_ctx->sample_rate > 0 ? codec_ctx->sample_rate : 16000;
 #if LIBAVCODEC_VERSION_MAJOR >= 59
-    AVChannelLayout out_ch_layout = AV_CHANNEL_LAYOUT_MONO;
-    const AVChannelLayout * in_ch_layout = &codec_ctx->ch_layout;
-    AVChannelLayout fallback_in_ch_layout = {};
-    if (in_ch_layout->nb_channels <= 0) {
-        av_channel_layout_default(&fallback_in_ch_layout, 1);
-        in_ch_layout = &fallback_in_ch_layout;
-    }
+    {
+        AVChannelLayout out_ch_layout = AV_CHANNEL_LAYOUT_MONO;
+        const AVChannelLayout * in_ch_layout = &codec_ctx->ch_layout;
+        AVChannelLayout fallback_in_ch_layout = {};
+        if (in_ch_layout->nb_channels <= 0) {
+            av_channel_layout_default(&fallback_in_ch_layout, 1);
+            in_ch_layout = &fallback_in_ch_layout;
+        }
 
-    ret = swr_alloc_set_opts2(
-        &swr,
-        &out_ch_layout,
-        AV_SAMPLE_FMT_S16,
-        16000,
-        in_ch_layout,
-        codec_ctx->sample_fmt,
-        in_rate,
-        0,
-        nullptr);
-    av_channel_layout_uninit(&out_ch_layout);
-    av_channel_layout_uninit(&fallback_in_ch_layout);
-    if (ret < 0 || swr == nullptr) {
-        error = "ffmpeg: swr_alloc_set_opts2 failed";
-        goto fail;
+        ret = swr_alloc_set_opts2(
+            &swr,
+            &out_ch_layout,
+            AV_SAMPLE_FMT_S16,
+            16000,
+            in_ch_layout,
+            codec_ctx->sample_fmt,
+            in_rate,
+            0,
+            nullptr);
+        av_channel_layout_uninit(&out_ch_layout);
+        av_channel_layout_uninit(&fallback_in_ch_layout);
+        if (ret < 0 || swr == nullptr) {
+            error = "ffmpeg: swr_alloc_set_opts2 failed";
+            goto fail;
+        }
     }
 #else
     int64_t in_ch_layout = codec_ctx->channel_layout;
