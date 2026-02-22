@@ -36,8 +36,15 @@ Build source preparation is patch-only: repo `third_party/llama.cpp` snapshot + 
 
 ## Prepare external llama source (repo snapshot + patch)
 
+Canonical prep path is cross-platform Python (`build/prepare_llama_source_from_patch.py`).
+PowerShell wrapper (`build/prepare_llama_source_from_patch.ps1`) calls the same script.
+
 ```powershell
 .\build\prepare_llama_source_from_patch.ps1 -Force
+```
+
+```bash
+python3 ./build/prepare_llama_source_from_patch.py --force
 ```
 
 Defaults:
@@ -118,9 +125,9 @@ Default outputs:
 - `engine.exe`
 - `pdf.dll`
 - `pdfvlm.dll`
-- `pdfium.dll` (if found)
-- `llama-server-bridge.dll` and related llama/ggml runtime DLLs (if found)
-- FFmpeg runtime DLLs required by bridge audio conversion (if enabled)
+- `vendor/pdfium/pdfium.dll` (if found)
+- `llama-server-bridge.dll` and related llama/ggml runtime DLLs (if found, kept in bundle root)
+- `vendor/ffmpeg/bin/*.dll` runtime files required by bridge audio conversion (if enabled)
 - `LICENSE-ENGINE.txt` (project license)
 - `licenses/LICENSES.txt` (key runtime/release license texts combined into one file)
 - `licenses/THIRD_PARTY_NOTICES.md` (bundle-level notice index with pointers)
@@ -129,3 +136,30 @@ Default outputs:
 - `licenses/rust-full/*` copied from repo `third_party/licenses/rust-full`
 - `licenses/pdfium/*` copied from fetched PDFium runtime
 - `licenses/ffmpeg/*` copied from fetched FFmpeg runtime (when FFmpeg staging is enabled)
+
+## GitHub Actions: macOS arm64
+
+Workflow: `.github/workflows/macos-arm64.yml`
+
+Dispatch input `backend` supports:
+
+- `metal`
+
+Bundle artifact:
+
+- `engine-macos-arm64-metal-bundle`
+
+Bundle layout on macOS arm64:
+
+- `engine`
+- `libpdf.dylib`
+- `libpdfvlm.dylib`
+- `libllama-server-bridge*.dylib` and `libggml*.dylib` in bundle root
+- `vendor/pdfium/libpdfium.dylib`
+- `vendor/ffmpeg/lib/lib*.dylib`
+- `licenses/*`
+
+License staging note for macOS arm64:
+
+- Key bundle file `licenses/LICENSES.txt` is selected from the metal profile (`third_party/licenses/LICENSES-metal.txt`), with fallback to `LICENSES-vulkan.txt` then `LICENSES.txt`.
+- `licenses/ffmpeg/*` is populated from detected FFmpeg runtime license files, with fallback to repo-curated `ffmpeg-LGPL-2.1.txt` and `ffmpeg-SOURCE.txt` when source installs do not ship license files in the install prefix.

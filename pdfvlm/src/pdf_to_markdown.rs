@@ -109,6 +109,8 @@ impl SharedBridge {
         batch_size: u32,
         parallel: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        prepare_windows_bridge_runtime_paths();
+
         let c_model = CString::new(model_path.to_string_lossy().as_ref())?;
         let c_mmproj = CString::new(mmproj_path.to_string_lossy().as_ref())?;
 
@@ -244,8 +246,10 @@ fn usage() -> &'static str {
 
 Options:
   --pdf             Full path to input PDF.
-  --pdfium-dll      Optional path to pdfium.dll (or directory containing it).
-                    If omitted, tries PDFIUM_DLL env var, then relative app paths.
+  --pdfium-lib      Optional path to PDFium library file (e.g. pdfium.dll/libpdfium.dylib)
+                    or a directory containing it.
+  --pdfium-dll      Alias for --pdfium-lib (backward compatibility).
+                    If omitted, tries PDFIUM_LIB / PDFIUM_DLL env vars, then relative app paths.
   --image           Full path to input image.
   --model           Full path to VLM model gguf.
   --mmproj          Full path to vision projector gguf.
@@ -274,6 +278,78 @@ fn has_flag(args: &[String], key: &str) -> bool {
     args.iter().any(|a| a == key)
 }
 
+#[cfg(windows)]
+fn prepare_windows_bridge_runtime_paths() {
+    use std::collections::HashSet;
+    use std::ffi::c_void;
+    use std::iter;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::Once;
+
+    const LOAD_LIBRARY_SEARCH_DEFAULT_DIRS: u32 = 0x00001000;
+    const LOAD_LIBRARY_SEARCH_USER_DIRS: u32 = 0x00000400;
+
+    unsafe extern "system" {
+        fn SetDefaultDllDirectories(directory_flags: u32) -> i32;
+        fn AddDllDirectory(new_directory: *const u16) -> *mut c_void;
+        fn SetDllDirectoryW(path_name: *const u16) -> i32;
+    }
+
+    fn as_wide_null(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(iter::once(0))
+            .collect()
+    }
+
+    fn candidate_dirs() -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        if let Ok(exe_path) = env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                out.push(exe_dir.join("vendor").join("ffmpeg").join("bin"));
+            }
+        }
+        if let Ok(cwd) = env::current_dir() {
+            out.push(cwd.join("vendor").join("ffmpeg").join("bin"));
+        }
+        out
+    }
+
+    fn add_search_dir(path: &Path) {
+        if !path.is_dir() {
+            return;
+        }
+        let wide = as_wide_null(path);
+        unsafe {
+            let cookie = AddDllDirectory(wide.as_ptr());
+            if cookie.is_null() {
+                let _ = SetDllDirectoryW(wide.as_ptr());
+            }
+        }
+    }
+
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        unsafe {
+            let _ = SetDefaultDllDirectories(
+                LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS,
+            );
+        }
+
+        let mut seen = HashSet::new();
+        for dir in candidate_dirs() {
+            let key = dir.to_string_lossy().to_string();
+            if seen.insert(key) {
+                add_search_dir(&dir);
+            }
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn prepare_windows_bridge_runtime_paths() {}
+
 fn resolve_pdfium_path(path: &Path) -> PathBuf {
     if path.is_dir() {
         Pdfium::pdfium_platform_library_name_at_path(path)
@@ -284,16 +360,24 @@ fn resolve_pdfium_path(path: &Path) -> PathBuf {
 
 fn default_pdfium_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
+
+    let mut push_candidates_for_root = |root: &Path| {
+        out.push(resolve_pdfium_path(root));
+        out.push(resolve_pdfium_path(&root.join("vendor").join("pdfium")));
+        out.push(resolve_pdfium_path(
+            &root.join("third_party").join("pdfium").join("bin"),
+        ));
+        out.push(resolve_pdfium_path(
+            &root.join("third_party").join("pdfium"),
+        ));
+    };
+
     if let Ok(cwd) = env::current_dir() {
-        out.push(cwd.join("pdfium.dll"));
-        out.push(cwd.join("third_party").join("pdfium").join("bin").join("pdfium.dll"));
-        out.push(cwd.join("third_party").join("pdfium").join("pdfium.dll"));
+        push_candidates_for_root(&cwd);
     }
     if let Ok(exe_path) = env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            out.push(exe_dir.join("pdfium.dll"));
-            out.push(exe_dir.join("third_party").join("pdfium").join("bin").join("pdfium.dll"));
-            out.push(exe_dir.join("third_party").join("pdfium").join("pdfium.dll"));
+            push_candidates_for_root(exe_dir);
         }
     }
 
@@ -575,7 +659,10 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     }
 
     let mut pdf_path: Option<PathBuf> = None;
-    let mut pdfium_dll: Option<PathBuf> = env::var("PDFIUM_DLL").ok().map(PathBuf::from);
+    let mut pdfium_dll: Option<PathBuf> = env::var("PDFIUM_LIB")
+        .ok()
+        .or_else(|| env::var("PDFIUM_DLL").ok())
+        .map(PathBuf::from);
     let mut model_path: Option<PathBuf> = None;
     let mut mmproj_path: Option<PathBuf> = None;
     let mut out_md: Option<PathBuf> = None;
@@ -601,10 +688,10 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                 }
                 pdf_path = Some(PathBuf::from(&argv[i]));
             }
-            "--pdfium-dll" => {
+            "--pdfium-lib" | "--pdfium-dll" => {
                 i += 1;
                 if i >= argv.len() {
-                    return Err("--pdfium-dll requires a value".to_string());
+                    return Err("--pdfium-lib/--pdfium-dll requires a value".to_string());
                 }
                 pdfium_dll = Some(PathBuf::from(&argv[i]));
             }
@@ -755,7 +842,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         let resolved = resolve_pdfium_path(&p);
         if !resolved.exists() {
             return Err(format!(
-                "pdfium DLL not found at explicit/env path: {}",
+                "PDFium library not found at explicit/env path: {}",
                 resolved.display()
             ));
         }
@@ -764,7 +851,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         found
     } else {
         return Err(
-            "Could not locate pdfium.dll. Provide --pdfium-dll, set PDFIUM_DLL, or bundle pdfium.dll next to engine.exe.".to_string(),
+            "Could not locate a PDFium library. Provide --pdfium-lib, set PDFIUM_LIB/PDFIUM_DLL, or bundle PDFium under vendor/pdfium next to the app.".to_string(),
         );
     };
     let model_path = model_path.ok_or_else(|| "--model is required".to_string())?;
@@ -807,7 +894,7 @@ fn points_to_pixels(points: f32, scale: f32) -> i32 {
 
 fn render_pages_to_memory(args: &Args) -> Result<Vec<RenderedPage>, Box<dyn std::error::Error>> {
     if !args.pdfium_dll.exists() {
-        return Err(format!("pdfium DLL not found: {}", args.pdfium_dll.display()).into());
+        return Err(format!("PDFium library not found: {}", args.pdfium_dll.display()).into());
     }
     if !args.pdf_path.exists() {
         return Err(format!("PDF not found: {}", args.pdf_path.display()).into());

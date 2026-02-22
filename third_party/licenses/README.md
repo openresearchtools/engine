@@ -5,6 +5,7 @@ This repository contains runtime integration code and conversion/parity tooling 
 ## Backend key-license bundles
 
 - CUDA bundle key licenses: `LICENSES-cuda.txt`
+- Metal bundle key licenses: `LICENSES-metal.txt`
 - Vulkan bundle key licenses: `LICENSES-vulkan.txt`
 - Legacy/default key bundle (full): `LICENSES.txt`
 

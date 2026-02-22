@@ -35,6 +35,7 @@ It aims to unify chat, vision, embeddings, reranking, audio transcription/diariz
 ## How to embed it
 
 * `engine.exe` is an example wrapper showing how to call functions.
+* `engine` is not the embedding boundary; treat it as a reference CLI only.
 * Production embedding target is native binaries:
 
   * `llama-server-bridge.dll`
@@ -310,23 +311,23 @@ Fast digital PDF conversion:
 engine.exe pdf extract --input ".\paper.pdf" --output ".\paper_fast.md" --overwrite
 ```
 
-VLM PDF conversion (PDF → render → VLM → Markdown). Choose the option that matches how you ship `pdfium.dll`:
+VLM PDF conversion (PDF → render → VLM → Markdown). Choose the option that matches how you ship the PDFium runtime library:
 
 ```powershell
 # PDF VLM conversion
-# Option A: pass dll each call
+# Option A: pass library path each call
 engine.exe pdfvlm `
   --pdf ".\paper.pdf" `
-  --pdfium-dll ".\third_party\pdfium\bin\pdfium.dll" `
+  --pdfium-lib ".\vendor\pdfium\pdfium.dll" `
   --model ".\models\vision.gguf" `
   --mmproj ".\models\mmproj.gguf" `
   --out ".\paper_vlm.md"
 
-# Option B: bundled app - if pdfium.dll is next to engine.exe, omit --pdfium-dll
+# Option B: bundled app - if PDFium is under vendor/pdfium next to engine(.exe), omit --pdfium-lib
 engine.exe pdfvlm --pdf ".\paper.pdf" --model ".\models\vision.gguf" --mmproj ".\models\mmproj.gguf" --out ".\paper_vlm.md"
 
-# Option C: set env var once
-$env:PDFIUM_DLL=".\third_party\pdfium\bin\pdfium.dll"
+# Option C: set env var once (PDFIUM_DLL is still accepted for compatibility)
+$env:PDFIUM_LIB=".\vendor\pdfium\pdfium.dll"
 engine.exe pdfvlm --pdf ".\paper.pdf" --model ".\models\vision.gguf" --mmproj ".\models\mmproj.gguf" --out ".\paper_vlm.md"
 ```
 

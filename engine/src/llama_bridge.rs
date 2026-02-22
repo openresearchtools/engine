@@ -266,6 +266,78 @@ fn has_arg(args: &[String], key: &str) -> bool {
     args.iter().any(|a| a == key)
 }
 
+#[cfg(windows)]
+fn prepare_windows_bridge_runtime_paths() {
+    use std::collections::HashSet;
+    use std::ffi::c_void;
+    use std::iter;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::Once;
+
+    const LOAD_LIBRARY_SEARCH_DEFAULT_DIRS: u32 = 0x00001000;
+    const LOAD_LIBRARY_SEARCH_USER_DIRS: u32 = 0x00000400;
+
+    unsafe extern "system" {
+        fn SetDefaultDllDirectories(directory_flags: u32) -> i32;
+        fn AddDllDirectory(new_directory: *const u16) -> *mut c_void;
+        fn SetDllDirectoryW(path_name: *const u16) -> i32;
+    }
+
+    fn as_wide_null(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(iter::once(0))
+            .collect()
+    }
+
+    fn candidate_dirs() -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        if let Ok(exe_path) = env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                out.push(exe_dir.join("vendor").join("ffmpeg").join("bin"));
+            }
+        }
+        if let Ok(cwd) = env::current_dir() {
+            out.push(cwd.join("vendor").join("ffmpeg").join("bin"));
+        }
+        out
+    }
+
+    fn add_search_dir(path: &Path) {
+        if !path.is_dir() {
+            return;
+        }
+        let wide = as_wide_null(path);
+        unsafe {
+            let cookie = AddDllDirectory(wide.as_ptr());
+            if cookie.is_null() {
+                let _ = SetDllDirectoryW(wide.as_ptr());
+            }
+        }
+    }
+
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        unsafe {
+            let _ = SetDefaultDllDirectories(
+                LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS,
+            );
+        }
+
+        let mut seen = HashSet::new();
+        for dir in candidate_dirs() {
+            let key = dir.to_string_lossy().to_string();
+            if seen.insert(key) {
+                add_search_dir(&dir);
+            }
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn prepare_windows_bridge_runtime_paths() {}
+
 fn parse_usize_arg(args: &[String], key: &str, default_value: usize) -> Result<usize, String> {
     match arg_value(args, key) {
         Some(v) => v
@@ -347,6 +419,8 @@ fn make_bridge(
     embedding: bool,
     reranking: bool,
 ) -> Result<BridgeHandle, String> {
+    prepare_windows_bridge_runtime_paths();
+
     let model_c = CString::new(model_path).map_err(|_| "model path contains NUL byte".to_string())?;
     let mmproj_c = if let Some(v) = mmproj_path {
         Some(CString::new(v).map_err(|_| "mmproj path contains NUL byte".to_string())?)
@@ -413,6 +487,8 @@ shared optional flags:
 }
 
 fn run_list_devices() -> Result<(), String> {
+    prepare_windows_bridge_runtime_paths();
+
     let mut ptr_devices = ptr::null_mut();
     let mut count: usize = 0;
     let rc = unsafe { llama_server_bridge_list_devices(&mut ptr_devices, &mut count) };
@@ -1390,6 +1466,8 @@ fn run_rerank(args: &[String]) -> Result<(), String> {
 }
 
 pub fn run_bridge_cli_subcommand(sub: &str, sub_args: &[String]) -> Result<(), String> {
+    prepare_windows_bridge_runtime_paths();
+
     match sub {
         "list-devices" => run_list_devices(),
         "vlm" => run_vlm(sub_args),
@@ -1406,6 +1484,8 @@ pub fn run_bridge_cli_subcommand(sub: &str, sub_args: &[String]) -> Result<(), S
 }
 
 pub fn run_bridge_cli_from_env() -> Result<(), String> {
+    prepare_windows_bridge_runtime_paths();
+
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         println!("{}", bridge_cli_usage());
