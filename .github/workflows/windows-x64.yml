@@ -128,8 +128,8 @@ jobs:
               "pdfvlm.dll",
               "pdfium.dll",
               "LICENSE-ENGINE.txt",
-              "LICENSES.txt",
-              "THIRD_PARTY_NOTICES.md"
+              "licenses/LICENSES.txt",
+              "licenses/THIRD_PARTY_NOTICES.md"
           )
           foreach ($required in $requiredFiles) {
               if (-not (Test-Path -LiteralPath (Join-Path $bundle $required))) {
