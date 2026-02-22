@@ -518,20 +518,9 @@ jobs:
             exit 1
           }
 
-      - name: Pack Runtime
-        shell: bash
-        run: |
-          set -euo pipefail
-          bundle="$BUILD_ROOT/bundle"
-          out="$BUILD_ROOT/engine-ubuntu-x64-vulkan.tar.gz"
-          [[ -d "$bundle" ]] || { echo "Bundle folder not found: $bundle"; exit 1; }
-          rm -f "$out"
-          tar -C "$bundle" -czf "$out" .
-          [[ -f "$out" ]] || { echo "Failed to create archive: $out"; exit 1; }
-
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: engine-ubuntu-x64-vulkan
-          path: ${{ env.BUILD_ROOT }}/engine-ubuntu-x64-vulkan.tar.gz
+          path: ${{ env.BUILD_ROOT }}/bundle
           if-no-files-found: error

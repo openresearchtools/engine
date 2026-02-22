@@ -179,8 +179,8 @@ Dispatch input `backend` supports:
 
 Artifacts:
 
-- `engine-win-cuda-x64` (`engine-win-cuda-x64.zip`)
-- `engine-win-vulkan-x64` (`engine-win-vulkan-x64.zip`)
+- `engine-win-cuda-x64` (bundle directory artifact, no inner zip)
+- `engine-win-vulkan-x64` (bundle directory artifact, no inner zip)
 
 Workflow dispatch examples:
 
@@ -210,7 +210,7 @@ Dispatch input `backend` supports:
 Bundle artifact:
 
 - `engine-macos-arm64-metal`
-- Uploaded file: `engine-macos-arm64-metal.zip`
+- Content: bundle directory artifact (no inner zip)
 
 Workflow dispatch example:
 
@@ -294,7 +294,7 @@ Dispatch behavior:
 Bundle artifact:
 
 - `engine-ubuntu-x64-vulkan`
-- Uploaded file: `engine-ubuntu-x64-vulkan.tar.gz`
+- Content: bundle directory artifact (no inner tar.gz)
 
 Workflow dispatch example:
 
@@ -328,7 +328,11 @@ Workflow: `.github/workflows/release-all.yml`
   - Windows x64 Vulkan
   - macOS arm64 Metal
   - Ubuntu x64 Vulkan
-- Creates or updates one GitHub Release page and uploads all assets.
+- Creates or updates one GitHub Release page and uploads packaged assets:
+  - `engine-win-cuda-x64.zip`
+  - `engine-win-vulkan-x64.zip`
+  - `engine-macos-arm64-metal.zip`
+  - `engine-ubuntu-x64-vulkan.tar.gz`
 - Runtime note used in release page:
   - Windows/Ubuntu artifacts include CPU runtime support.
   - macOS artifact is presented as Metal-focused (Apple Silicon unified-memory GPU path).

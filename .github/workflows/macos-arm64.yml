@@ -554,20 +554,9 @@ jobs:
           print("ctypes-load-ok")
           PY
 
-      - name: Pack Runtime
-        shell: bash
-        run: |
-          set -euo pipefail
-          bundle="$BUILD_ROOT/bundle"
-          out="$BUILD_ROOT/engine-macos-arm64-${BACKEND}.zip"
-          [[ -d "$bundle" ]] || { echo "Bundle folder not found: $bundle"; exit 1; }
-          rm -f "$out"
-          (cd "$bundle" && zip -r "$out" .)
-          [[ -f "$out" ]] || { echo "Failed to create archive: $out"; exit 1; }
-
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: engine-macos-arm64-${{ inputs.backend }}
-          path: ${{ env.BUILD_ROOT }}/engine-macos-arm64-${{ inputs.backend }}.zip
+          path: ${{ env.BUILD_ROOT }}/bundle
           if-no-files-found: error

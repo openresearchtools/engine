@@ -145,10 +145,10 @@ jobs:
           set -euo pipefail
           mkdir -p release-assets
 
-          cp dist/engine-win-cuda-x64/engine-win-cuda-x64.zip release-assets/
-          cp dist/engine-win-vulkan-x64/engine-win-vulkan-x64.zip release-assets/
-          cp dist/engine-macos-arm64-metal/engine-macos-arm64-metal.zip release-assets/
-          cp dist/engine-ubuntu-x64-vulkan/engine-ubuntu-x64-vulkan.tar.gz release-assets/
+          (cd dist/engine-win-cuda-x64 && zip -r ../../release-assets/engine-win-cuda-x64.zip .)
+          (cd dist/engine-win-vulkan-x64 && zip -r ../../release-assets/engine-win-vulkan-x64.zip .)
+          (cd dist/engine-macos-arm64-metal && zip -r ../../release-assets/engine-macos-arm64-metal.zip .)
+          tar -C dist/engine-ubuntu-x64-vulkan -czf release-assets/engine-ubuntu-x64-vulkan.tar.gz .
 
           sha256sum release-assets/* > release-assets/SHA256SUMS.txt
 

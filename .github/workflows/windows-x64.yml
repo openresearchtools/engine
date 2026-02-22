@@ -239,25 +239,9 @@ jobs:
 
           Write-Host "Bundle validation passed."
 
-      - name: Pack Runtime
-        shell: pwsh
-        run: |
-          $bundle = Join-Path $env:BUILD_ROOT "bundle"
-          $zipPath = Join-Path $env:BUILD_ROOT "engine-win-$($env:BACKEND)-x64.zip"
-          if (-not (Test-Path -LiteralPath $bundle)) {
-              throw "Bundle folder not found: $bundle"
-          }
-          if (Test-Path -LiteralPath $zipPath) {
-              Remove-Item -LiteralPath $zipPath -Force
-          }
-          Compress-Archive -Path (Join-Path $bundle "*") -DestinationPath $zipPath -CompressionLevel Optimal
-          if (-not (Test-Path -LiteralPath $zipPath)) {
-              throw "Failed to create archive: $zipPath"
-          }
-
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: engine-win-${{ inputs.backend }}-x64
-          path: ${{ env.BUILD_ROOT }}/engine-win-${{ inputs.backend }}-x64.zip
+          path: ${{ env.BUILD_ROOT }}/bundle
           if-no-files-found: error
