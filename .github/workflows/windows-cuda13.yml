@@ -100,17 +100,17 @@ jobs:
               }
           }
 
-          $buildArgs = @(
-            "-CmakeConfig", "Release",
-            "-Backend", $env:BACKEND,
-            "-CargoProfile", "Release",
-            "-BuildRoot", $env:BUILD_ROOT,
-            "-PrepareLlamaSource", $true,
-            "-BuildWhisperCli", $false,
-            "-EnableFfmpeg",
-            "-EnableCpuAllVariants", $true,
-            "-StageCudaRuntime", $false
-          )
+          $buildArgs = @{
+            CmakeConfig        = "Release"
+            Backend            = $env:BACKEND
+            CargoProfile       = "Release"
+            BuildRoot          = $env:BUILD_ROOT
+            PrepareLlamaSource = $true
+            BuildWhisperCli    = $false
+            EnableFfmpeg       = $true
+            EnableCpuAllVariants = $true
+            StageCudaRuntime   = $false
+          }
 
           .\build\build_full_stack_cuda.ps1 @buildArgs
 
