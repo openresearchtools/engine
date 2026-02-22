@@ -37,6 +37,7 @@ jobs:
       PDFIUM_RELEASE_TAG: "latest"
       FFMPEG_RELEASE_API: "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest"
       FFMPEG_ASSET_PATTERN: "*win64-lgpl-shared*.zip"
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4

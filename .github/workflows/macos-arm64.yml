@@ -124,13 +124,40 @@ jobs:
 
       - name: Fetch PDFium (macOS arm64)
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           pdfium_root="$BUILD_ROOT/runtime-deps/pdfium"
           rm -rf "$pdfium_root"
           mkdir -p "$pdfium_root"
 
-          asset_url="$(python3 -c 'import json, os, urllib.request; release=json.load(urllib.request.urlopen(os.environ["PDFIUM_RELEASE_API"])); urls=[a["browser_download_url"] for a in release.get("assets", []) if a.get("name")=="pdfium-mac-arm64.tgz"]; print(urls[0] if urls else "")')"
+          asset_url="$(python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          api = os.environ["PDFIUM_RELEASE_API"]
+          token = os.environ.get("GH_TOKEN", "")
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "ENGINE-pdfium-fetch",
+          }
+          if token:
+              headers["Authorization"] = f"Bearer {token}"
+
+          req = urllib.request.Request(api, headers=headers)
+          with urllib.request.urlopen(req) as resp:
+              release = json.load(resp)
+
+          urls = [
+              a.get("browser_download_url")
+              for a in release.get("assets", [])
+              if a.get("name") == "pdfium-mac-arm64.tgz"
+          ]
+          print(urls[0] if urls else "")
+          PY
+          )"
           if [[ -z "$asset_url" ]]; then
             echo "Could not find asset pdfium-mac-arm64.tgz in latest release"
             exit 1

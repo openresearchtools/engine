@@ -70,7 +70,19 @@ else {
 }
 
 Write-Host "Fetching release metadata from $releaseUrl"
-$release = Invoke-RestMethod -Uri $releaseUrl
+$headers = @{
+    "User-Agent" = "ENGINE-pdfium-fetch"
+    "Accept" = "application/vnd.github+json"
+}
+$token = $env:GH_TOKEN
+if ([string]::IsNullOrWhiteSpace($token)) {
+    $token = $env:GITHUB_TOKEN
+}
+if (-not [string]::IsNullOrWhiteSpace($token)) {
+    $headers["Authorization"] = "Bearer $token"
+}
+
+$release = Invoke-RestMethod -Headers $headers -Uri $releaseUrl
 
 $asset = $release.assets | Where-Object { $_.name -eq "pdfium-win-x64.tgz" } | Select-Object -First 1
 if (-not $asset) {
@@ -80,7 +92,7 @@ if (-not $asset) {
 $archivePath = Join-Path ([System.IO.Path]::GetTempPath()) ("pdfium-win-x64-" + [guid]::NewGuid().ToString() + ".tgz")
 
 Write-Host "Downloading $($asset.name) from release $($release.tag_name)"
-Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archivePath
+Invoke-WebRequest -Headers $headers -Uri $asset.browser_download_url -OutFile $archivePath
 
 Write-Host "Extracting archive to $dest"
 tar -xzf $archivePath -C $dest

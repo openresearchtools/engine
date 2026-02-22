@@ -69,6 +69,13 @@ try {
         "User-Agent" = "ENGINE-ffmpeg-fetch"
         "Accept" = "application/vnd.github+json"
     }
+    $token = $env:GH_TOKEN
+    if ([string]::IsNullOrWhiteSpace($token)) {
+        $token = $env:GITHUB_TOKEN
+    }
+    if (-not [string]::IsNullOrWhiteSpace($token)) {
+        $headers["Authorization"] = "Bearer $token"
+    }
 
     $release = Invoke-RestMethod -Headers $headers -Uri $ReleaseApiUrl
     if ($null -eq $release -or $null -eq $release.assets) {
