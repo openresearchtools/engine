@@ -27,6 +27,23 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Preflight Required License Files
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            "third_party/licenses/pdfium-LICENSE.txt"
+            "third_party/licenses/pdfium-binaries-LICENSE.txt"
+            "third_party/licenses/ffmpeg-LGPL-2.1.txt"
+            "third_party/licenses/ffmpeg-SOURCE-ubuntu-x64.txt"
+            "third_party/licenses/LICENSES.txt"
+            "third_party/licenses/LICENSES-vulkan.txt"
+            "third_party/licenses/LICENSES-ubuntu-vulkan.txt"
+          )
+          for f in "${required[@]}"; do
+            [[ -f "$f" ]] || { echo "Missing required preflight file: $f"; exit 1; }
+          done
+
       - name: Resolve Build Paths
         shell: bash
         run: |
@@ -363,6 +380,14 @@ jobs:
           copy_license_files "$PDFIUM_ROOT" "$bundle_pdfium"
           copy_license_files "$FFMPEG_ROOT" "$bundle_ffmpeg_root"
 
+          # Always include authoritative PDFium license texts from this repo.
+          pdfium_primary="$GITHUB_WORKSPACE/third_party/licenses/pdfium-LICENSE.txt"
+          pdfium_source="$GITHUB_WORKSPACE/third_party/licenses/pdfium-binaries-LICENSE.txt"
+          [[ -f "$pdfium_primary" ]] || { echo "Missing required PDFium license file: $pdfium_primary"; exit 1; }
+          [[ -f "$pdfium_source" ]] || { echo "Missing required PDFium source-license file: $pdfium_source"; exit 1; }
+          cp "$pdfium_primary" "$bundle_pdfium/pdfium-LICENSE.txt"
+          cp "$pdfium_source" "$bundle_pdfium/pdfium-binaries-LICENSE.txt"
+
           # Always include curated provenance files from this repo in addition to
           # runtime-sourced license files.
           ffmpeg_source_notice="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-SOURCE-ubuntu-x64.txt"
@@ -372,18 +397,6 @@ jobs:
           if [[ -f "$ffmpeg_source_notice" ]]; then
             cp "$ffmpeg_source_notice" "$bundle_ffmpeg_root/ffmpeg-SOURCE.txt"
           fi
-          if [[ -f "$GITHUB_WORKSPACE/third_party/licenses/pdfium-binaries-LICENSE.txt" ]]; then
-            cp "$GITHUB_WORKSPACE/third_party/licenses/pdfium-binaries-LICENSE.txt" "$bundle_pdfium/pdfium-binaries-LICENSE.txt"
-          fi
-
-          if ! find "$bundle_pdfium" -type f \( -iname '*LICENSE*' -o -iname '*LICENCE*' -o -iname '*COPYING*' -o -iname '*COPYRIGHT*' -o -iname '*NOTICE*' -o -iname '*PATENTS*' -o -iname '*EULA*' -o -iname '*SOURCE*' \) | grep -q .; then
-            pdfium_primary="$GITHUB_WORKSPACE/third_party/licenses/pdfium-LICENSE.txt"
-            pdfium_source="$GITHUB_WORKSPACE/third_party/licenses/pdfium-binaries-LICENSE.txt"
-            [[ -f "$pdfium_primary" ]] || { echo "Missing fallback PDFium license file: $pdfium_primary"; exit 1; }
-            cp "$pdfium_primary" "$bundle_pdfium/pdfium-LICENSE.txt"
-            [[ -f "$pdfium_source" ]] && cp "$pdfium_source" "$bundle_pdfium/pdfium-binaries-LICENSE.txt"
-          fi
-
           if ! find "$bundle_ffmpeg_root" -type f \( -iname '*LICENSE*' -o -iname '*LICENCE*' -o -iname '*COPYING*' -o -iname '*COPYRIGHT*' -o -iname '*NOTICE*' -o -iname '*PATENTS*' -o -iname '*EULA*' -o -iname '*SOURCE*' \) | grep -q .; then
             ffmpeg_lgpl="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-LGPL-2.1.txt"
             ffmpeg_source="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-SOURCE-ubuntu-x64.txt"
@@ -496,6 +509,8 @@ jobs:
 
           find "$bundle/vendor/ffmpeg" -type f \( -iname '*LICENSE*' -o -iname '*LICENCE*' -o -iname '*COPYING*' -o -iname '*COPYRIGHT*' -o -iname '*NOTICE*' -o -iname '*PATENTS*' -o -iname '*EULA*' -o -iname '*SOURCE*' \) | grep -q . || { echo "No FFmpeg license files found under vendor/ffmpeg"; exit 1; }
           find "$bundle/vendor/pdfium" -type f \( -iname '*LICENSE*' -o -iname '*LICENCE*' -o -iname '*COPYING*' -o -iname '*COPYRIGHT*' -o -iname '*NOTICE*' -o -iname '*PATENTS*' -o -iname '*EULA*' -o -iname '*SOURCE*' \) | grep -q . || { echo "No PDFium license files found under vendor/pdfium"; exit 1; }
+          [[ -f "$bundle/vendor/pdfium/pdfium-LICENSE.txt" ]] || { echo "Missing required PDFium license text: vendor/pdfium/pdfium-LICENSE.txt"; exit 1; }
+          [[ -f "$bundle/vendor/pdfium/pdfium-binaries-LICENSE.txt" ]] || { echo "Missing required PDFium binaries license text: vendor/pdfium/pdfium-binaries-LICENSE.txt"; exit 1; }
 
       - name: Smoke Test Bundle Runtime
         shell: bash

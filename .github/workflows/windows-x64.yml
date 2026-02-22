@@ -43,6 +43,44 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Preflight Required License Files
+        shell: pwsh
+        run: |
+          $requiredCommon = @(
+            "third_party/licenses/pdfium-LICENSE.txt",
+            "third_party/licenses/pdfium-binaries-LICENSE.txt",
+            "third_party/licenses/ffmpeg-LGPL-2.1.txt",
+            "third_party/licenses/ffmpeg-SOURCE-windows-x64.txt",
+            "third_party/licenses/LICENSES.txt"
+          )
+          foreach ($path in $requiredCommon) {
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Missing required preflight file: $path"
+            }
+          }
+
+          if ($env:BACKEND -eq "cuda") {
+            $requiredCuda = @(
+              "third_party/licenses/LICENSES-cuda.txt",
+              "third_party/licenses/nvidia-cuda-EULA.txt",
+              "third_party/licenses/nvidia-cuda-runtime-NOTICE.txt"
+            )
+            foreach ($path in $requiredCuda) {
+              if (-not (Test-Path -LiteralPath $path)) {
+                throw "Missing required CUDA preflight file: $path"
+              }
+            }
+          } else {
+            $requiredVulkan = @(
+              "third_party/licenses/LICENSES-vulkan.txt"
+            )
+            foreach ($path in $requiredVulkan) {
+              if (-not (Test-Path -LiteralPath $path)) {
+                throw "Missing required Vulkan preflight file: $path"
+              }
+            }
+          }
+
       - name: Configure Git Long Paths
         shell: pwsh
         run: |
@@ -200,6 +238,13 @@ jobs:
               Where-Object { $_.Name -match $licenseRegex }
           if (-not $pdfiumLicenseFiles) {
               throw "No PDFium license files found under vendor\\pdfium"
+          }
+          $requiredPdfiumLicenses = @("pdfium-LICENSE.txt", "pdfium-binaries-LICENSE.txt")
+          foreach ($licenseName in $requiredPdfiumLicenses) {
+              $licensePath = Join-Path $vendorPdfiumDir $licenseName
+              if (-not (Test-Path -LiteralPath $licensePath)) {
+                  throw "Missing required PDFium license file in vendor\\pdfium: $licenseName"
+              }
           }
 
           $vendorFfmpegDir = Join-Path $bundle "vendor\\ffmpeg"

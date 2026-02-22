@@ -40,6 +40,23 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Preflight Required License Files
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            "third_party/licenses/pdfium-LICENSE.txt"
+            "third_party/licenses/pdfium-binaries-LICENSE.txt"
+            "third_party/licenses/ffmpeg-LGPL-2.1.txt"
+            "third_party/licenses/ffmpeg-SOURCE-macos-arm64.txt"
+            "third_party/licenses/LICENSES.txt"
+            "third_party/licenses/LICENSES-vulkan.txt"
+            "third_party/licenses/LICENSES-metal.txt"
+          )
+          for f in "${required[@]}"; do
+            [[ -f "$f" ]] || { echo "Missing required preflight file: $f"; exit 1; }
+          done
+
       - name: Resolve Build Paths
         shell: bash
         run: |
@@ -315,21 +332,20 @@ jobs:
           copy_license_files "$BUILD_ROOT/runtime-deps/pdfium" "$bundle_pdfium"
           copy_license_files "$BUILD_ROOT/runtime-deps/ffmpeg" "$bundle_ffmpeg_root"
 
+          # Always include authoritative PDFium license texts from this repo.
+          pdfium_primary="$GITHUB_WORKSPACE/third_party/licenses/pdfium-LICENSE.txt"
+          pdfium_source="$GITHUB_WORKSPACE/third_party/licenses/pdfium-binaries-LICENSE.txt"
+          [[ -f "$pdfium_primary" ]] || { echo "Missing required PDFium license file: $pdfium_primary"; exit 1; }
+          [[ -f "$pdfium_source" ]] || { echo "Missing required PDFium source-license file: $pdfium_source"; exit 1; }
+          cp "$pdfium_primary" "$bundle_pdfium/pdfium-LICENSE.txt"
+          cp "$pdfium_source" "$bundle_pdfium/pdfium-binaries-LICENSE.txt"
+
           ffmpeg_source_notice="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-SOURCE-macos-arm64.txt"
           if [[ ! -f "$ffmpeg_source_notice" ]]; then
             ffmpeg_source_notice="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-SOURCE.txt"
           fi
           if [[ -f "$ffmpeg_source_notice" ]]; then
             cp "$ffmpeg_source_notice" "$bundle_ffmpeg_root/ffmpeg-SOURCE.txt"
-          fi
-
-          # Ensure PDFium vendor folder has visible license texts.
-          if ! find "$bundle_pdfium" -type f \( -iname '*LICENSE*' -o -iname '*LICENCE*' -o -iname '*COPYING*' -o -iname '*COPYRIGHT*' -o -iname '*NOTICE*' -o -iname '*PATENTS*' -o -iname '*EULA*' -o -iname '*SOURCE*' \) | grep -q .; then
-            pdfium_primary="$GITHUB_WORKSPACE/third_party/licenses/pdfium-LICENSE.txt"
-            pdfium_source="$GITHUB_WORKSPACE/third_party/licenses/pdfium-binaries-LICENSE.txt"
-            [[ -f "$pdfium_primary" ]] || { echo "Missing fallback PDFium license file: $pdfium_primary"; exit 1; }
-            cp "$pdfium_primary" "$bundle_pdfium/pdfium-LICENSE.txt"
-            [[ -f "$pdfium_source" ]] && cp "$pdfium_source" "$bundle_pdfium/pdfium-binaries-LICENSE.txt"
           fi
 
           # Source FFmpeg installs may not contain copied license files.
@@ -496,6 +512,8 @@ jobs:
           pdfium_licenses="$bundle/vendor/pdfium"
           [[ -d "$pdfium_licenses" ]] || { echo "Missing PDFium vendor directory: $pdfium_licenses"; exit 1; }
           find "$pdfium_licenses" -type f \( -iname '*LICENSE*' -o -iname '*LICENCE*' -o -iname '*COPYING*' -o -iname '*COPYRIGHT*' -o -iname '*NOTICE*' -o -iname '*PATENTS*' -o -iname '*EULA*' -o -iname '*SOURCE*' \) | grep -q . || { echo "No PDFium license files found in $pdfium_licenses"; exit 1; }
+          [[ -f "$bundle/vendor/pdfium/pdfium-LICENSE.txt" ]] || { echo "Missing required PDFium license text: vendor/pdfium/pdfium-LICENSE.txt"; exit 1; }
+          [[ -f "$bundle/vendor/pdfium/pdfium-binaries-LICENSE.txt" ]] || { echo "Missing required PDFium binaries license text: vendor/pdfium/pdfium-binaries-LICENSE.txt"; exit 1; }
 
           if grep -Eiq "nvidia-cuda-EULA|nvidia-cuda-runtime-NOTICE" "$bundle/licenses/LICENSES.txt"; then
             echo "Non-CUDA macOS bundle staged CUDA key-license entries in licenses/LICENSES.txt"

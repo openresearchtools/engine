@@ -445,20 +445,22 @@ if ($StageRepoLicenseFiles) {
 
 $pdfiumRoot = Resolve-PdfiumRoot -PdfiumDllPath $PdfiumDll
 if (-not [string]::IsNullOrWhiteSpace($pdfiumRoot)) {
-    $pdfiumLicenseCount = Copy-LicenseFiles -SourceRoot $pdfiumRoot -DestinationRoot $pdfiumVendorDir -ComponentName "PDFium"
-    if ($pdfiumLicenseCount -eq 0) {
-        New-Item -ItemType Directory -Force -Path $pdfiumVendorDir | Out-Null
-        $pdfiumFallbackFiles = @(
-            "pdfium-LICENSE.txt",
-            "pdfium-binaries-LICENSE.txt"
-        )
-        foreach ($fallbackFile in $pdfiumFallbackFiles) {
-            $fallbackPath = Join-Path $repoRoot "third_party\\licenses\\$fallbackFile"
-            if (Test-Path -LiteralPath $fallbackPath) {
-                Copy-Item -LiteralPath $fallbackPath -Destination (Join-Path $pdfiumVendorDir $fallbackFile) -Force
-            }
-        }
+    $null = Copy-LicenseFiles -SourceRoot $pdfiumRoot -DestinationRoot $pdfiumVendorDir -ComponentName "PDFium"
+}
+
+# Always stage authoritative PDFium notices from this repo so bundle never misses
+# the actual PDFium project license text.
+New-Item -ItemType Directory -Force -Path $pdfiumVendorDir | Out-Null
+$requiredPdfiumLicenses = @(
+    "pdfium-LICENSE.txt",
+    "pdfium-binaries-LICENSE.txt"
+)
+foreach ($licenseFile in $requiredPdfiumLicenses) {
+    $sourcePath = Join-Path $repoRoot "third_party\\licenses\\$licenseFile"
+    if (-not (Test-Path -LiteralPath $sourcePath)) {
+        throw "Required PDFium license file is missing from repo: $sourcePath"
     }
+    Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $pdfiumVendorDir $licenseFile) -Force
 }
 
 if ($StageFfmpegRuntime) {
