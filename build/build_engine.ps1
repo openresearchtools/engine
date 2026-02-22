@@ -111,19 +111,20 @@ function Copy-LicenseFiles {
 
     if ([string]::IsNullOrWhiteSpace($SourceRoot) -or -not (Test-Path -LiteralPath $SourceRoot)) {
         Write-Warning "$ComponentName runtime root not found at '$SourceRoot' (skipping license copy)"
-        return
+        return 0
     }
 
     New-Item -ItemType Directory -Force -Path $DestinationRoot | Out-Null
 
     $patterns = @(
-        "LICENSE*",
-        "LICENCE*",
-        "COPYING*",
-        "COPYRIGHT*",
-        "NOTICE*",
-        "PATENTS*",
-        "EULA*"
+        "*LICENSE*",
+        "*LICENCE*",
+        "*COPYING*",
+        "*COPYRIGHT*",
+        "*NOTICE*",
+        "*PATENTS*",
+        "*EULA*",
+        "*SOURCE*"
     )
 
     $licenseFiles = @()
@@ -134,7 +135,7 @@ function Copy-LicenseFiles {
     $licenseFiles = $licenseFiles | Sort-Object -Property FullName -Unique
     if (-not $licenseFiles -or $licenseFiles.Count -eq 0) {
         Write-Warning "No license files found under '$SourceRoot' for $ComponentName"
-        return
+        return 0
     }
 
     foreach ($file in $licenseFiles) {
@@ -149,6 +150,8 @@ function Copy-LicenseFiles {
         }
         Copy-Item -LiteralPath $file.FullName -Destination $destinationFile -Force
     }
+
+    return $licenseFiles.Count
 }
 
 function Stage-RepoLicenseFiles {
@@ -249,8 +252,8 @@ Bundled license folders:
 
 - ./third_party/
 - ./rust-full/
-- ./pdfium/
-- ./ffmpeg/
+- ../vendor/pdfium/
+- ../vendor/ffmpeg/
 
 Project license:
 
@@ -354,7 +357,8 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 $vendorRoot = Join-Path $OutDir "vendor"
 $pdfiumVendorDir = Join-Path $vendorRoot "pdfium"
-$ffmpegVendorBinDir = Join-Path $vendorRoot "ffmpeg\\bin"
+$ffmpegVendorDir = Join-Path $vendorRoot "ffmpeg"
+$ffmpegVendorBinDir = Join-Path $ffmpegVendorDir "bin"
 New-Item -ItemType Directory -Force -Path $vendorRoot | Out-Null
 
 # Remove legacy root-level runtime files so output remains vendor-scoped.
@@ -434,7 +438,20 @@ if ($StageRepoLicenseFiles) {
 
 $pdfiumRoot = Resolve-PdfiumRoot -PdfiumDllPath $PdfiumDll
 if (-not [string]::IsNullOrWhiteSpace($pdfiumRoot)) {
-    Copy-LicenseFiles -SourceRoot $pdfiumRoot -DestinationRoot (Join-Path $bundleLicenseRoot "pdfium") -ComponentName "PDFium"
+    $pdfiumLicenseCount = Copy-LicenseFiles -SourceRoot $pdfiumRoot -DestinationRoot $pdfiumVendorDir -ComponentName "PDFium"
+    if ($pdfiumLicenseCount -eq 0) {
+        New-Item -ItemType Directory -Force -Path $pdfiumVendorDir | Out-Null
+        $pdfiumFallbackFiles = @(
+            "pdfium-LICENSE.txt",
+            "pdfium-binaries-LICENSE.txt"
+        )
+        foreach ($fallbackFile in $pdfiumFallbackFiles) {
+            $fallbackPath = Join-Path $repoRoot "third_party\\licenses\\$fallbackFile"
+            if (Test-Path -LiteralPath $fallbackPath) {
+                Copy-Item -LiteralPath $fallbackPath -Destination (Join-Path $pdfiumVendorDir $fallbackFile) -Force
+            }
+        }
+    }
 }
 
 if ($StageFfmpegRuntime) {
@@ -458,7 +475,19 @@ if ($StageFfmpegRuntime) {
         }
 
         $ffmpegRoot = Split-Path -Parent $FfmpegBinDir
-        Copy-LicenseFiles -SourceRoot $ffmpegRoot -DestinationRoot (Join-Path $bundleLicenseRoot "ffmpeg") -ComponentName "FFmpeg"
+        $ffmpegLicenseCount = Copy-LicenseFiles -SourceRoot $ffmpegRoot -DestinationRoot $ffmpegVendorDir -ComponentName "FFmpeg"
+        if ($ffmpegLicenseCount -eq 0) {
+            $ffmpegFallbackFiles = @(
+                "ffmpeg-LGPL-2.1.txt",
+                "ffmpeg-SOURCE.txt"
+            )
+            foreach ($fallbackFile in $ffmpegFallbackFiles) {
+                $fallbackPath = Join-Path $repoRoot "third_party\\licenses\\$fallbackFile"
+                if (Test-Path -LiteralPath $fallbackPath) {
+                    Copy-Item -LiteralPath $fallbackPath -Destination (Join-Path $ffmpegVendorDir $fallbackFile) -Force
+                }
+            }
+        }
     } else {
         Write-Warning "FFmpeg bin dir not found at '$FfmpegBinDir' (skipping FFmpeg DLL copy)"
     }
@@ -516,4 +545,5 @@ if ($StageCudaRuntime) {
 Write-Host "Engine build and bundle staging completed."
 Write-Host "Cargo target dir: $CargoTargetDir"
 Write-Host "Bundle dir: $OutDir"
-Write-Host "Bundle runtime licenses: $(Join-Path $OutDir 'licenses')"
+Write-Host "Bundle key license index: $(Join-Path $OutDir 'licenses')"
+Write-Host "Bundle component license locations: $(Join-Path $OutDir 'vendor')"

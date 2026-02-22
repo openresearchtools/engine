@@ -190,6 +190,7 @@ jobs:
           bundle_licenses="$bundle/licenses"
           bundle_vendor="$bundle/vendor"
           bundle_pdfium="$bundle_vendor/pdfium"
+          bundle_ffmpeg_root="$bundle_vendor/ffmpeg"
           bundle_ffmpeg="$bundle_vendor/ffmpeg/lib"
           cargo_release="$BUILD_ROOT/cargo-target/release"
 
@@ -273,8 +274,8 @@ jobs:
             '' \
             '- ./third_party/' \
             '- ./rust-full/' \
-            '- ./pdfium/' \
-            '- ./ffmpeg/' \
+            '- ../vendor/pdfium/' \
+            '- ../vendor/ffmpeg/' \
             '' \
             'Project license:' \
             '' \
@@ -294,28 +295,38 @@ jobs:
               mkdir -p "$dst_root/$(dirname "$rel")"
               cp -L "$file" "$dst_root/$rel"
             done < <(find "$src_root" -type f \( \
-              -iname 'LICENSE*' -o \
-              -iname 'LICENCE*' -o \
-              -iname 'COPYING*' -o \
-              -iname 'COPYRIGHT*' -o \
-              -iname 'NOTICE*' -o \
-              -iname 'PATENTS*' -o \
-              -iname 'EULA*' \
+              -iname '*LICENSE*' -o \
+              -iname '*LICENCE*' -o \
+              -iname '*COPYING*' -o \
+              -iname '*COPYRIGHT*' -o \
+              -iname '*NOTICE*' -o \
+              -iname '*PATENTS*' -o \
+              -iname '*EULA*' -o \
+              -iname '*SOURCE*' \
             \) -print0)
           }
 
-          copy_license_files "$BUILD_ROOT/runtime-deps/pdfium" "$bundle_licenses/pdfium"
-          copy_license_files "$BUILD_ROOT/runtime-deps/ffmpeg" "$bundle_licenses/ffmpeg"
+          copy_license_files "$BUILD_ROOT/runtime-deps/pdfium" "$bundle_pdfium"
+          copy_license_files "$BUILD_ROOT/runtime-deps/ffmpeg" "$bundle_ffmpeg_root"
+
+          # Ensure PDFium vendor folder has visible license texts.
+          if ! find "$bundle_pdfium" -type f \( -iname '*LICENSE*' -o -iname '*LICENCE*' -o -iname '*COPYING*' -o -iname '*COPYRIGHT*' -o -iname '*NOTICE*' -o -iname '*PATENTS*' -o -iname '*EULA*' -o -iname '*SOURCE*' \) | grep -q .; then
+            pdfium_primary="$GITHUB_WORKSPACE/third_party/licenses/pdfium-LICENSE.txt"
+            pdfium_source="$GITHUB_WORKSPACE/third_party/licenses/pdfium-binaries-LICENSE.txt"
+            [[ -f "$pdfium_primary" ]] || { echo "Missing fallback PDFium license file: $pdfium_primary"; exit 1; }
+            cp "$pdfium_primary" "$bundle_pdfium/pdfium-LICENSE.txt"
+            [[ -f "$pdfium_source" ]] && cp "$pdfium_source" "$bundle_pdfium/pdfium-binaries-LICENSE.txt"
+          fi
 
           # Source FFmpeg installs may not contain copied license files.
-          # Ensure bundle/licenses/ffmpeg is never empty.
-          if ! find "$bundle_licenses/ffmpeg" -type f | grep -q .; then
+          # Ensure bundle/vendor/ffmpeg is never missing license texts.
+          if ! find "$bundle_ffmpeg_root" -type f \( -iname '*LICENSE*' -o -iname '*LICENCE*' -o -iname '*COPYING*' -o -iname '*COPYRIGHT*' -o -iname '*NOTICE*' -o -iname '*PATENTS*' -o -iname '*EULA*' -o -iname '*SOURCE*' \) | grep -q .; then
             ffmpeg_lgpl="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-LGPL-2.1.txt"
             ffmpeg_source="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-SOURCE.txt"
             [[ -f "$ffmpeg_lgpl" ]] || { echo "Missing fallback FFmpeg license file: $ffmpeg_lgpl"; exit 1; }
             [[ -f "$ffmpeg_source" ]] || { echo "Missing fallback FFmpeg source notice file: $ffmpeg_source"; exit 1; }
-            cp "$ffmpeg_lgpl" "$bundle_licenses/ffmpeg/ffmpeg-LGPL-2.1.txt"
-            cp "$ffmpeg_source" "$bundle_licenses/ffmpeg/ffmpeg-SOURCE.txt"
+            cp "$ffmpeg_lgpl" "$bundle_ffmpeg_root/ffmpeg-LGPL-2.1.txt"
+            cp "$ffmpeg_source" "$bundle_ffmpeg_root/ffmpeg-SOURCE.txt"
           fi
 
       - name: Fixup and Verify Mach-O Load Paths
@@ -452,9 +463,22 @@ jobs:
             ls "$ffmpeg_dir"/lib${lib}*.dylib >/dev/null 2>&1 || { echo "Missing FFmpeg runtime dylib: lib${lib}*.dylib"; exit 1; }
           done
 
-          ffmpeg_licenses="$bundle/licenses/ffmpeg"
-          [[ -d "$ffmpeg_licenses" ]] || { echo "Missing FFmpeg license directory: $ffmpeg_licenses"; exit 1; }
-          find "$ffmpeg_licenses" -type f | grep -q . || { echo "No FFmpeg license files found in $ffmpeg_licenses"; exit 1; }
+          if [[ -d "$bundle/licenses/ffmpeg" ]]; then
+            echo "Legacy folder should not exist: $bundle/licenses/ffmpeg"
+            exit 1
+          fi
+          if [[ -d "$bundle/licenses/pdfium" ]]; then
+            echo "Legacy folder should not exist: $bundle/licenses/pdfium"
+            exit 1
+          fi
+
+          ffmpeg_licenses="$bundle/vendor/ffmpeg"
+          [[ -d "$ffmpeg_licenses" ]] || { echo "Missing FFmpeg vendor directory: $ffmpeg_licenses"; exit 1; }
+          find "$ffmpeg_licenses" -type f \( -iname '*LICENSE*' -o -iname '*LICENCE*' -o -iname '*COPYING*' -o -iname '*COPYRIGHT*' -o -iname '*NOTICE*' -o -iname '*PATENTS*' -o -iname '*EULA*' -o -iname '*SOURCE*' \) | grep -q . || { echo "No FFmpeg license files found in $ffmpeg_licenses"; exit 1; }
+
+          pdfium_licenses="$bundle/vendor/pdfium"
+          [[ -d "$pdfium_licenses" ]] || { echo "Missing PDFium vendor directory: $pdfium_licenses"; exit 1; }
+          find "$pdfium_licenses" -type f \( -iname '*LICENSE*' -o -iname '*LICENCE*' -o -iname '*COPYING*' -o -iname '*COPYRIGHT*' -o -iname '*NOTICE*' -o -iname '*PATENTS*' -o -iname '*EULA*' -o -iname '*SOURCE*' \) | grep -q . || { echo "No PDFium license files found in $pdfium_licenses"; exit 1; }
 
           if grep -Eiq "nvidia-cuda-EULA|nvidia-cuda-runtime-NOTICE" "$bundle/licenses/LICENSES.txt"; then
             echo "Non-CUDA macOS bundle staged CUDA key-license entries in licenses/LICENSES.txt"

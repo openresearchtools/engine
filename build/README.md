@@ -128,14 +128,14 @@ Default outputs:
 - `vendor/pdfium/pdfium.dll` (if found)
 - `llama-server-bridge.dll` and related llama/ggml runtime DLLs (if found, kept in bundle root)
 - `vendor/ffmpeg/bin/*.dll` runtime files required by bridge audio conversion (if enabled)
+- `vendor/pdfium/*` license/notice files copied from PDFium runtime source (with repo fallback files when needed)
+- `vendor/ffmpeg/*` license/notice files copied from FFmpeg runtime source (with repo fallback files when needed)
 - `LICENSE-ENGINE.txt` (project license)
 - `licenses/LICENSES.txt` (key runtime/release license texts combined into one file)
 - `licenses/THIRD_PARTY_NOTICES.md` (bundle-level notice index with pointers)
 - `licenses/third_party/*` copied from repo `third_party/licenses` top-level curated files
   (tooling-only `torch`/`numpy`/`torchaudio` files are intentionally excluded)
 - `licenses/rust-full/*` copied from repo `third_party/licenses/rust-full`
-- `licenses/pdfium/*` copied from fetched PDFium runtime
-- `licenses/ffmpeg/*` copied from fetched FFmpeg runtime (when FFmpeg staging is enabled)
 
 ## GitHub Actions: macOS arm64
 
@@ -162,4 +162,5 @@ Bundle layout on macOS arm64:
 License staging note for macOS arm64:
 
 - Key bundle file `licenses/LICENSES.txt` is selected from the metal profile (`third_party/licenses/LICENSES-metal.txt`), with fallback to `LICENSES-vulkan.txt` then `LICENSES.txt`.
-- `licenses/ffmpeg/*` is populated from detected FFmpeg runtime license files, with fallback to repo-curated `ffmpeg-LGPL-2.1.txt` and `ffmpeg-SOURCE.txt` when source installs do not ship license files in the install prefix.
+- PDFium/FFmpeg license files are staged under `vendor/pdfium/*` and `vendor/ffmpeg/*` (no separate `licenses/pdfium` or `licenses/ffmpeg` folders).
+- `vendor/ffmpeg/*` uses fallback repo-curated `ffmpeg-LGPL-2.1.txt` and `ffmpeg-SOURCE.txt` when source installs do not ship license files in the install prefix.

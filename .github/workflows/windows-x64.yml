@@ -172,6 +172,31 @@ jobs:
               }
           }
 
+          $legacyLicenseDirs = @(
+              "licenses\\ffmpeg",
+              "licenses\\pdfium"
+          )
+          foreach ($legacyDir in $legacyLicenseDirs) {
+              if (Test-Path -LiteralPath (Join-Path $bundle $legacyDir)) {
+                  throw "Legacy license directory should not exist anymore: $legacyDir"
+              }
+          }
+
+          $licenseRegex = '(?i)(LICENSE|LICENCE|COPYING|COPYRIGHT|NOTICE|PATENTS|EULA|SOURCE)'
+          $vendorPdfiumDir = Join-Path $bundle "vendor\\pdfium"
+          $pdfiumLicenseFiles = Get-ChildItem -Path $vendorPdfiumDir -Recurse -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match $licenseRegex }
+          if (-not $pdfiumLicenseFiles) {
+              throw "No PDFium license files found under vendor\\pdfium"
+          }
+
+          $vendorFfmpegDir = Join-Path $bundle "vendor\\ffmpeg"
+          $ffmpegLicenseFiles = Get-ChildItem -Path $vendorFfmpegDir -Recurse -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match $licenseRegex }
+          if (-not $ffmpegLicenseFiles) {
+              throw "No FFmpeg license files found under vendor\\ffmpeg"
+          }
+
           $unexpectedCudaRuntime = Get-ChildItem -Path $bundle -File -Filter "cublas*.dll" -ErrorAction SilentlyContinue
           if ($unexpectedCudaRuntime) {
               throw "CUDA runtime DLLs were bundled unexpectedly (cublas*). StageCudaRuntime should be OFF."
