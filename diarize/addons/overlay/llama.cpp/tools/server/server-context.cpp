@@ -5524,6 +5524,11 @@ void server_routes::init_routes() {
         srv_audio_remove_if_exists(std::filesystem::path(align_out_prefix.string() + ".speaker_words.tsv"));
         srv_audio_remove_if_exists(std::filesystem::path(align_out_prefix.string() + ".speaker_transcript.txt"));
         srv_audio_remove_if_exists(std::filesystem::path(align_out_prefix.string() + ".speaker.srt"));
+        srv_audio_remove_if_exists(audio_path);
+        {
+            std::error_code ec_cleanup;
+            std::filesystem::remove_all(diarization_out_dir, ec_cleanup);
+        }
         cleanup_intermediate_files();
 
         const auto pipeline_t1 = std::chrono::steady_clock::now();

@@ -31,11 +31,10 @@ Default download destinations:
 
 Both scripts now reject repo-internal destinations.
 
-`build_full_stack_cuda.ps1` now fetches PDFium automatically, and fetches FFmpeg automatically when `-EnableFfmpeg` is set.
-By default it prepares an external build-time snapshot from this repo's `third_party/llama.cpp` into `..\ENGINEbuilds\...` (no in-place overwrite of repo sources).
-Use `-PrepareLlamaSource $true` to switch to upstream + patch preparation mode.
+`build_full_stack_cuda.ps1` fetches PDFium automatically, and fetches FFmpeg automatically when `-EnableFfmpeg` is set.
+Build source preparation is patch-only: repo `third_party/llama.cpp` snapshot + `0300` patch into `..\ENGINEbuilds\...` (no in-place overwrite of repo sources).
 
-## Prepare external llama source (upstream + patch)
+## Prepare external llama source (repo snapshot + patch)
 
 ```powershell
 .\build\prepare_llama_source_from_patch.ps1 -Force
@@ -43,13 +42,13 @@ Use `-PrepareLlamaSource $true` to switch to upstream + patch preparation mode.
 
 Defaults:
 
-- Upstream cache: `..\ENGINEbuilds\upstream\llama-clean\`
 - Prepared source: `..\ENGINEbuilds\sources\llama.cpp\`
-- Patch: latest `..\ENGINEbuilds\patches\llama-working-overlay-*.patch`
+- Repo source: `third_party/llama.cpp`
+- Patch: `diarize/addons/patches/0300-llama-unified-audio.patch`
 
 ## One-command full backend flow (CUDA or Vulkan)
 
-This applies overlay/bridge patching, builds patched llama+bridge for the selected backend, fetches runtime deps, then builds/stages engine bundle.
+This builds patched llama+bridge for the selected backend, fetches runtime deps, then builds/stages engine bundle.
 By default it does not build extra CLI binaries (only `engine.exe` is staged).
 
 ```powershell
@@ -58,7 +57,6 @@ By default it does not build extra CLI binaries (only `engine.exe` is staged).
   -CmakeConfig Release `
   -CargoProfile Release `
   -BuildWhisperCli $false `
-  -ApplyDiarizeOverlay $true `
   -EnableFfmpeg
 ```
 
@@ -70,7 +68,6 @@ Vulkan example:
   -CmakeConfig Release `
   -CargoProfile Release `
   -BuildWhisperCli $false `
-  -ApplyDiarizeOverlay $true `
   -EnableFfmpeg
 ```
 
@@ -98,16 +95,9 @@ Default outputs:
   -Backend cuda `
   -Config Release `
   -BuildDir "..\ENGINEbuilds\llama\cmake-cuda-release" `
-  -ApplyDiarizeOverlay $true `
   -BuildLlamaServerCli:$false `
   -BuildPyannoteCli:$false `
   -EnableFfmpeg
-```
-
-If your overlay folder moved, pass:
-
-```powershell
-.\build\build_bridge.ps1 -OverlaySearchRoots ".\diarize\addons\overlay\llama.cpp"
 ```
 
 ### 2) Build Rust and stage bundle

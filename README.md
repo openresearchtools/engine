@@ -47,7 +47,7 @@ It aims to unify chat, vision, embeddings, reranking, audio transcription/diariz
 * `engine/` Rust CLI wrapper.
 * `pdf/` fast PDF extraction module.
 * `pdfvlm/` PDF->image->VLM->Markdown module.
-* `diarize/` overlay/patch assets for integrated audio stack.
+* `diarize/` patch assets for integrated audio stack.
 * `build/` fetch/build scripts.
 * `third_party/` runtime sources/binaries/licenses.
 
@@ -164,6 +164,13 @@ You can invoke the audio pipeline in either of these forms:
 
 * `engine audio ...` or `engine bridge audio ...`
 
+Output behavior:
+
+* `--output-dir <dir>` writes the final file (`.srt` for `subtitle`, `.md` for `speech`/`transcript`) into that directory.
+* If `--output-dir` is omitted, output defaults to the same directory as `--audio-file`.
+* The pipeline keeps only the final output artifact.
+* Audio input is normalized through FFmpeg conversion in RAM; supported input formats depend on the FFmpeg build you ship.
+
 ### `--mode` (main mode)
 
 Current options are:
@@ -227,6 +234,7 @@ This is a straightforward “speech mode” transcription run (no diarization). 
 engine.exe audio `
   --model ".\models\model.gguf" `
   --audio-file ".\sample.mp3" `
+  --output-dir ".\outputs" `
   --audio-format mp3 `
   --mode speech `
   --custom default `
@@ -240,6 +248,7 @@ This produces subtitle-style output, where you can control the window size via `
 engine.exe audio `
   --model ".\models\model.gguf" `
   --audio-file ".\sample.wav" `
+  --output-dir ".\outputs" `
   --mode subtitle `
   --custom 4.5 `
   --whisper-model ".\models\whisper.bin"
@@ -252,6 +261,7 @@ This generates a speaker-aware transcript by enabling diarization. With `--custo
 engine.exe audio `
   --model ".\models\model.gguf" `
   --audio-file ".\meeting.mp3" `
+  --output-dir ".\outputs" `
   --mode transcript `
   --custom auto `
   --whisper-model ".\models\whisper.bin" `
@@ -268,6 +278,7 @@ This example also runs a diarized transcript, but forces a fixed speaker count (
 engine.exe audio `
   --model ".\models\model.gguf" `
   --audio-file ".\meeting.mp3" `
+  --output-dir ".\outputs" `
   --mode transcript `
   --custom 3 `
   --whisper-hf-repo ggerganov/whisper.cpp `

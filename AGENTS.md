@@ -1,4 +1,5 @@
 # AGENTS Instructions
+NEVER EVER TOUCH `/third_party/llama.cpp/` or `/third_party/whisper.cpp/ code INSIRE REPO, THEY ARE KEPT TO BE UPDATED BY FROM UPSTREAM. ANY CHANGES FOR NATIVE Llama.cpp or Whisper.cpp code must be implemented via patch `/diarize/addons/patches/0300-llama-unified-audio.patch` and implemented during build (not manually, and never ever apply patch onto the repo source code)
 
 ## Build and Test Artifact Policy
 

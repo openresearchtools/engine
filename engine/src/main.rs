@@ -20,7 +20,7 @@ bridge subcommands:
 
 examples:
   engine list-devices
-  engine bridge audio --audio-file <file.wav> --mode speech --custom default --whisper-model <whisper.bin>
+  engine bridge audio --audio-file <audio-file> --mode speech --custom default --whisper-model <whisper.bin>
   engine chat --model <gguf> --markdown <file.md>
   engine vlm --model <gguf> --mmproj <gguf> --image <image.png>
   engine pdf extract --input <file-or-dir> --output <path>

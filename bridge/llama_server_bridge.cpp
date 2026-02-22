@@ -18,6 +18,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -50,6 +51,47 @@ struct llama_server_bridge {
 
 static std::mutex g_backend_mutex;
 static int g_backend_refcount = 0;
+
+template <typename T, typename = void>
+struct has_post_audio_transcriptions : std::false_type {};
+
+template <typename T>
+struct has_post_audio_transcriptions<T, std::void_t<decltype(&T::post_audio_transcriptions)>> : std::true_type {};
+
+using audio_transcriptions_raw_handler_t = std::function<server_http_res_ptr(
+    const std::string &,
+    const raw_buffer &,
+    const json &)>;
+
+template <typename T, typename = void>
+struct has_post_audio_transcriptions_raw : std::false_type {};
+
+template <typename T>
+struct has_post_audio_transcriptions_raw<T, std::void_t<decltype(&T::post_audio_transcriptions_raw)>> : std::true_type {};
+
+static server_http_context::handler_t resolve_audio_transcriptions_handler(server_routes * routes) {
+    if (routes == nullptr) {
+        return {};
+    }
+
+    if constexpr (has_post_audio_transcriptions<server_routes>::value) {
+        return routes->post_audio_transcriptions;
+    }
+
+    return {};
+}
+
+static audio_transcriptions_raw_handler_t resolve_audio_transcriptions_raw_handler(server_routes * routes) {
+    if (routes == nullptr) {
+        return {};
+    }
+
+    if constexpr (has_post_audio_transcriptions_raw<server_routes>::value) {
+        return routes->post_audio_transcriptions_raw;
+    }
+
+    return {};
+}
 
 static char * copy_to_c_string(const std::string & s) {
     char * out = static_cast<char *>(std::malloc(s.size() + 1));
@@ -273,6 +315,7 @@ static void acquire_backend(const common_params & params) {
     std::lock_guard<std::mutex> lock(g_backend_mutex);
     if (g_backend_refcount == 0) {
         common_init();
+        ggml_backend_load_all();
         llama_backend_init();
         llama_numa_init(params.numa);
     }
@@ -758,12 +801,16 @@ static bool ffmpeg_convert_to_wav_pcm16_mono_16k(
 }
 #endif
 
-static bool build_audio_body_from_raw_request(
+static bool prepare_audio_raw_payload(
     const llama_server_bridge_audio_raw_request * req,
-    std::string & out_body,
+    json & out_metadata,
+    std::vector<uint8_t> & out_audio,
+    std::string & out_format,
     std::string & error) {
 
-    out_body.clear();
+    out_metadata = json::object();
+    out_audio.clear();
+    out_format.clear();
     error.clear();
 
     if (req == nullptr || req->audio_bytes == nullptr || req->audio_bytes_len == 0) {
@@ -771,40 +818,54 @@ static bool build_audio_body_from_raw_request(
         return false;
     }
 
-    json body = json::object();
     if (req->metadata_json != nullptr && req->metadata_json[0] != '\0') {
         try {
-            body = json::parse(req->metadata_json);
+            out_metadata = json::parse(req->metadata_json);
         } catch (const std::exception & e) {
             error = std::string("invalid metadata_json: ") + e.what();
             return false;
         }
-        if (!body.is_object()) {
+        if (!out_metadata.is_object()) {
             error = "metadata_json must be a JSON object";
             return false;
         }
     }
 
-    std::vector<uint8_t> audio(req->audio_bytes, req->audio_bytes + req->audio_bytes_len);
-    std::string fmt = (req->audio_format != nullptr && req->audio_format[0] != '\0')
+    out_audio.assign(req->audio_bytes, req->audio_bytes + req->audio_bytes_len);
+    out_format = (req->audio_format != nullptr && req->audio_format[0] != '\0')
         ? std::string(req->audio_format)
         : std::string("wav");
 
     if (req->ffmpeg_convert != 0) {
         std::vector<uint8_t> converted;
-        if (!ffmpeg_convert_to_wav_pcm16_mono_16k(audio.data(), audio.size(), fmt.c_str(), converted, error)) {
+        if (!ffmpeg_convert_to_wav_pcm16_mono_16k(
+                out_audio.data(),
+                out_audio.size(),
+                out_format.c_str(),
+                converted,
+                error)) {
             return false;
         }
-        audio.swap(converted);
-        fmt = "wav";
+        out_audio.swap(converted);
+        out_format = "wav";
     }
 
-    body["audio"] = json::object();
-    body["audio"]["format"] = fmt;
-    body["audio"]["data"] = base64_encode_bytes(audio.data(), audio.size());
-    out_body = body.dump();
-
     return true;
+}
+
+static std::string build_audio_body_with_base64(
+    json metadata,
+    const std::vector<uint8_t> & audio,
+    const std::string & format) {
+
+    if (!metadata.is_object()) {
+        metadata = json::object();
+    }
+
+    metadata["audio"] = json::object();
+    metadata["audio"]["format"] = format;
+    metadata["audio"]["data"] = base64_encode_bytes(audio.data(), audio.size());
+    return metadata.dump();
 }
 
 struct llama_server_bridge_params llama_server_bridge_default_params(void) {
@@ -968,13 +1029,25 @@ const char * llama_server_bridge_last_error(const struct llama_server_bridge * b
 
 struct llama_server_bridge * llama_server_bridge_create(const struct llama_server_bridge_params * params) {
     if (params == nullptr) {
+        std::fprintf(stderr, "llama_server_bridge_create: params is null\n");
         return nullptr;
     }
 
-    const char * env_audio_only = std::getenv("LLAMA_SERVER_AUDIO_ONLY");
-    const bool audio_only = env_audio_only != nullptr && std::string(env_audio_only) == "1";
     const bool has_model_path = params->model_path != nullptr && params->model_path[0] != '\0';
+    const char * env_audio_only = std::getenv("LLAMA_SERVER_AUDIO_ONLY");
+    // Default to audio-only mode when model_path is omitted. This keeps
+    // transcriptions working even if the caller does not set an env flag.
+    bool audio_only = !has_model_path;
+    if (env_audio_only != nullptr && env_audio_only[0] != '\0') {
+        const std::string v = trim_copy(env_audio_only);
+        if (v == "1" || v == "true" || v == "TRUE" || v == "on" || v == "ON") {
+            audio_only = true;
+        } else if (v == "0" || v == "false" || v == "FALSE" || v == "off" || v == "OFF") {
+            audio_only = false;
+        }
+    }
     if (!has_model_path && !audio_only) {
+        std::fprintf(stderr, "llama_server_bridge_create: missing model_path and audio-only mode is disabled\n");
         return nullptr;
     }
 
@@ -1004,6 +1077,7 @@ struct llama_server_bridge * llama_server_bridge_create(const struct llama_serve
     if (params->pooling_type >= 0) {
         if (!is_valid_pooling_type(params->pooling_type)) {
             set_bridge_error(bridge.get(), "invalid pooling_type, expected -1..4");
+            std::fprintf(stderr, "llama_server_bridge_create: invalid pooling_type=%d\n", params->pooling_type);
             return nullptr;
         }
         bridge->params.pooling_type = static_cast<enum llama_pooling_type>(params->pooling_type);
@@ -1019,10 +1093,12 @@ struct llama_server_bridge * llama_server_bridge_create(const struct llama_serve
     std::string parse_error;
     if (!parse_split_mode(params->split_mode, &bridge->params.split_mode, parse_error)) {
         set_bridge_error(bridge.get(), parse_error);
+        std::fprintf(stderr, "llama_server_bridge_create: split_mode parse failed: %s\n", parse_error.c_str());
         return nullptr;
     }
     if (!parse_tensor_split_csv(params->tensor_split, bridge->params.tensor_split, parse_error)) {
         set_bridge_error(bridge.get(), parse_error);
+        std::fprintf(stderr, "llama_server_bridge_create: tensor_split parse failed: %s\n", parse_error.c_str());
         return nullptr;
     }
 
@@ -1043,23 +1119,31 @@ struct llama_server_bridge * llama_server_bridge_create(const struct llama_serve
 
     if (!parse_devices_csv(params->devices, bridge->params.devices, parse_error)) {
         set_bridge_error(bridge.get(), parse_error);
+        std::fprintf(stderr, "llama_server_bridge_create: devices parse failed: %s\n", parse_error.c_str());
         release_backend();
         bridge->backend_acquired = false;
         return nullptr;
     }
 
-    if (!bridge->ctx.load_model(bridge->params)) {
-        set_bridge_error(bridge.get(), "failed to load model in llama_server_bridge_create()");
-        release_backend();
-        bridge->backend_acquired = false;
-        return nullptr;
-    }
+    if (has_model_path) {
+        if (!bridge->ctx.load_model(bridge->params)) {
+            set_bridge_error(bridge.get(), "failed to load model in llama_server_bridge_create()");
+            std::fprintf(stderr, "llama_server_bridge_create: load_model failed for model path '%s'\n", params->model_path);
+            release_backend();
+            bridge->backend_acquired = false;
+            return nullptr;
+        }
 
-    auto meta = bridge->ctx.get_meta();
-    bridge->model_name = meta.model_name;
+        auto meta = bridge->ctx.get_meta();
+        bridge->model_name = meta.model_name;
+    } else {
+        bridge->model_name = "audio-only";
+    }
 
     bridge->routes = std::make_unique<server_routes>(bridge->params, bridge->ctx);
-    bridge->routes->update_meta(bridge->ctx);
+    if (has_model_path) {
+        bridge->routes->update_meta(bridge->ctx);
+    }
 
     bridge->loop_thread = std::thread([raw = bridge.get()]() {
         raw->ctx.start_loop();
@@ -1103,17 +1187,7 @@ static int32_t run_json_route(
         return -1;
     }
 
-    try {
-        const std::function<bool()> should_stop = []() -> bool { return false; };
-        const server_http_req req{
-            {},
-            {},
-            path,
-            body,
-            should_stop
-        };
-
-        auto res = handler(req);
+    auto finalize = [&](server_http_res_ptr res) -> int32_t {
         if (res == nullptr) {
             const std::string msg = "route returned null response";
             set_bridge_error(bridge, msg);
@@ -1152,6 +1226,18 @@ static int32_t run_json_route(
         set_bridge_error(bridge, err);
         out->error_json = copy_to_c_string(err);
         return -1;
+    };
+
+    try {
+        const std::function<bool()> should_stop = []() -> bool { return false; };
+        const server_http_req req{
+            {},
+            {},
+            path,
+            body,
+            should_stop
+        };
+        return finalize(handler(req));
     } catch (const std::exception & e) {
         const std::string msg = normalize_error(e.what());
         set_bridge_error(bridge, msg);
@@ -1251,9 +1337,18 @@ int32_t llama_server_bridge_audio_transcriptions(
         return -1;
     }
 
+    const auto handler = resolve_audio_transcriptions_handler(bridge->routes.get());
+    if (!handler) {
+        const std::string msg =
+            "audio transcriptions route is unavailable in this llama.cpp build (missing server audio patch)";
+        set_bridge_error(bridge, msg);
+        out->error_json = copy_to_c_string(msg);
+        return -1;
+    }
+
     return run_json_route(
         bridge,
-        bridge->routes->post_audio_transcriptions,
+        handler,
         "/v1/audio/transcriptions",
         req->body_json,
         out);
@@ -1276,17 +1371,87 @@ int32_t llama_server_bridge_audio_transcriptions_raw(
         return -1;
     }
 
-    std::string body_json;
-    std::string build_error;
-    if (!build_audio_body_from_raw_request(req, body_json, build_error)) {
-        set_bridge_error(bridge, build_error);
-        out->error_json = copy_to_c_string(build_error);
+    json metadata = json::object();
+    std::vector<uint8_t> audio;
+    std::string format;
+    std::string prep_error;
+    if (!prepare_audio_raw_payload(req, metadata, audio, format, prep_error)) {
+        set_bridge_error(bridge, prep_error);
+        out->error_json = copy_to_c_string(prep_error);
         return -1;
     }
 
+    const auto raw_handler = resolve_audio_transcriptions_raw_handler(bridge->routes.get());
+    if (raw_handler) {
+        auto finalize = [&](server_http_res_ptr res) -> int32_t {
+            if (res == nullptr) {
+                const std::string msg = "route returned null response";
+                set_bridge_error(bridge, msg);
+                out->error_json = copy_to_c_string(msg);
+                return -1;
+            }
+
+            std::string payload = res->data;
+            if (res->is_stream()) {
+                while (true) {
+                    std::string chunk;
+                    const bool has_more = res->next(chunk);
+                    payload += chunk;
+                    if (!has_more) {
+                        break;
+                    }
+                }
+            }
+
+            out->status = res->status;
+            if (res->status >= 200 && res->status < 300) {
+                out->ok = 1;
+                out->json = copy_to_c_string(payload);
+                if (out->json == nullptr) {
+                    const std::string msg = "failed to allocate route JSON output";
+                    set_bridge_error(bridge, msg);
+                    out->ok = 0;
+                    out->error_json = copy_to_c_string(msg);
+                    return -1;
+                }
+                set_bridge_error(bridge, "");
+                return 0;
+            }
+
+            const std::string err = payload.empty() ? "route returned error status with empty payload" : payload;
+            set_bridge_error(bridge, err);
+            out->error_json = copy_to_c_string(err);
+            return -1;
+        };
+
+        try {
+            return finalize(raw_handler(format, audio, metadata));
+        } catch (const std::exception & e) {
+            const std::string msg = normalize_error(e.what());
+            set_bridge_error(bridge, msg);
+            out->error_json = copy_to_c_string(msg);
+            return -1;
+        } catch (...) {
+            const std::string msg = "unknown exception while running raw audio route";
+            set_bridge_error(bridge, msg);
+            out->error_json = copy_to_c_string(msg);
+            return -1;
+        }
+    }
+
+    const auto handler = resolve_audio_transcriptions_handler(bridge->routes.get());
+    if (!handler) {
+        const std::string msg =
+            "audio transcriptions route is unavailable in this llama.cpp build (missing server audio patch)";
+        set_bridge_error(bridge, msg);
+        out->error_json = copy_to_c_string(msg);
+        return -1;
+    }
+
+    const std::string body_json = build_audio_body_with_base64(metadata, audio, format);
     return run_json_route(
         bridge,
-        bridge->routes->post_audio_transcriptions,
+        handler,
         "/v1/audio/transcriptions",
         body_json,
         out);

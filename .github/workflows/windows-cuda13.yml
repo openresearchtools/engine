@@ -10,7 +10,7 @@ on:
         options:
           - cuda
           - vulkan
-        default: cuda
+        default: vulkan
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.backend }}
@@ -100,17 +100,19 @@ jobs:
               }
           }
 
-          .\build\build_full_stack_cuda.ps1 `
-            -CmakeConfig Release `
-            -Backend $env:BACKEND `
-            -CargoProfile Release `
-            -BuildRoot $env:BUILD_ROOT `
-            -PrepareLlamaSource $false `
-            -ApplyDiarizeOverlay $true `
-            -BuildWhisperCli $false `
-            -EnableFfmpeg `
-            -EnableCpuAllVariants $true `
-            -StageCudaRuntime $false
+          $buildArgs = @(
+            "-CmakeConfig", "Release",
+            "-Backend", $env:BACKEND,
+            "-CargoProfile", "Release",
+            "-BuildRoot", $env:BUILD_ROOT,
+            "-PrepareLlamaSource", $true,
+            "-BuildWhisperCli", $false,
+            "-EnableFfmpeg",
+            "-EnableCpuAllVariants", $true,
+            "-StageCudaRuntime", $false
+          )
+
+          .\build\build_full_stack_cuda.ps1 @buildArgs
 
       - name: Validate Bundle Contents
         shell: pwsh

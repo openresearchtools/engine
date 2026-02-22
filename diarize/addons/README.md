@@ -1,16 +1,8 @@
 # Add-on Layer
 
-This folder contains the whisper+pyannote add-on layer intended to sit on top of a fresh upstream `llama.cpp`.
+This folder is patch-only.
 
-## Overlay
+## Patch
 
-- `overlay/llama.cpp/` contains only the changed files.
-- Apply it with:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\diarize\scripts\apply_llama_overlay.ps1 -LlamaRoot .\third_party\llama.cpp
-```
-
-## Patch (Reference)
-
-- `patches/0001-whisper-pyannote-whispercpp.patch` is a reference diff for review/auditing.
+- `patches/0300-llama-unified-audio.patch` is the only supported patch for repo-source build mode.
+- `patches/0300-llama-unified-audio.meta.txt` tracks patch metadata.

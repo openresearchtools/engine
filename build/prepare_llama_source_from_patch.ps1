@@ -1,10 +1,5 @@
 param(
-    [string]$UpstreamRepo = "https://github.com/ggerganov/llama.cpp.git",
-    [string]$UpstreamRef = "master",
-    [string]$CacheDir = "",
     [string]$OutDir = "",
-    [string]$PatchFile = "",
-    [switch]$SkipPatch,
     [switch]$Force
 )
 
@@ -39,75 +34,108 @@ function Test-IsUnderPath {
     return $fullPath.StartsWith($fullBase, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
-function Invoke-GitOrThrow {
+function Copy-DirectoryTree {
     param(
-        [string]$WorkingDir,
-        [string[]]$GitArgs,
-        [string]$FailureMessage
+        [Parameter(Mandatory = $true)]
+        [string]$SourceRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationRoot
     )
 
-    & git -C $WorkingDir @GitArgs | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-        throw $FailureMessage
+    if (-not (Test-Path -LiteralPath $SourceRoot)) {
+        throw "Source directory not found: $SourceRoot"
     }
+
+    if (Test-Path -LiteralPath $DestinationRoot) {
+        Remove-Item -LiteralPath $DestinationRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $DestinationRoot | Out-Null
+
+    $items = Get-ChildItem -LiteralPath $SourceRoot -Force -ErrorAction SilentlyContinue
+    foreach ($item in $items) {
+        Copy-Item -LiteralPath $item.FullName -Destination $DestinationRoot -Recurse -Force
+    }
+}
+
+function Stage-ExtraToolFilesNoOverwrite {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$LlamaOutDir
+    )
+
+    $extraRoot = Join-Path $RepoRoot "diarize\\addons\\overlay\\llama.cpp\\tools"
+    $relativeFiles = @(
+        "pyannote\\CMakeLists.txt",
+        "pyannote\\pyannote-align.cpp",
+        "pyannote\\pyannote-diarize.cpp",
+        "pyannote\\pyannote-entrypoints.h",
+        "pyannote\\pyannote-inspect.cpp",
+        "server\\inproc-pipeline-repro.cpp",
+        "whisper\\whisper-cli-entrypoint.cpp",
+        "whisper\\whisper-cli-entrypoint.h",
+        "whisper\\whisper-common-audio.cpp"
+    )
+
+    foreach ($rel in $relativeFiles) {
+        $src = Join-Path $extraRoot $rel
+        if (-not (Test-Path -LiteralPath $src)) {
+            throw "Missing required add-on source file: $src"
+        }
+    }
+
+    $stagedCount = 0
+    foreach ($rel in $relativeFiles) {
+        $src = Join-Path $extraRoot $rel
+        $dst = Join-Path (Join-Path $LlamaOutDir "tools") $rel
+        $dstDir = Split-Path -Parent $dst
+        if (-not (Test-Path -LiteralPath $dstDir)) {
+            New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
+        }
+        if (Test-Path -LiteralPath $dst) {
+            throw "Refusing to overwrite existing llama.cpp file: $dst"
+        }
+        Copy-Item -LiteralPath $src -Destination $dst -Force
+        $stagedCount++
+    }
+
+    return $stagedCount
 }
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $buildsRoot = Join-Path (Split-Path -Parent $repoRoot) "ENGINEbuilds"
+$repoLlamaDir = Join-Path $repoRoot "third_party\\llama.cpp"
 
-if ([string]::IsNullOrWhiteSpace($CacheDir)) {
-    $CacheDir = Join-Path $buildsRoot "upstream\\llama-clean"
-}
 if ([string]::IsNullOrWhiteSpace($OutDir)) {
     $OutDir = Join-Path $buildsRoot "sources\\llama.cpp"
 }
-
-$CacheDir = Resolve-AbsolutePath -PathValue $CacheDir -RepoRoot $repoRoot
 $OutDir = Resolve-AbsolutePath -PathValue $OutDir -RepoRoot $repoRoot
 
-if (Test-IsUnderPath -PathValue $CacheDir -BasePath $repoRoot) {
-    throw "CacheDir must be outside the repo. Current: $CacheDir"
-}
 if (Test-IsUnderPath -PathValue $OutDir -BasePath $repoRoot) {
     throw "OutDir must be outside the repo. Current: $OutDir"
 }
 
-if (-not $SkipPatch) {
-    if ([string]::IsNullOrWhiteSpace($PatchFile)) {
-        $patchRoot = Join-Path $buildsRoot "patches"
-        $latestPatch = Get-ChildItem -Path $patchRoot -File -Filter "llama-working-overlay-*.patch" -ErrorAction SilentlyContinue |
-            Sort-Object Name -Descending |
-            Select-Object -First 1
-        if ($null -eq $latestPatch) {
-            throw "No patch found in $patchRoot. Pass -PatchFile or generate one first."
-        }
-        $PatchFile = $latestPatch.FullName
-    } else {
-        $PatchFile = Resolve-AbsolutePath -PathValue $PatchFile -RepoRoot $repoRoot
-    }
-
-    if (-not (Test-Path -LiteralPath $PatchFile)) {
-        throw "Patch file not found: $PatchFile"
-    }
+if (-not (Test-Path -LiteralPath $repoLlamaDir)) {
+    throw "Required repo source not found: $repoLlamaDir"
 }
 
-$cacheParent = Split-Path -Parent $CacheDir
-if (-not [string]::IsNullOrWhiteSpace($cacheParent)) {
-    New-Item -ItemType Directory -Force -Path $cacheParent | Out-Null
+$cmakeLists = Join-Path $repoLlamaDir "CMakeLists.txt"
+if (-not (Test-Path -LiteralPath $cmakeLists)) {
+    throw "Missing llama.cpp CMakeLists.txt in repo source: $cmakeLists"
+}
+$cmakeText = Get-Content -Raw -LiteralPath $cmakeLists
+if ($cmakeText -match 'project\("whisper\.cpp"') {
+    throw "Expected llama.cpp sources at '$repoLlamaDir' but found whisper.cpp content."
+}
+if ($cmakeText -notmatch 'project\("llama\.cpp"') {
+    throw "Unable to verify llama.cpp source root at '$repoLlamaDir'."
 }
 
-if (-not (Test-Path -LiteralPath $CacheDir)) {
-    & git clone $UpstreamRepo $CacheDir | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to clone upstream llama.cpp from $UpstreamRepo"
-    }
-} else {
-    Invoke-GitOrThrow -WorkingDir $CacheDir -GitArgs @("fetch", "origin", "--tags", "--prune") -FailureMessage "Failed to fetch upstream updates for cache."
+$PatchFile = Join-Path $repoRoot "diarize\\addons\\patches\\0300-llama-unified-audio.patch"
+if (-not (Test-Path -LiteralPath $PatchFile)) {
+    throw "Required patch not found: $PatchFile"
 }
-
-Invoke-GitOrThrow -WorkingDir $CacheDir -GitArgs @("checkout", "--force", $UpstreamRef) -FailureMessage "Failed to checkout upstream ref '$UpstreamRef' in cache."
-Invoke-GitOrThrow -WorkingDir $CacheDir -GitArgs @("reset", "--hard", $UpstreamRef) -FailureMessage "Failed to reset cache to '$UpstreamRef'."
-Invoke-GitOrThrow -WorkingDir $CacheDir -GitArgs @("clean", "-xfd") -FailureMessage "Failed to clean cache."
 
 if (Test-Path -LiteralPath $OutDir) {
     if (-not $Force) {
@@ -121,33 +149,29 @@ if (-not [string]::IsNullOrWhiteSpace($outParent)) {
     New-Item -ItemType Directory -Force -Path $outParent | Out-Null
 }
 
-& git clone --local --no-hardlinks $CacheDir $OutDir | Out-Host
+Copy-DirectoryTree -SourceRoot $repoLlamaDir -DestinationRoot $OutDir
+$extraFilesStaged = Stage-ExtraToolFilesNoOverwrite -RepoRoot $repoRoot -LlamaOutDir $OutDir
+
+& git -C $OutDir init | Out-Host
 if ($LASTEXITCODE -ne 0) {
-    throw "Failed to create build source clone at $OutDir"
+    throw "Failed to initialize git workspace at: $OutDir"
 }
 
-Invoke-GitOrThrow -WorkingDir $OutDir -GitArgs @("checkout", "--force", $UpstreamRef) -FailureMessage "Failed to checkout '$UpstreamRef' in build source."
-
-if (-not $SkipPatch) {
-    & git -C $OutDir apply --check $PatchFile | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-        throw "Patch does not apply cleanly: $PatchFile"
-    }
-
-    & git -C $OutDir apply --whitespace=nowarn $PatchFile | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to apply patch: $PatchFile"
-    }
+& git -C $OutDir apply --check --ignore-space-change --ignore-whitespace $PatchFile | Out-Host
+if ($LASTEXITCODE -ne 0) {
+    throw "Patch does not apply cleanly: $PatchFile"
 }
 
-$head = (& git -C $OutDir rev-parse HEAD).Trim()
+& git -C $OutDir apply --whitespace=nowarn --ignore-space-change --ignore-whitespace $PatchFile | Out-Host
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to apply patch: $PatchFile"
+}
+
 $statusCount = ((& git -C $OutDir status --porcelain) | Measure-Object).Count
 
-Write-Host "Prepared llama source:"
+Write-Host "Prepared llama source from repo snapshot:"
+Write-Host "  Source: $repoLlamaDir"
 Write-Host "  OutDir: $OutDir"
-Write-Host "  Upstream ref: $UpstreamRef"
-Write-Host "  Upstream HEAD: $head"
-if (-not $SkipPatch) {
-    Write-Host "  Patch: $PatchFile"
-}
+Write-Host "  Extra add-on files staged: $extraFilesStaged"
+Write-Host "  Patch: $PatchFile"
 Write-Host "  Working tree entries after patch: $statusCount"

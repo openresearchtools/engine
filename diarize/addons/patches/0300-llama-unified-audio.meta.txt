@@ -1,0 +1,7 @@
+generated_at=2026-02-21T21:47:47.0163117Z
+base_upstream_head=a0c91e8f9f69c11bbdb1111af20537e206f0866f
+source_temp_repo=..\\ENGINEbuilds\\tmp-llama-src
+patch_path=diarize\\addons\\patches\\0300-llama-unified-audio.patch
+patch_sha256=2DC0D9BB1D99B82D38C35EECCE30BC95729B4C2BEE188F43C28FE8C45F9F2FD8
+patch_bytes=93914
+notes=single upstream patch; audio output-dir + temp-only intermediates

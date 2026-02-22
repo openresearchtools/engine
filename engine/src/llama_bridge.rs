@@ -403,7 +403,7 @@ fn bridge_cli_usage() -> &'static str {
     "bridge usage:
   list-devices
   vlm --model <gguf> --mmproj <gguf> --image <png/jpg/webp> [--prompt <text>] [--out <md>] [--n-predict 5000]
-  audio [--model <gguf>] --audio-file <wav/mp3> [--audio-format wav|mp3] --mode <subtitle|speech|transcript> --custom <value> [--no-ffmpeg-convert] [whisper source + diarization source flags]
+  audio [--model <gguf>] --audio-file <audio-file> [--audio-format <format-hint>] [--output-dir <dir>] --mode <subtitle|speech|transcript> --custom <value> [whisper source + diarization source flags]
   chat --model <gguf> [--prompt <text>] [--markdown <md>] [--out <md>] [--devices <csv>] [--n-predict 10000]
   embed --model <gguf> (--markdown <md> | --body-json <json-or-path>) [--out <json>] [--devices <csv>] [--batch-size 32] [--chunk-words 500] [--batches 8]
   rerank --model <gguf> (--markdown <md> | --body-json <json-or-path>) [--out <json>] [--devices <csv>] [--docs-per-query 32] [--chunk-words 500] [--batches 8]
@@ -585,6 +585,7 @@ fn run_audio(args: &[String]) -> Result<(), String> {
     let model = arg_value(args, "--model").unwrap_or_default();
     let audio_only_mode = model.trim().is_empty();
     let out_path = arg_value(args, "--out");
+    let output_dir_override = arg_value(args, "--output-dir");
     let devices = arg_value(args, "--devices");
     let tensor_split = arg_value(args, "--tensor-split");
     let split_mode = match arg_value(args, "--split-mode") {
@@ -613,8 +614,16 @@ fn run_audio(args: &[String]) -> Result<(), String> {
         } else {
             raw_body
         };
+        let mut body_json: Value = serde_json::from_str(&body_string)
+            .map_err(|e| format!("invalid --body-json payload: {e}"))?;
+        let body_obj = body_json
+            .as_object_mut()
+            .ok_or("--body-json payload must be a JSON object".to_string())?;
+        if let Some(output_dir) = output_dir_override.as_ref() {
+            body_obj.insert("output_dir".to_string(), json!(output_dir));
+        }
         body_c = Some(
-            CString::new(body_string).map_err(|_| "audio body json contains NUL byte".to_string())?,
+            CString::new(body_json.to_string()).map_err(|_| "audio body json contains NUL byte".to_string())?,
         );
     } else {
         use_raw_audio = true;
@@ -639,9 +648,23 @@ fn run_audio(args: &[String]) -> Result<(), String> {
                 .map(|s| s.to_ascii_lowercase())
                 .unwrap_or_else(|| "wav".to_string())
         };
-        if audio_format != "wav" && audio_format != "mp3" {
-            return Err("audio format must be wav or mp3".to_string());
+        if audio_format.trim().is_empty() {
+            return Err("audio format must be a non-empty string".to_string());
         }
+        let output_dir = if let Some(v) = output_dir_override.as_ref() {
+            v.clone()
+        } else {
+            std::path::Path::new(&audio_file)
+                .parent()
+                .map(|p| {
+                    if p.as_os_str().is_empty() {
+                        ".".to_string()
+                    } else {
+                        p.to_string_lossy().into_owned()
+                    }
+                })
+                .unwrap_or_else(|| ".".to_string())
+        };
 
         let whisper_local = arg_value(args, "--whisper-model")
             .or_else(|| arg_value(args, "--whisper-model-path"));
@@ -676,7 +699,9 @@ fn run_audio(args: &[String]) -> Result<(), String> {
 
         let mut metadata = json!({
             "mode": mode,
-            "custom": custom
+            "custom": custom,
+            "output_dir": output_dir,
+            "audio_source_path": audio_file
         });
 
         if let Some(local) = whisper_local {
@@ -764,7 +789,7 @@ fn run_audio(args: &[String]) -> Result<(), String> {
             .as_ref()
             .map(|v| v.as_ptr())
             .unwrap_or(ptr::null());
-        req.ffmpeg_convert = if has_arg(args, "--no-ffmpeg-convert") { 0 } else { 1 };
+        req.ffmpeg_convert = 1;
         unsafe { llama_server_bridge_audio_transcriptions_raw(bridge.ptr, &req, &mut out) }
     } else {
         let mut req = unsafe { llama_server_bridge_default_audio_request() };

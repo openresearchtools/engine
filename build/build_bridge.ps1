@@ -3,17 +3,17 @@ param(
     [ValidateSet("Debug", "Release", "RelWithDebInfo", "MinSizeRel")]
     [string]$Config = "Release",
     [ValidateSet("cpu", "cuda", "vulkan")]
-    [string]$Backend = "cuda",
+    [string]$Backend = "vulkan",
     [string]$LlamaCppDir = "",
+    [string]$WhisperCppDir = "",
     [string]$BuildRoot = "",
     [string]$BuildDir = "",
     [string]$BridgeSrcDir = "",
     [string]$BridgeRelativeDir = "MARKDOWN\\bridge",
-    [bool]$ApplyBridgeOverlay = $true,
-    [bool]$ApplyDiarizeOverlay = $true,
+    [bool]$StageBridgeSources = $true,
+    [bool]$StageWhisperSource = $true,
     [switch]$BuildLlamaServerCli,
     [switch]$BuildPyannoteCli,
-    [string[]]$OverlaySearchRoots = @(),
     [switch]$EnableFfmpeg,
     [bool]$EnableBackendDl = $false,
     [bool]$EnableCpuAllVariants = $false,
@@ -53,49 +53,90 @@ function Test-IsUnderPath {
     return $fullPath.StartsWith($fullBase, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
-function Resolve-OverlayRoot {
+function Copy-DirectoryTree {
     param(
-        [string[]]$SearchRoots,
-        [string]$RepoRoot
-    )
-
-    $candidates = @()
-    if ($SearchRoots -and $SearchRoots.Count -gt 0) {
-        foreach ($root in $SearchRoots) {
-            if ([string]::IsNullOrWhiteSpace($root)) {
-                continue
-            }
-            $candidate = Resolve-AbsolutePath -PathValue $root -RepoRoot $RepoRoot
-            $candidates += $candidate
-        }
-    } else {
-        $candidates += (Join-Path $RepoRoot "diarize\\addons\\overlay\\llama.cpp")
-        $candidates += (Join-Path $RepoRoot "diarize\\overlay\\llama.cpp")
-        $candidates += (Join-Path $RepoRoot "addons\\overlay\\llama.cpp")
-    }
-
-    foreach ($candidate in $candidates) {
-        if (Test-Path -LiteralPath $candidate) {
-            return $candidate
-        }
-    }
-    return $null
-}
-
-function Copy-OverlayTree {
-    param(
+        [Parameter(Mandatory = $true)]
         [string]$SourceRoot,
+        [Parameter(Mandatory = $true)]
         [string]$DestinationRoot
     )
 
-    $files = Get-ChildItem -Path $SourceRoot -Recurse -File
-    foreach ($src in $files) {
-        $rel = $src.FullName.Substring($SourceRoot.Length + 1)
-        $dst = Join-Path $DestinationRoot $rel
-        $dstDir = Split-Path -Parent $dst
-        New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
-        Copy-Item -LiteralPath $src.FullName -Destination $dst -Force
+    if (-not (Test-Path -LiteralPath $SourceRoot)) {
+        throw "Source directory not found: $SourceRoot"
     }
+
+    if (Test-Path -LiteralPath $DestinationRoot) {
+        Remove-Item -LiteralPath $DestinationRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $DestinationRoot | Out-Null
+
+    $items = Get-ChildItem -LiteralPath $SourceRoot -Force -ErrorAction SilentlyContinue
+    foreach ($item in $items) {
+        Copy-Item -LiteralPath $item.FullName -Destination $DestinationRoot -Recurse -Force
+    }
+}
+
+function Assert-AudioPatchApplied {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LlamaRoot
+    )
+
+    $checks = @(
+        @{
+            Path = Join-Path $LlamaRoot "tools\\server\\server-context.h"
+            Pattern = "post_audio_transcriptions"
+            Name = "server audio route field"
+        },
+        @{
+            Path = Join-Path $LlamaRoot "tools\\server\\server-context.cpp"
+            Pattern = "this->post_audio_transcriptions"
+            Name = "server audio transcription handler"
+        },
+        @{
+            Path = Join-Path $LlamaRoot "tools\\server\\server.cpp"
+            Pattern = "/v1/audio/transcriptions"
+            Name = "server audio HTTP endpoint"
+        },
+        @{
+            Path = Join-Path $LlamaRoot "tools\\server\\server.cpp"
+            Pattern = "LLAMA_SERVER_AUDIO_ONLY"
+            Name = "audio-only server mode flag"
+        },
+        @{
+            Path = Join-Path $LlamaRoot "tools\\whisper\\whisper-cli-entrypoint.cpp"
+            Pattern = "whisper_cli_inproc_main"
+            Name = "whisper in-process entrypoint"
+        },
+        @{
+            Path = Join-Path $LlamaRoot "tools\\pyannote\\pyannote-entrypoints.h"
+            Pattern = "llama_pyannote_diarize_main"
+            Name = "pyannote in-process entrypoint"
+        },
+        @{
+            Path = Join-Path $LlamaRoot "whisper.cpp\\examples\\grammar-parser.cpp"
+            Pattern = "namespace grammar_parser"
+            Name = "whisper grammar parser source"
+        },
+        @{
+            Path = Join-Path $LlamaRoot "whisper.cpp\\src\\whisper.cpp"
+            Pattern = "whisper"
+            Name = "whisper core source"
+        }
+    )
+
+    foreach ($check in $checks) {
+        if (-not (Test-Path -LiteralPath $check.Path)) {
+            throw "Audio patch verification failed: missing file for $($check.Name): $($check.Path)"
+        }
+
+        $match = Select-String -LiteralPath $check.Path -Pattern $check.Pattern -SimpleMatch -ErrorAction SilentlyContinue
+        if (-not $match) {
+            throw "Audio patch verification failed: missing marker '$($check.Pattern)' for $($check.Name) in $($check.Path)"
+        }
+    }
+
+    Write-Host "Verified audio patch markers in llama source."
 }
 
 function Invoke-CmakeBuildTargets {
@@ -219,6 +260,11 @@ if ([string]::IsNullOrWhiteSpace($LlamaCppDir)) {
 }
 $LlamaCppDir = Resolve-AbsolutePath -PathValue $LlamaCppDir -RepoRoot $repoRoot
 
+if ([string]::IsNullOrWhiteSpace($WhisperCppDir)) {
+    $WhisperCppDir = Join-Path $repoRoot "third_party\\whisper.cpp"
+}
+$WhisperCppDir = Resolve-AbsolutePath -PathValue $WhisperCppDir -RepoRoot $repoRoot
+
 if ([string]::IsNullOrWhiteSpace($BuildRoot)) {
     $BuildRoot = Join-Path $buildsRoot "llama"
 }
@@ -260,11 +306,11 @@ if ($cmakeText -notmatch 'project\("llama\.cpp"') {
     throw "Unable to verify llama.cpp source root at '$LlamaCppDir'."
 }
 
-if ($ApplyBridgeOverlay) {
+if ($StageBridgeSources) {
     Ensure-BridgeCmakeHooks -LlamaRoot $LlamaCppDir
 }
 
-if ($ApplyBridgeOverlay) {
+if ($StageBridgeSources) {
     if (-not (Test-Path -LiteralPath $BridgeSrcDir)) {
         throw "Bridge source dir not found: $BridgeSrcDir"
     }
@@ -273,12 +319,25 @@ if ($ApplyBridgeOverlay) {
     Copy-Item -Path (Join-Path $BridgeSrcDir "*") -Destination $bridgeDstDir -Recurse -Force
 }
 
-if ($ApplyDiarizeOverlay) {
-    $overlayRoot = Resolve-OverlayRoot -SearchRoots $OverlaySearchRoots -RepoRoot $repoRoot
-    if (-not $overlayRoot) {
-        throw "Could not locate diarize overlay root. Checked default candidates and provided OverlaySearchRoots."
+if ($StageWhisperSource) {
+    $whisperCmake = Join-Path $WhisperCppDir "CMakeLists.txt"
+    if (-not (Test-Path -LiteralPath $whisperCmake)) {
+        throw "whisper.cpp source not found at: $WhisperCppDir"
     }
-    Copy-OverlayTree -SourceRoot $overlayRoot -DestinationRoot $LlamaCppDir
+    $whisperDestInTree = Join-Path $LlamaCppDir "whisper.cpp"
+    Copy-DirectoryTree -SourceRoot $WhisperCppDir -DestinationRoot $whisperDestInTree
+    Write-Host "Staged whisper.cpp source tree: $whisperDestInTree"
+
+    # Some legacy CMake paths resolve whisper.cpp as a sibling of the llama source root.
+    # Stage a second copy there to preserve compatibility with legacy relative paths.
+    $llamaParentDir = Split-Path -Parent $LlamaCppDir
+    $whisperDestSibling = Join-Path $llamaParentDir "whisper.cpp"
+    Copy-DirectoryTree -SourceRoot $WhisperCppDir -DestinationRoot $whisperDestSibling
+    Write-Host "Staged whisper.cpp sibling source tree: $whisperDestSibling"
+}
+
+if ($StageWhisperSource) {
+    Assert-AudioPatchApplied -LlamaRoot $LlamaCppDir
 }
 
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
@@ -363,9 +422,6 @@ if ($BuildLlamaServerCli) {
 Invoke-CmakeBuildTargets -Cmake $CmakeExe -BuildDirPath $BuildDir -ConfigName $Config -Targets $buildTargets -ParallelJobs $Jobs
 
 if ($BuildPyannoteCli) {
-    if (-not $ApplyDiarizeOverlay) {
-        throw "BuildPyannoteCli requires ApplyDiarizeOverlay."
-    }
     Invoke-CmakeBuildTargets -Cmake $CmakeExe -BuildDirPath $BuildDir -ConfigName $Config -Targets @("llama-pyannote-align", "llama-pyannote-diarize", "llama-pyannote-inspect") -ParallelJobs $Jobs
 }
 
