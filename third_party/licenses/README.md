@@ -189,11 +189,45 @@ Build-note: BoringSSL is fetched by CMake in this build profile (`LLAMA_BUILD_BO
 ### 8) FFmpeg runtime conversion (raw audio path)
 
 - Role: in-memory audio normalization for bridge raw-audio transcription requests (convert to WAV 16-bit mono 16 kHz before endpoint call).
+
+Windows x64 runtime path in this project:
+
 - Binary fetch source: `https://github.com/BtbN/FFmpeg-Builds`
 - Binary fetch source license type: MIT
 - Binary fetch source license file: `ffmpeg-builds-LICENSE.txt`
 - Fetch script: [`build/download-ffmpeg-lgpl-win-x64.ps1`](https://github.com/openresearchtools/engine/blob/main/build/download-ffmpeg-lgpl-win-x64.ps1)
-- Expected runtime location: [`third_party/ffmpeg`](https://github.com/openresearchtools/engine/tree/main/third_party/ffmpeg)
+
+macOS arm64 source-build pinning (LGPL shared) used for workflow documentation:
+
+- Workflow reference (contains pinned command block): [`.github/workflows/macos-arm64.yml`](https://github.com/openresearchtools/engine/blob/main/.github/workflows/macos-arm64.yml)
+- Upstream source repository: `https://github.com/FFmpeg/FFmpeg`
+- Pinned source tag: `n8.0.1`
+- Pinned source commit: `d22ecc4f6f3fca77b3e71b18641ceddb25973e97`
+- Upstream tag URL: `https://github.com/FFmpeg/FFmpeg/tree/n8.0.1`
+- Upstream commit URL: `https://github.com/FFmpeg/FFmpeg/commit/d22ecc4f6f3fca77b3e71b18641ceddb25973e97`
+- Reference build command (macOS arm64):
+
+```bash
+git clone --depth 1 --branch n8.0.1 https://github.com/FFmpeg/FFmpeg ffmpeg-src
+cd ffmpeg-src
+test "$(git rev-parse HEAD)" = "d22ecc4f6f3fca77b3e71b18641ceddb25973e97"
+./configure \
+  --prefix="$PWD/../ffmpeg-out" \
+  --enable-shared \
+  --disable-static \
+  --disable-gpl \
+  --disable-version3 \
+  --disable-nonfree \
+  --enable-pic \
+  --cc=clang \
+  --arch=arm64 \
+  --target-os=darwin
+make -j"$(sysctl -n hw.ncpu)"
+make install
+```
+
+Common notes:
+
 - License type (intended build): LGPL (LGPL-only shared build)
 - License file: `ffmpeg-LGPL-2.1.txt`
 - Source/provenance note: `ffmpeg-SOURCE.txt`

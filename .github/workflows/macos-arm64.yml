@@ -1,0 +1,376 @@
+name: Build macOS arm64 Backend Bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: Backend to build
+        required: true
+        type: choice
+        options:
+          - metal
+          - cpu
+        default: metal
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.backend }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  macos-arm64:
+    runs-on: macos-14
+    timeout-minutes: 300
+    env:
+      BACKEND: ${{ inputs.backend }}
+      FFMPEG_TAG: "n8.0.1"
+      FFMPEG_SHA: "d22ecc4f6f3fca77b3e71b18641ceddb25973e97"
+      PDFIUM_RELEASE_API: "https://api.github.com/repos/bblanchon/pdfium-binaries/releases/latest"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve Build Paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="$(cd "$GITHUB_WORKSPACE/.." && pwd)/ENGINEbuilds/gha-macos-arm64-${BACKEND}"
+          echo "BUILD_ROOT=$build_root" >> "$GITHUB_ENV"
+          echo "Resolved BUILD_ROOT=$build_root"
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Build Dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew update
+          brew install ninja nasm pkg-config
+
+      - name: Build FFmpeg (macOS arm64 LGPL shared, pinned)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ffmpeg_src="$BUILD_ROOT/sources/ffmpeg"
+          ffmpeg_out="$BUILD_ROOT/runtime-deps/ffmpeg"
+          rm -rf "$ffmpeg_src" "$ffmpeg_out"
+          mkdir -p "$(dirname "$ffmpeg_src")" "$ffmpeg_out"
+
+          git clone --depth 1 --branch "$FFMPEG_TAG" https://github.com/FFmpeg/FFmpeg "$ffmpeg_src"
+          actual_sha="$(git -C "$ffmpeg_src" rev-parse HEAD)"
+          if [[ "$actual_sha" != "$FFMPEG_SHA" ]]; then
+            echo "Pinned SHA mismatch. Expected $FFMPEG_SHA, got $actual_sha"
+            exit 1
+          fi
+
+          pushd "$ffmpeg_src"
+          ./configure \
+            --prefix="$ffmpeg_out" \
+            --enable-shared \
+            --disable-static \
+            --disable-gpl \
+            --disable-version3 \
+            --disable-nonfree \
+            --enable-pic \
+            --disable-programs \
+            --disable-doc \
+            --cc=clang \
+            --arch=arm64 \
+            --target-os=darwin
+          make -j"$(sysctl -n hw.ncpu)"
+          make install
+          popd
+
+      - name: Fetch PDFium (macOS arm64)
+        shell: bash
+        run: |
+          set -euo pipefail
+          pdfium_root="$BUILD_ROOT/runtime-deps/pdfium"
+          rm -rf "$pdfium_root"
+          mkdir -p "$pdfium_root"
+
+          asset_url="$(python3 -c 'import json, os, urllib.request; release=json.load(urllib.request.urlopen(os.environ["PDFIUM_RELEASE_API"])); urls=[a["browser_download_url"] for a in release.get("assets", []) if a.get("name")=="pdfium-mac-arm64.tgz"]; print(urls[0] if urls else "")')"
+          if [[ -z "$asset_url" ]]; then
+            echo "Could not find asset pdfium-mac-arm64.tgz in latest release"
+            exit 1
+          fi
+
+          archive="$RUNNER_TEMP/pdfium-mac-arm64.tgz"
+          curl -L --fail "$asset_url" -o "$archive"
+          tar -xzf "$archive" -C "$pdfium_root"
+
+          pdfium_lib="$(find "$pdfium_root" -type f -name "libpdfium.dylib" | head -n1 || true)"
+          if [[ -z "$pdfium_lib" ]]; then
+            echo "libpdfium.dylib was not found under $pdfium_root"
+            exit 1
+          fi
+          echo "PDFIUM_LIB=$pdfium_lib" >> "$GITHUB_ENV"
+          echo "Resolved PDFIUM_LIB=$pdfium_lib"
+
+      - name: Prepare Patched llama Source
+        shell: bash
+        run: |
+          set -euo pipefail
+          llama_src="$BUILD_ROOT/llama-src"
+          whisper_sibling="$BUILD_ROOT/whisper.cpp"
+          patch_file="$GITHUB_WORKSPACE/diarize/addons/patches/0300-llama-unified-audio.patch"
+
+          if [[ ! -f "$patch_file" ]]; then
+            echo "Missing patch: $patch_file"
+            exit 1
+          fi
+
+          rm -rf "$llama_src" "$whisper_sibling"
+          mkdir -p "$llama_src"
+
+          rsync -a --delete "$GITHUB_WORKSPACE/third_party/llama.cpp/" "$llama_src/"
+          rsync -a --delete "$GITHUB_WORKSPACE/third_party/whisper.cpp/" "$llama_src/whisper.cpp/"
+          rsync -a --delete "$GITHUB_WORKSPACE/third_party/whisper.cpp/" "$whisper_sibling/"
+
+          mkdir -p "$llama_src/MARKDOWN/bridge"
+          rsync -a --delete "$GITHUB_WORKSPACE/bridge/" "$llama_src/MARKDOWN/bridge/"
+
+          extra_root="$GITHUB_WORKSPACE/diarize/addons/overlay/llama.cpp/tools"
+          extra_files=(
+            "pyannote/CMakeLists.txt"
+            "pyannote/pyannote-align.cpp"
+            "pyannote/pyannote-diarize.cpp"
+            "pyannote/pyannote-entrypoints.h"
+            "pyannote/pyannote-inspect.cpp"
+            "server/inproc-pipeline-repro.cpp"
+            "whisper/whisper-cli-entrypoint.cpp"
+            "whisper/whisper-cli-entrypoint.h"
+            "whisper/whisper-common-audio.cpp"
+          )
+          for rel in "${extra_files[@]}"; do
+            src="$extra_root/$rel"
+            dst="$llama_src/tools/$rel"
+            if [[ ! -f "$src" ]]; then
+              echo "Missing required add-on source file: $src"
+              exit 1
+            fi
+            mkdir -p "$(dirname "$dst")"
+            if [[ -e "$dst" ]]; then
+              echo "Refusing to overwrite existing llama.cpp file: $dst"
+              exit 1
+            fi
+            cp "$src" "$dst"
+          done
+
+          cmake_top="$llama_src/CMakeLists.txt"
+          if [[ ! -f "$cmake_top" ]]; then
+            echo "Missing CMakeLists.txt in staged llama source: $cmake_top"
+            exit 1
+          fi
+          if ! grep -q "LLAMA_BUILD_MARKDOWN_BRIDGE" "$cmake_top"; then
+            perl -0pi -e 's/(option\(LLAMA_BUILD_SERVER\s+"[^"]+"\s+\$\{LLAMA_STANDALONE\}\)\R)/$1option(LLAMA_BUILD_MARKDOWN_BRIDGE "llama: build markdown in-process bridge library" OFF)\n/' "$cmake_top"
+          fi
+          if ! grep -q "add_subdirectory(MARKDOWN/bridge)" "$cmake_top"; then
+            perl -0pi -e 's/(if \(LLAMA_BUILD_COMMON AND LLAMA_BUILD_TOOLS\)\s*add_subdirectory\(tools\)\s*endif\(\))/\1\nif (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TOOLS AND LLAMA_BUILD_MARKDOWN_BRIDGE)\n    add_subdirectory(MARKDOWN\/bridge)\nendif()/s' "$cmake_top"
+          fi
+
+          git -C "$llama_src" init
+          git -C "$llama_src" apply --check --ignore-space-change --ignore-whitespace "$patch_file"
+          git -C "$llama_src" apply --whitespace=nowarn --ignore-space-change --ignore-whitespace "$patch_file"
+
+      - name: Configure and Build llama Bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          llama_src="$BUILD_ROOT/llama-src"
+          llama_build="$BUILD_ROOT/llama-build"
+          ffmpeg_root="$BUILD_ROOT/runtime-deps/ffmpeg"
+
+          rm -rf "$llama_build"
+          mkdir -p "$llama_build"
+
+          cmake_args=(
+            -S "$llama_src"
+            -B "$llama_build"
+            -G Ninja
+            -DCMAKE_BUILD_TYPE=Release
+            -DBUILD_SHARED_LIBS=ON
+            -DLLAMA_BUILD_SERVER=ON
+            -DLLAMA_BUILD_MARKDOWN_BRIDGE=ON
+            -DLLAMA_HTTPLIB=ON
+            -DLLAMA_OPENSSL=OFF
+            -DLLAMA_BUILD_BORINGSSL=OFF
+            -DLLAMA_BUILD_LIBRESSL=OFF
+            -DLLAMA_SERVER_BRIDGE_ENABLE_FFMPEG=ON
+            -DLLAMA_SERVER_BRIDGE_FFMPEG_ROOT="$ffmpeg_root"
+            -DGGML_NATIVE=OFF
+          )
+          if [[ "$BACKEND" == "metal" ]]; then
+            cmake_args+=(-DGGML_METAL=ON)
+          fi
+
+          cmake "${cmake_args[@]}"
+          cmake --build "$llama_build" --parallel --target llama-server-bridge
+
+      - name: Build Rust Runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          bridge_dir="$(dirname "$(find "$BUILD_ROOT/llama-build" -type f -name "libllama-server-bridge.dylib" | head -n1)")"
+          if [[ -z "$bridge_dir" ]]; then
+            echo "libllama-server-bridge.dylib not found after CMake build"
+            exit 1
+          fi
+
+          export LIBRARY_PATH="$bridge_dir:${LIBRARY_PATH:-}"
+          export DYLD_LIBRARY_PATH="$bridge_dir:${DYLD_LIBRARY_PATH:-}"
+          export CARGO_TARGET_DIR="$BUILD_ROOT/cargo-target"
+
+          cargo build --release -p pdf -p pdfvlm -p engine
+
+      - name: Stage Bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$BUILD_ROOT/bundle"
+          bundle_licenses="$bundle/licenses"
+          cargo_release="$BUILD_ROOT/cargo-target/release"
+
+          rm -rf "$bundle"
+          mkdir -p "$bundle" "$bundle_licenses"
+
+          cp "$cargo_release/engine" "$bundle/engine"
+          cp "$cargo_release/libpdf.dylib" "$bundle/libpdf.dylib"
+          cp "$cargo_release/libpdfvlm.dylib" "$bundle/libpdfvlm.dylib"
+
+          while IFS= read -r -d '' lib; do
+            cp -L "$lib" "$bundle/$(basename "$lib")"
+          done < <(find "$BUILD_ROOT/llama-build" -type f \( \
+            -name "libllama-server-bridge*.dylib" -o \
+            -name "libllama*.dylib" -o \
+            -name "libggml*.dylib" -o \
+            -name "libmtmd*.dylib" \
+          \) -print0)
+
+          cp -L "$PDFIUM_LIB" "$bundle/libpdfium.dylib"
+
+          for name in avcodec avformat avutil swresample swscale; do
+            src="$(find "$BUILD_ROOT/runtime-deps/ffmpeg/lib" -type f -name "lib${name}*.dylib" | sort | head -n1 || true)"
+            if [[ -z "$src" ]]; then
+              echo "Missing FFmpeg runtime dylib for lib${name}"
+              exit 1
+            fi
+            cp -L "$src" "$bundle/$(basename "$src")"
+          done
+
+          mkdir -p "$bundle_licenses/third_party"
+          for f in "$GITHUB_WORKSPACE"/third_party/licenses/*; do
+            [[ -f "$f" ]] || continue
+            base="$(basename "$f")"
+            case "$base" in
+              torch-LICENSE.txt|torch-NOTICE.txt|torchaudio-LICENSE.txt|numpy-LICENSE.txt|ffmpeg-SOURCE.txt|nvidia-cuda-EULA.txt|nvidia-cuda-runtime-NOTICE.txt)
+                continue
+                ;;
+            esac
+            cp "$f" "$bundle_licenses/third_party/$base"
+          done
+
+          rm -rf "$bundle_licenses/rust-full"
+          cp -R "$GITHUB_WORKSPACE/third_party/licenses/rust-full" "$bundle_licenses/rust-full"
+          cp "$GITHUB_WORKSPACE/LICENSE" "$bundle/LICENSE-ENGINE.txt"
+          cp "$GITHUB_WORKSPACE/third_party/licenses/LICENSES.txt" "$bundle_licenses/LICENSES.txt"
+
+          printf '%s\n' \
+            '# Third-Party Notices' \
+            '' \
+            'This bundle includes third-party software.' \
+            '' \
+            'Key combined license text:' \
+            '' \
+            '- ./LICENSES.txt' \
+            '' \
+            'Bundled license folders:' \
+            '' \
+            '- ./third_party/' \
+            '- ./rust-full/' \
+            '- ./pdfium/' \
+            '- ./ffmpeg/' \
+            '' \
+            'Project license:' \
+            '' \
+            '- ../LICENSE-ENGINE.txt' \
+            '' \
+            'Full license inventory (including transitive/tooling exports):' \
+            '' \
+            '- https://github.com/openresearchtools/engine/tree/main/third_party/licenses' \
+            > "$bundle_licenses/THIRD_PARTY_NOTICES.md"
+
+          copy_license_files() {
+            src_root="$1"
+            dst_root="$2"
+            mkdir -p "$dst_root"
+            while IFS= read -r -d '' file; do
+              rel="${file#$src_root/}"
+              mkdir -p "$dst_root/$(dirname "$rel")"
+              cp -L "$file" "$dst_root/$rel"
+            done < <(find "$src_root" -type f \( \
+              -iname 'LICENSE*' -o \
+              -iname 'LICENCE*' -o \
+              -iname 'COPYING*' -o \
+              -iname 'COPYRIGHT*' -o \
+              -iname 'NOTICE*' -o \
+              -iname 'PATENTS*' -o \
+              -iname 'EULA*' \
+            \) -print0)
+          }
+
+          copy_license_files "$BUILD_ROOT/runtime-deps/pdfium" "$bundle_licenses/pdfium"
+          copy_license_files "$BUILD_ROOT/runtime-deps/ffmpeg" "$bundle_licenses/ffmpeg"
+
+      - name: Validate Bundle Contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$BUILD_ROOT/bundle"
+          [[ -d "$bundle" ]] || { echo "Bundle folder not found: $bundle"; exit 1; }
+
+          required=(
+            "engine"
+            "libpdf.dylib"
+            "libpdfvlm.dylib"
+            "libpdfium.dylib"
+            "LICENSE-ENGINE.txt"
+            "licenses/LICENSES.txt"
+            "licenses/THIRD_PARTY_NOTICES.md"
+          )
+          for f in "${required[@]}"; do
+            [[ -f "$bundle/$f" ]] || { echo "Missing required bundle file: $f"; exit 1; }
+          done
+
+          ls "$bundle"/libllama-server-bridge*.dylib >/dev/null 2>&1 || { echo "Missing libllama-server-bridge*.dylib"; exit 1; }
+          ls "$bundle"/libggml-cpu*.dylib >/dev/null 2>&1 || { echo "Missing libggml-cpu*.dylib"; exit 1; }
+          if [[ "$BACKEND" == "metal" ]]; then
+            ls "$bundle"/libggml-metal*.dylib >/dev/null 2>&1 || { echo "Missing libggml-metal*.dylib for metal backend"; exit 1; }
+          fi
+
+          for lib in avcodec avformat avutil swresample swscale; do
+            ls "$bundle"/lib${lib}*.dylib >/dev/null 2>&1 || { echo "Missing FFmpeg runtime dylib: lib${lib}*.dylib"; exit 1; }
+          done
+
+      - name: Pack Bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$BUILD_ROOT/bundle"
+          out="$BUILD_ROOT/engine-macos-arm64-${BACKEND}-bundle.tar.gz"
+          rm -f "$out"
+          tar -C "$bundle" -czf "$out" .
+          echo "BUNDLE_TAR=$out" >> "$GITHUB_ENV"
+          echo "Packed: $out"
+
+      - name: Upload Bundle Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-macos-arm64-${{ inputs.backend }}-bundle
+          path: ${{ env.BUNDLE_TAR }}
+          if-no-files-found: error
