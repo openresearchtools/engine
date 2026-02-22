@@ -165,6 +165,8 @@ function Stage-RepoLicenseFiles {
         return
     }
 
+    New-Item -ItemType Directory -Force -Path $BundleLicenseRoot | Out-Null
+
     $destDir = Join-Path $BundleLicenseRoot "third_party"
     New-Item -ItemType Directory -Force -Path $destDir | Out-Null
 
@@ -191,12 +193,21 @@ function Stage-RepoLicenseFiles {
         Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $destDir $file.Name) -Force
     }
 
+    $rustFullSource = Join-Path $sourceDir "rust-full"
+    $rustFullDest = Join-Path $BundleLicenseRoot "rust-full"
+    if (Test-Path -LiteralPath $rustFullSource) {
+        New-Item -ItemType Directory -Force -Path $rustFullDest | Out-Null
+        Copy-Item -Path (Join-Path $rustFullSource "*") -Destination $rustFullDest -Recurse -Force
+    } else {
+        Write-Warning "Rust full license inventory folder not found at '$rustFullSource' (skipping rust-full copy)"
+    }
+
     $repoLicenseFile = Join-Path $RepoRoot "LICENSE"
     if (Test-Path -LiteralPath $repoLicenseFile) {
         Copy-Item -LiteralPath $repoLicenseFile -Destination (Join-Path $BundleOutDir "LICENSE-ENGINE.txt") -Force
     }
 
-    $bundleKeyLicenses = Join-Path $BundleOutDir "LICENSES.txt"
+    $bundleKeyLicenses = Join-Path $BundleLicenseRoot "LICENSES.txt"
     $licenseCandidates = @()
     if (-not [string]::IsNullOrWhiteSpace($LicenseProfile) -and $LicenseProfile -ne "default") {
         $licenseCandidates += "LICENSES-$LicenseProfile.txt"
@@ -218,7 +229,7 @@ function Stage-RepoLicenseFiles {
         Write-Warning "Key release licenses file not found (candidates: $($licenseCandidates -join ', '))"
     }
 
-    $noticePath = Join-Path $BundleOutDir "THIRD_PARTY_NOTICES.md"
+    $noticePath = Join-Path $BundleLicenseRoot "THIRD_PARTY_NOTICES.md"
     @"
 # Third-Party Notices
 
@@ -230,9 +241,14 @@ Key combined license text:
 
 Bundled license folders:
 
-- ./licenses/third_party/
-- ./licenses/pdfium/
-- ./licenses/ffmpeg/
+- ./third_party/
+- ./rust-full/
+- ./pdfium/
+- ./ffmpeg/
+
+Project license:
+
+- ../LICENSE-ENGINE.txt
 
 Full license inventory (including transitive/tooling exports):
 
