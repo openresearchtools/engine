@@ -81,6 +81,14 @@ jobs:
             --disable-gpl \
             --disable-version3 \
             --disable-nonfree \
+            --disable-autodetect \
+            --disable-xlib \
+            --disable-libxcb \
+            --disable-libxcb-shm \
+            --disable-libxcb-xfixes \
+            --disable-libxcb-shape \
+            --disable-vulkan \
+            --disable-libplacebo \
             --enable-pic \
             --disable-programs \
             --disable-doc \
