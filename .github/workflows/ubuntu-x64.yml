@@ -1,0 +1,536 @@
+name: Build Ubuntu x64 Vulkan
+run-name: Build Ubuntu x64 Vulkan - ${{ github.ref_name }}
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu-x64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      BACKEND: vulkan
+      PDFIUM_RELEASE_API: "https://api.github.com/repos/bblanchon/pdfium-binaries/releases/latest"
+      FFMPEG_RELEASE_API: "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest"
+      FFMPEG_ASSET_NAME: "ffmpeg-master-latest-linux64-lgpl-shared.tar.xz"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve Build Paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="$(cd "$GITHUB_WORKSPACE/.." && pwd)/ENGINEbuilds/gha-ubuntu-x64-vulkan"
+          echo "BUILD_ROOT=$build_root" >> "$GITHUB_ENV"
+          echo "Resolved BUILD_ROOT=$build_root"
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Build Dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            curl \
+            tar \
+            xz-utils \
+            unzip \
+            patchelf \
+            glslc \
+            libvulkan-dev \
+            mesa-vulkan-drivers \
+            libssl-dev
+
+      - name: Fetch FFmpeg (Linux x64 LGPL shared)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ffmpeg_root="$BUILD_ROOT/runtime-deps/ffmpeg"
+          rm -rf "$ffmpeg_root"
+          mkdir -p "$ffmpeg_root"
+
+          asset_url="$(python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          api = os.environ["FFMPEG_RELEASE_API"]
+          wanted = os.environ["FFMPEG_ASSET_NAME"]
+          token = os.environ.get("GH_TOKEN", "")
+          headers = {"Accept": "application/vnd.github+json", "User-Agent": "ENGINE-ffmpeg-fetch"}
+          if token:
+              headers["Authorization"] = f"Bearer {token}"
+          req = urllib.request.Request(api, headers=headers)
+          with urllib.request.urlopen(req) as resp:
+              release = json.load(resp)
+
+          assets = release.get("assets", [])
+          match = next((a.get("browser_download_url") for a in assets if a.get("name") == wanted), "")
+          if not match:
+              for a in assets:
+                  name = a.get("name", "")
+                  if "linux64" in name and "lgpl-shared" in name and name.endswith(".tar.xz"):
+                      match = a.get("browser_download_url", "")
+                      break
+          print(match)
+          PY
+          )"
+          if [[ -z "$asset_url" ]]; then
+            echo "Failed to resolve FFmpeg Linux LGPL shared asset URL"
+            exit 1
+          fi
+
+          archive="$RUNNER_TEMP/ffmpeg-linux64-lgpl-shared.tar.xz"
+          curl -L --fail "$asset_url" -o "$archive"
+          tar -xJf "$archive" -C "$ffmpeg_root" --strip-components=1
+
+          [[ -d "$ffmpeg_root/include" ]] || { echo "Missing FFmpeg include/ after extract"; exit 1; }
+          [[ -d "$ffmpeg_root/lib" ]] || { echo "Missing FFmpeg lib/ after extract"; exit 1; }
+
+          for lib in avcodec avformat avutil swresample swscale; do
+            find "$ffmpeg_root/lib" -type f -name "lib${lib}*.so*" | grep -q . || {
+              echo "Missing FFmpeg runtime library lib${lib}*.so* under $ffmpeg_root/lib"
+              exit 1
+            }
+          done
+
+          echo "FFMPEG_ROOT=$ffmpeg_root" >> "$GITHUB_ENV"
+          echo "Resolved FFMPEG_ROOT=$ffmpeg_root"
+          echo "FFmpeg source: $asset_url"
+
+      - name: Fetch PDFium (Linux x64)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pdfium_root="$BUILD_ROOT/runtime-deps/pdfium"
+          rm -rf "$pdfium_root"
+          mkdir -p "$pdfium_root"
+
+          asset_url="$(python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          api = os.environ["PDFIUM_RELEASE_API"]
+          token = os.environ.get("GH_TOKEN", "")
+          headers = {"Accept": "application/vnd.github+json", "User-Agent": "ENGINE-pdfium-fetch"}
+          if token:
+              headers["Authorization"] = f"Bearer {token}"
+          req = urllib.request.Request(api, headers=headers)
+          with urllib.request.urlopen(req) as resp:
+              release = json.load(resp)
+
+          assets = release.get("assets", [])
+          match = next((a.get("browser_download_url") for a in assets if a.get("name") == "pdfium-linux-x64.tgz"), "")
+          print(match)
+          PY
+          )"
+          if [[ -z "$asset_url" ]]; then
+            echo "Could not find pdfium-linux-x64.tgz in latest PDFium release"
+            exit 1
+          fi
+
+          archive="$RUNNER_TEMP/pdfium-linux-x64.tgz"
+          curl -L --fail "$asset_url" -o "$archive"
+          tar -xzf "$archive" -C "$pdfium_root"
+
+          pdfium_lib="$(find "$pdfium_root" -type f -name "libpdfium.so" | head -n1 || true)"
+          if [[ -z "$pdfium_lib" ]]; then
+            echo "libpdfium.so was not found under $pdfium_root"
+            exit 1
+          fi
+
+          echo "PDFIUM_ROOT=$pdfium_root" >> "$GITHUB_ENV"
+          echo "PDFIUM_LIB=$pdfium_lib" >> "$GITHUB_ENV"
+          echo "Resolved PDFIUM_LIB=$pdfium_lib"
+          echo "PDFium source: $asset_url"
+
+      - name: Prepare Patched llama Source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/build/prepare_llama_source_from_patch.py" \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --out-dir "$BUILD_ROOT/llama-src" \
+            --force
+
+      - name: Configure and Build llama Bridge (CPU+Vulkan)
+        shell: bash
+        run: |
+          set -euo pipefail
+          llama_src="$BUILD_ROOT/llama-src"
+          llama_build="$BUILD_ROOT/llama-build"
+          ffmpeg_root="$FFMPEG_ROOT"
+
+          rm -rf "$llama_build"
+          mkdir -p "$llama_build"
+
+          cmake_args=(
+            -S "$llama_src"
+            -B "$llama_build"
+            -G Ninja
+            -DCMAKE_BUILD_TYPE=Release
+            -DBUILD_SHARED_LIBS=ON
+            -DLLAMA_BUILD_SERVER=ON
+            -DLLAMA_BUILD_MARKDOWN_BRIDGE=ON
+            -DLLAMA_HTTPLIB=ON
+            -DLLAMA_OPENSSL=OFF
+            -DLLAMA_BUILD_BORINGSSL=OFF
+            -DLLAMA_BUILD_LIBRESSL=OFF
+            -DLLAMA_SERVER_BRIDGE_ENABLE_FFMPEG=ON
+            -DLLAMA_SERVER_BRIDGE_FFMPEG_ROOT="$ffmpeg_root"
+            -DGGML_BACKEND_DL=ON
+            -DGGML_CPU_ALL_VARIANTS=ON
+            -DGGML_NATIVE=OFF
+            -DGGML_VULKAN=ON
+          )
+
+          cmake "${cmake_args[@]}"
+          cmake --build "$llama_build" --parallel --target llama-server-bridge
+
+      - name: Build Rust Runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          bridge_lib="$(find "$BUILD_ROOT/llama-build" -type f -name "libllama-server-bridge.so*" | head -n1 || true)"
+          if [[ -z "$bridge_lib" ]]; then
+            echo "libllama-server-bridge.so* not found after CMake build"
+            exit 1
+          fi
+          bridge_dir="$(dirname "$bridge_lib")"
+
+          export LIBRARY_PATH="$bridge_dir:${LIBRARY_PATH:-}"
+          export LD_LIBRARY_PATH="$bridge_dir:${LD_LIBRARY_PATH:-}"
+          export CARGO_TARGET_DIR="$BUILD_ROOT/cargo-target"
+
+          cargo build --release -p pdf -p pdfvlm -p engine
+
+      - name: Stage Bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$BUILD_ROOT/bundle"
+          bundle_licenses="$bundle/licenses"
+          bundle_vendor="$bundle/vendor"
+          bundle_pdfium="$bundle_vendor/pdfium"
+          bundle_ffmpeg_root="$bundle_vendor/ffmpeg"
+          bundle_ffmpeg="$bundle_ffmpeg_root/lib"
+          cargo_release="$BUILD_ROOT/cargo-target/release"
+
+          rm -rf "$bundle"
+          mkdir -p "$bundle" "$bundle_licenses" "$bundle_pdfium" "$bundle_ffmpeg"
+
+          cp "$cargo_release/engine" "$bundle/engine"
+          cp "$cargo_release/libpdf.so" "$bundle/libpdf.so"
+          cp "$cargo_release/libpdfvlm.so" "$bundle/libpdfvlm.so"
+
+          llama_lib_candidates=("$BUILD_ROOT/llama-build/bin" "$BUILD_ROOT/llama-build")
+          llama_lib_root=""
+          for candidate in "${llama_lib_candidates[@]}"; do
+            [[ -d "$candidate" ]] || continue
+            if find "$candidate" -type f -name "libllama-server-bridge*.so*" | grep -q .; then
+              llama_lib_root="$candidate"
+              break
+            fi
+          done
+          [[ -n "$llama_lib_root" ]] || { echo "Could not locate llama shared library output under $BUILD_ROOT/llama-build"; exit 1; }
+
+          while IFS= read -r -d '' lib; do
+            cp -a "$lib" "$bundle/$(basename "$lib")"
+          done < <(find "$llama_lib_root" -type f,l \( \
+            -name "libllama-server-bridge*.so*" -o \
+            -name "libllama*.so*" -o \
+            -name "libggml*.so*" -o \
+            -name "libmtmd*.so*" \
+          \) -print0)
+
+          cp -L "$PDFIUM_LIB" "$bundle_pdfium/$(basename "$PDFIUM_LIB")"
+
+          for name in avcodec avformat avutil swresample swscale; do
+            found=0
+            while IFS= read -r -d '' src; do
+              cp -a "$src" "$bundle_ffmpeg/$(basename "$src")"
+              found=1
+            done < <(find "$FFMPEG_ROOT/lib" -name "lib${name}*.so*" -print0)
+            if [[ "$found" -eq 0 ]]; then
+              echo "Missing FFmpeg runtime .so for lib${name}"
+              exit 1
+            fi
+          done
+
+          mkdir -p "$bundle_licenses/third_party"
+          for f in "$GITHUB_WORKSPACE"/third_party/licenses/*; do
+            [[ -f "$f" ]] || continue
+            base="$(basename "$f")"
+            case "$base" in
+              torch-LICENSE.txt|torch-NOTICE.txt|torchaudio-LICENSE.txt|numpy-LICENSE.txt|ffmpeg-SOURCE*.txt|nvidia-cuda-EULA.txt|nvidia-cuda-runtime-NOTICE.txt)
+                continue
+                ;;
+            esac
+            cp "$f" "$bundle_licenses/third_party/$base"
+          done
+
+          rm -rf "$bundle_licenses/rust-full"
+          cp -R "$GITHUB_WORKSPACE/third_party/licenses/rust-full" "$bundle_licenses/rust-full"
+          cp "$GITHUB_WORKSPACE/LICENSE" "$bundle/LICENSE-ENGINE.txt"
+
+          selected_key=""
+          for candidate in "LICENSES-ubuntu-vulkan.txt" "LICENSES-vulkan.txt" "LICENSES.txt"; do
+            candidate_path="$GITHUB_WORKSPACE/third_party/licenses/$candidate"
+            if [[ -f "$candidate_path" ]]; then
+              selected_key="$candidate_path"
+              break
+            fi
+          done
+          if [[ -z "$selected_key" ]]; then
+            echo "No key LICENSES file found for vulkan profile"
+            exit 1
+          fi
+          cp "$selected_key" "$bundle_licenses/LICENSES.txt"
+
+          printf '%s\n' \
+            '# Third-Party Notices' \
+            '' \
+            'This bundle includes third-party software.' \
+            '' \
+            'Key combined license text:' \
+            '' \
+            '- ./LICENSES.txt' \
+            '' \
+            'Bundled license folders:' \
+            '' \
+            '- ./third_party/' \
+            '- ./rust-full/' \
+            '- ../vendor/pdfium/' \
+            '- ../vendor/ffmpeg/' \
+            '' \
+            'Project license:' \
+            '' \
+            '- ../LICENSE-ENGINE.txt' \
+            '' \
+            'Full license inventory (including transitive/tooling exports):' \
+            '' \
+            '- https://github.com/openresearchtools/engine/tree/main/third_party/licenses' \
+            > "$bundle_licenses/THIRD_PARTY_NOTICES.md"
+
+          copy_license_files() {
+            src_root="$1"
+            dst_root="$2"
+            mkdir -p "$dst_root"
+            while IFS= read -r -d '' file; do
+              rel="${file#$src_root/}"
+              mkdir -p "$dst_root/$(dirname "$rel")"
+              cp -L "$file" "$dst_root/$rel"
+            done < <(find "$src_root" -type f \( \
+              -iname '*LICENSE*' -o \
+              -iname '*LICENCE*' -o \
+              -iname '*COPYING*' -o \
+              -iname '*COPYRIGHT*' -o \
+              -iname '*NOTICE*' -o \
+              -iname '*PATENTS*' -o \
+              -iname '*EULA*' -o \
+              -iname '*SOURCE*' \
+            \) -print0)
+          }
+
+          copy_license_files "$PDFIUM_ROOT" "$bundle_pdfium"
+          copy_license_files "$FFMPEG_ROOT" "$bundle_ffmpeg_root"
+
+          # Always include curated provenance files from this repo in addition to
+          # runtime-sourced license files.
+          ffmpeg_source_notice="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-SOURCE-ubuntu-x64.txt"
+          if [[ ! -f "$ffmpeg_source_notice" ]]; then
+            ffmpeg_source_notice="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-SOURCE.txt"
+          fi
+          if [[ -f "$ffmpeg_source_notice" ]]; then
+            cp "$ffmpeg_source_notice" "$bundle_ffmpeg_root/ffmpeg-SOURCE.txt"
+          fi
+          if [[ -f "$GITHUB_WORKSPACE/third_party/licenses/pdfium-binaries-LICENSE.txt" ]]; then
+            cp "$GITHUB_WORKSPACE/third_party/licenses/pdfium-binaries-LICENSE.txt" "$bundle_pdfium/pdfium-binaries-LICENSE.txt"
+          fi
+
+          if ! find "$bundle_pdfium" -type f \( -iname '*LICENSE*' -o -iname '*LICENCE*' -o -iname '*COPYING*' -o -iname '*COPYRIGHT*' -o -iname '*NOTICE*' -o -iname '*PATENTS*' -o -iname '*EULA*' -o -iname '*SOURCE*' \) | grep -q .; then
+            pdfium_primary="$GITHUB_WORKSPACE/third_party/licenses/pdfium-LICENSE.txt"
+            pdfium_source="$GITHUB_WORKSPACE/third_party/licenses/pdfium-binaries-LICENSE.txt"
+            [[ -f "$pdfium_primary" ]] || { echo "Missing fallback PDFium license file: $pdfium_primary"; exit 1; }
+            cp "$pdfium_primary" "$bundle_pdfium/pdfium-LICENSE.txt"
+            [[ -f "$pdfium_source" ]] && cp "$pdfium_source" "$bundle_pdfium/pdfium-binaries-LICENSE.txt"
+          fi
+
+          if ! find "$bundle_ffmpeg_root" -type f \( -iname '*LICENSE*' -o -iname '*LICENCE*' -o -iname '*COPYING*' -o -iname '*COPYRIGHT*' -o -iname '*NOTICE*' -o -iname '*PATENTS*' -o -iname '*EULA*' -o -iname '*SOURCE*' \) | grep -q .; then
+            ffmpeg_lgpl="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-LGPL-2.1.txt"
+            ffmpeg_source="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-SOURCE-ubuntu-x64.txt"
+            if [[ ! -f "$ffmpeg_source" ]]; then
+              ffmpeg_source="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-SOURCE.txt"
+            fi
+            [[ -f "$ffmpeg_lgpl" ]] || { echo "Missing fallback FFmpeg license file: $ffmpeg_lgpl"; exit 1; }
+            [[ -f "$ffmpeg_source" ]] || { echo "Missing fallback FFmpeg source notice file: $ffmpeg_source"; exit 1; }
+            cp "$ffmpeg_lgpl" "$bundle_ffmpeg_root/ffmpeg-LGPL-2.1.txt"
+            cp "$ffmpeg_source" "$bundle_ffmpeg_root/ffmpeg-SOURCE.txt"
+          fi
+
+      - name: Fixup and Verify ELF Runtime Paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$BUILD_ROOT/bundle"
+          ffmpeg_dir="$bundle/vendor/ffmpeg/lib"
+          pdfium_dir="$bundle/vendor/pdfium"
+
+          is_elf() {
+            local file="$1"
+            file -b "$file" | grep -q "ELF"
+          }
+
+          set_rpath_if_elf() {
+            local file="$1"
+            local rpath="$2"
+            [[ -f "$file" ]] || return 0
+            [[ -L "$file" ]] && return 0
+            is_elf "$file" || return 0
+            patchelf --set-rpath "$rpath" "$file"
+          }
+
+          root_rpath='$ORIGIN:$ORIGIN/vendor/ffmpeg/lib:$ORIGIN/vendor/pdfium'
+          set_rpath_if_elf "$bundle/engine" "$root_rpath"
+          while IFS= read -r -d '' sofile; do
+            set_rpath_if_elf "$sofile" "$root_rpath"
+          done < <(find "$bundle" -maxdepth 1 -type f -name "*.so*" -print0)
+
+          while IFS= read -r -d '' sofile; do
+            set_rpath_if_elf "$sofile" '$ORIGIN'
+          done < <(find "$ffmpeg_dir" -type f -name "*.so*" -print0)
+
+          while IFS= read -r -d '' sofile; do
+            set_rpath_if_elf "$sofile" '$ORIGIN'
+          done < <(find "$pdfium_dir" -type f -name "*.so*" -print0)
+
+          check_ldd() {
+            local file="$1"
+            [[ -f "$file" ]] || return 0
+            [[ -L "$file" ]] && return 0
+            is_elf "$file" || return 0
+            local out
+            out="$(ldd "$file" || true)"
+            if printf '%s\n' "$out" | grep -qi "not found"; then
+              echo "Missing dynamic dependency in $file"
+              printf '%s\n' "$out"
+              exit 1
+            fi
+            if printf '%s\n' "$out" | grep -F "$BUILD_ROOT" >/dev/null; then
+              echo "Found leaked BUILD_ROOT dependency path in $file"
+              printf '%s\n' "$out"
+              exit 1
+            fi
+            if printf '%s\n' "$out" | grep -F "$GITHUB_WORKSPACE" >/dev/null; then
+              echo "Found leaked GITHUB_WORKSPACE dependency path in $file"
+              printf '%s\n' "$out"
+              exit 1
+            fi
+          }
+
+          check_ldd "$bundle/engine"
+          while IFS= read -r -d '' sofile; do
+            check_ldd "$sofile"
+          done < <(find "$bundle" -type f -name "*.so*" -print0)
+
+      - name: Validate Bundle Contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$BUILD_ROOT/bundle"
+          [[ -d "$bundle" ]] || { echo "Bundle folder not found: $bundle"; exit 1; }
+
+          required=(
+            "engine"
+            "libpdf.so"
+            "libpdfvlm.so"
+            "vendor/pdfium/libpdfium.so"
+            "LICENSE-ENGINE.txt"
+            "licenses/LICENSES.txt"
+            "licenses/THIRD_PARTY_NOTICES.md"
+          )
+          for f in "${required[@]}"; do
+            [[ -f "$bundle/$f" ]] || { echo "Missing required bundle file: $f"; exit 1; }
+          done
+
+          ls "$bundle"/libllama-server-bridge*.so* >/dev/null 2>&1 || { echo "Missing libllama-server-bridge*.so"; exit 1; }
+          ls "$bundle"/libggml-cpu*.so* >/dev/null 2>&1 || { echo "Missing libggml-cpu*.so"; exit 1; }
+          ls "$bundle"/libggml-vulkan*.so* >/dev/null 2>&1 || { echo "Missing libggml-vulkan*.so"; exit 1; }
+
+          ffmpeg_dir="$bundle/vendor/ffmpeg/lib"
+          [[ -d "$ffmpeg_dir" ]] || { echo "Missing FFmpeg vendor directory: $ffmpeg_dir"; exit 1; }
+          for lib in avcodec avformat avutil swresample swscale; do
+            ls "$ffmpeg_dir"/lib${lib}*.so* >/dev/null 2>&1 || { echo "Missing FFmpeg runtime library: lib${lib}*.so*"; exit 1; }
+          done
+
+          [[ ! -d "$bundle/licenses/ffmpeg" ]] || { echo "Legacy folder should not exist: $bundle/licenses/ffmpeg"; exit 1; }
+          [[ ! -d "$bundle/licenses/pdfium" ]] || { echo "Legacy folder should not exist: $bundle/licenses/pdfium"; exit 1; }
+
+          find "$bundle/vendor/ffmpeg" -type f \( -iname '*LICENSE*' -o -iname '*LICENCE*' -o -iname '*COPYING*' -o -iname '*COPYRIGHT*' -o -iname '*NOTICE*' -o -iname '*PATENTS*' -o -iname '*EULA*' -o -iname '*SOURCE*' \) | grep -q . || { echo "No FFmpeg license files found under vendor/ffmpeg"; exit 1; }
+          find "$bundle/vendor/pdfium" -type f \( -iname '*LICENSE*' -o -iname '*LICENCE*' -o -iname '*COPYING*' -o -iname '*COPYRIGHT*' -o -iname '*NOTICE*' -o -iname '*PATENTS*' -o -iname '*EULA*' -o -iname '*SOURCE*' \) | grep -q . || { echo "No PDFium license files found under vendor/pdfium"; exit 1; }
+
+      - name: Smoke Test Bundle Runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$BUILD_ROOT/bundle"
+          smoke_out="$RUNNER_TEMP/engine-list-devices-linux.txt"
+
+          cd "$bundle"
+          chmod +x ./engine
+          unset LD_LIBRARY_PATH
+          ./engine list-devices > "$smoke_out" 2>&1 || {
+            cat "$smoke_out"
+            echo "engine list-devices failed"
+            exit 1
+          }
+          cat "$smoke_out"
+          grep -q "devices_count=" "$smoke_out" || {
+            echo "Unexpected list-devices output (missing devices_count)"
+            exit 1
+          }
+
+      - name: Pack Runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$BUILD_ROOT/bundle"
+          out="$BUILD_ROOT/engine-ubuntu-x64-vulkan.tar.gz"
+          [[ -d "$bundle" ]] || { echo "Bundle folder not found: $bundle"; exit 1; }
+          rm -f "$out"
+          tar -C "$bundle" -czf "$out" .
+          [[ -f "$out" ]] || { echo "Failed to create archive: $out"; exit 1; }
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-ubuntu-x64-vulkan
+          path: ${{ env.BUILD_ROOT }}/engine-ubuntu-x64-vulkan.tar.gz
+          if-no-files-found: error

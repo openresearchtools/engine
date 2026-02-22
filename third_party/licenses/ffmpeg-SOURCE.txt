@@ -1,17 +1,16 @@
-FFmpeg source/license provenance
+FFmpeg source/license provenance (repository index)
+
+Bundle builds stage backend-specific source/provenance notices as:
+
+- bundle/vendor/ffmpeg/ffmpeg-SOURCE.txt
+
+Backend-specific source files in this repository:
+
+- ffmpeg-SOURCE-windows-x64.txt
+- ffmpeg-SOURCE-ubuntu-x64.txt
+- ffmpeg-SOURCE-macos-arm64.txt
+
+Common references:
 
 - FFmpeg upstream source repository: https://github.com/FFmpeg/FFmpeg
-- Copied LGPL text file source: https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/COPYING.LGPLv2.1
-- Binary build source used by Windows fetch script: https://github.com/BtbN/FFmpeg-Builds
-- Binary build source license file: ffmpeg-builds-LICENSE.txt (MIT)
-- Windows fetch script: ENGINE/build/download-ffmpeg-lgpl-win-x64.ps1
-
-macOS arm64 source-build reference pinning:
-
-- Workflow reference with pinned build command: ENGINE/.github/workflows/macos-arm64.yml
-- Pinned FFmpeg tag: n8.0.1
-- Pinned FFmpeg commit: d22ecc4f6f3fca77b3e71b18641ceddb25973e97
-- Upstream pinned tag URL: https://github.com/FFmpeg/FFmpeg/tree/n8.0.1
-- Upstream pinned commit URL: https://github.com/FFmpeg/FFmpeg/commit/d22ecc4f6f3fca77b3e71b18641ceddb25973e97
-
-
+- LGPL text source: https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/COPYING.LGPLv2.1

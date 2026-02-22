@@ -1,15 +1,24 @@
-﻿NVIDIA CUDA Runtime Components (Windows)
+﻿NVIDIA CUDA Runtime Components (Windows CUDA 13)
 
-This ENGINE Windows bundle includes NVIDIA CUDA runtime libraries for GPU acceleration in the llama bridge path.
+This ENGINE Windows CUDA build includes NVIDIA CUDA runtime libraries for GPU acceleration in the llama bridge path.
 
-Shipped NVIDIA files in the bundle:
+Shipped NVIDIA files in the bundle root:
 - cublas64_13.dll
 - cublasLt64_13.dll
+- cudart64_13.dll
 
 These files are redistributed under the NVIDIA CUDA EULA.
-See: nvidia-cuda-EULA.txt
+
+Official licensing files in this bundle:
+- ./licenses/third_party/nvidia-cuda-EULA.txt
+- ./licenses/third_party/nvidia-cuda-runtime-NOTICE.txt
+- ./licenses/LICENSES.txt
 
 Official NVIDIA CUDA EULA page:
 https://docs.nvidia.com/cuda/eula/index.html
+
+Compatibility note:
+- This build targets CUDA 13 runtime components and will not work on unsupported graphics hardware.
+- If your graphics card is unsupported, use the Vulkan build instead.
 
 Note: End users may replace these CUDA DLLs with compatible versions installed on their own systems.

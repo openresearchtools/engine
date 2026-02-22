@@ -20,4 +20,4 @@ Default source (Windows x64 build):
 Final bundle behavior:
 
 - `build/build_engine.ps1` copies `pdfium.dll` into the bundle when found.
-- `build/build_engine.ps1` also copies PDFium license files into `bundle/licenses/pdfium/`.
+- `build/build_engine.ps1` also copies PDFium license files into `bundle/vendor/pdfium/`.

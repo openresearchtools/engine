@@ -30,6 +30,7 @@ param(
     [string]$FfmpegBinDir = "",
     [string]$FfmpegReleaseApiUrl = "",
     [string]$FfmpegAssetPattern = "",
+    [string]$PdfiumTag = "latest",
     [string]$PdfiumDll = "",
     [int]$Jobs = 0
 )
@@ -163,6 +164,11 @@ if ([string]::IsNullOrWhiteSpace($BuildRoot)) {
 }
 $BuildRoot = Resolve-AbsolutePath -PathValue $BuildRoot -RepoRoot $repoRoot
 
+# Default CUDA runtime staging ON for CUDA backend unless explicitly overridden.
+if (-not $PSBoundParameters.ContainsKey("StageCudaRuntime") -and $Backend -eq "cuda") {
+    $StageCudaRuntime = $true
+}
+
 if ([string]::IsNullOrWhiteSpace($LlamaBuildDir)) {
     $LlamaBuildDir = Join-Path $BuildRoot "llama-build"
 }
@@ -280,6 +286,9 @@ if ($FetchRuntimeDeps) {
 
     $pdfiumFetchArgs = @{
         Destination = $pdfiumDestination
+    }
+    if (-not [string]::IsNullOrWhiteSpace($PdfiumTag)) {
+        $pdfiumFetchArgs["Tag"] = $PdfiumTag
     }
     if ($ForceDependencyRefresh) {
         $pdfiumFetchArgs["Force"] = $true

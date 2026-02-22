@@ -1,0 +1,34 @@
+FFmpeg source/license provenance (macOS arm64 bundle)
+
+- Workflow reference: ENGINE/.github/workflows/macos-arm64.yml
+- Upstream source repository: https://github.com/FFmpeg/FFmpeg
+- Pinned source tag: n8.0.1
+- Pinned source commit: 894da5ca7d742e4429ffb2af534fcda0103ef593
+- Upstream pinned tag URL: https://github.com/FFmpeg/FFmpeg/tree/n8.0.1
+- Upstream pinned commit URL: https://github.com/FFmpeg/FFmpeg/commit/894da5ca7d742e4429ffb2af534fcda0103ef593
+
+Configure/build flags used in workflow:
+
+- --enable-shared
+- --disable-static
+- --disable-gpl
+- --disable-version3
+- --disable-nonfree
+- --disable-autodetect
+- --disable-xlib
+- --disable-libxcb
+- --disable-libxcb-shm
+- --disable-libxcb-xfixes
+- --disable-libxcb-shape
+- --disable-vulkan
+- --disable-libplacebo
+- --enable-pic
+- --disable-programs
+- --disable-doc
+- --cc=clang
+- --arch=arm64
+- --target-os=darwin
+
+LGPL text source:
+
+- https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/COPYING.LGPLv2.1

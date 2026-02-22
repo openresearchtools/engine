@@ -1,7 +1,8 @@
-ENGINE Release Key Licenses
-===========================
+ENGINE Release Key Licenses (Ubuntu x64 Vulkan)
+===============================================
 
 This file aggregates key runtime/release license texts from third_party/licenses/README.md.
+Target runtime profile: Ubuntu x64 Vulkan bundle (includes CPU + Vulkan backends).
 Excluded from this combined file: tooling-only torch/torchaudio/numpy entries and non-license provenance note ffmpeg-SOURCE-*.txt.
 
 Full license inventory (including transitive/tooling exports): https://github.com/openresearchtools/engine/tree/main/third_party/licenses
@@ -4140,4 +4141,6 @@ For full dependency and subdependency license details, see:
 - https://github.com/openresearchtools/engine/blob/main/third_party/licenses/README.md
 - https://github.com/openresearchtools/engine/tree/main/third_party/licenses/rust-full
 - https://github.com/openresearchtools/engine/tree/main/third_party/licenses/tooling-full
+
+
 

@@ -178,7 +178,10 @@ function Stage-RepoLicenseFiles {
         "torch-NOTICE.txt",
         "torchaudio-LICENSE.txt",
         "numpy-LICENSE.txt",
-        "ffmpeg-SOURCE.txt"
+        "ffmpeg-SOURCE.txt",
+        "ffmpeg-SOURCE-windows-x64.txt",
+        "ffmpeg-SOURCE-ubuntu-x64.txt",
+        "ffmpeg-SOURCE-macos-arm64.txt"
     )
     if ($LicenseProfile -eq "vulkan") {
         $excludedTopLevelFiles += @(
@@ -368,7 +371,11 @@ $legacyRuntimePatterns = @(
     "avformat*.dll",
     "avutil*.dll",
     "swresample*.dll",
-    "swscale*.dll"
+    "swscale*.dll",
+    "cublas64_*.dll",
+    "cublasLt64_*.dll",
+    "cudart64_*.dll",
+    "NVIDIA-CUDA-RUNTIME-NOTICE.txt"
 )
 foreach ($pattern in $legacyRuntimePatterns) {
     $legacyFiles = Get-ChildItem -Path $OutDir -Filter $pattern -File -ErrorAction SilentlyContinue
@@ -476,10 +483,22 @@ if ($StageFfmpegRuntime) {
 
         $ffmpegRoot = Split-Path -Parent $FfmpegBinDir
         $ffmpegLicenseCount = Copy-LicenseFiles -SourceRoot $ffmpegRoot -DestinationRoot $ffmpegVendorDir -ComponentName "FFmpeg"
+
+        $ffmpegSourceCandidates = @(
+            "ffmpeg-SOURCE-windows-x64.txt",
+            "ffmpeg-SOURCE.txt"
+        )
+        foreach ($candidate in $ffmpegSourceCandidates) {
+            $candidatePath = Join-Path $repoRoot "third_party\\licenses\\$candidate"
+            if (Test-Path -LiteralPath $candidatePath) {
+                Copy-Item -LiteralPath $candidatePath -Destination (Join-Path $ffmpegVendorDir "ffmpeg-SOURCE.txt") -Force
+                break
+            }
+        }
+
         if ($ffmpegLicenseCount -eq 0) {
             $ffmpegFallbackFiles = @(
-                "ffmpeg-LGPL-2.1.txt",
-                "ffmpeg-SOURCE.txt"
+                "ffmpeg-LGPL-2.1.txt"
             )
             foreach ($fallbackFile in $ffmpegFallbackFiles) {
                 $fallbackPath = Join-Path $repoRoot "third_party\\licenses\\$fallbackFile"
@@ -526,7 +545,8 @@ if ($StageCudaRuntime) {
 
     $cudaPatterns = @(
         "cublas64_*.dll",
-        "cublasLt64_*.dll"
+        "cublasLt64_*.dll",
+        "cudart64_*.dll"
     )
 
     foreach ($dir in $cudaCandidateDirs) {
@@ -539,6 +559,13 @@ if ($StageCudaRuntime) {
                 Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $OutDir $dll.Name) -Force
             }
         }
+    }
+
+    $cudaNoticeSource = Join-Path $repoRoot "third_party\\licenses\\nvidia-cuda-runtime-NOTICE.txt"
+    if (Test-Path -LiteralPath $cudaNoticeSource) {
+        Copy-Item -LiteralPath $cudaNoticeSource -Destination (Join-Path $OutDir "NVIDIA-CUDA-RUNTIME-NOTICE.txt") -Force
+    } else {
+        Write-Warning "CUDA runtime notice file not found at '$cudaNoticeSource' (skipping root CUDA notice staging)"
     }
 }
 

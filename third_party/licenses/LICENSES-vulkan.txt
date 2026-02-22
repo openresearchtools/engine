@@ -1,14 +1,14 @@
-﻿ENGINE Release Key Licenses
+ENGINE Release Key Licenses
 ===========================
 
 This file aggregates key runtime/release license texts from third_party/licenses/README.md.
-Excluded from this combined file: tooling-only torch/torchaudio/numpy entries and non-license provenance note ffmpeg-SOURCE.txt.
+Excluded from this combined file: tooling-only torch/torchaudio/numpy entries and non-license provenance note ffmpeg-SOURCE-*.txt.
 
 Full license inventory (including transitive/tooling exports): https://github.com/openresearchtools/engine/tree/main/third_party/licenses
 
 Runtime-staged folders in build outputs also include:
-- licenses/pdfium/*
-- licenses/ffmpeg/*
+- ../vendor/pdfium/*
+- ../vendor/ffmpeg/*
 
 
 -------------------------------------------------------------------------------
@@ -683,7 +683,7 @@ File `resnet.py` has been borrowed from WeSpeaker that is available under the Ap
 
 The original file is available at https://github.com/wenet-e2e/wespeaker/blob/c20d765295359e681321625fbefc1a02e8794163/wespeaker/models/resnet.py
 
-Neither Shuai Wang (@wsstriving on Github) nor myself (HervÃ© Bredin, or @hbredin on Github) are lawyers, but we both agreed that putting this license file in this directory is enough to comply with the license. See https://github.com/pyannote/pyannote-audio/issues/1537#issuecomment-1808029836. If you know better about this potential MIT/Apache 2.0 compatibility issue, please let us know.
+Neither Shuai Wang (@wsstriving on Github) nor myself (Herv?? Bredin, or @hbredin on Github) are lawyers, but we both agreed that putting this license file in this directory is enough to comply with the license. See https://github.com/pyannote/pyannote-audio/issues/1537#issuecomment-1808029836. If you know better about this potential MIT/Apache 2.0 compatibility issue, please let us know.
 
 -------------------------------------------------------------------------------
 END: WeSpeaker-LICENSE
@@ -983,11 +983,11 @@ BEGIN: pdfium-binaries-LICENSE [pdfium-binaries-LICENSE.txt]
 
 Copyright 2014-2025 Benoit Blanchon
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the â€œSoftwareâ€), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the ???Software???), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
-THE SOFTWARE IS PROVIDED â€œAS ISâ€, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+THE SOFTWARE IS PROVIDED ???AS IS???, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
 END: pdfium-binaries-LICENSE
@@ -3247,7 +3247,7 @@ END: encoding_rs-LICENSE-APACHE
 BEGIN: encoding_rs-LICENSE-WHATWG [encoding_rs-LICENSE-WHATWG.txt]
 -------------------------------------------------------------------------------
 
-Copyright Â© WHATWG (Apple, Google, Mozilla, Microsoft).
+Copyright ?? WHATWG (Apple, Google, Mozilla, Microsoft).
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:

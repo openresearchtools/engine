@@ -7,6 +7,7 @@ This repository contains runtime integration code and conversion/parity tooling 
 - CUDA bundle key licenses: `LICENSES-cuda.txt`
 - Metal bundle key licenses: `LICENSES-metal.txt`
 - Vulkan bundle key licenses: `LICENSES-vulkan.txt`
+- Ubuntu x64 Vulkan bundle key licenses: `LICENSES-ubuntu-vulkan.txt`
 - Legacy/default key bundle (full): `LICENSES.txt`
 
 ## Runtime (shipped engine)
@@ -197,41 +198,76 @@ Windows x64 runtime path in this project:
 - Binary fetch source license type: MIT
 - Binary fetch source license file: `ffmpeg-builds-LICENSE.txt`
 - Fetch script: [`build/download-ffmpeg-lgpl-win-x64.ps1`](https://github.com/openresearchtools/engine/blob/main/build/download-ffmpeg-lgpl-win-x64.ps1)
+- Windows workflow reference: [`.github/workflows/windows-x64.yml`](https://github.com/openresearchtools/engine/blob/main/.github/workflows/windows-x64.yml)
+- Windows workflow release API: `https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest`
+- Windows workflow asset pattern: `*win64-lgpl-shared*.zip`
+
+Ubuntu x64 runtime path in this project:
+
+- Ubuntu workflow release API: `https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest`
+- Ubuntu workflow asset name: `ffmpeg-master-latest-linux64-lgpl-shared.tar.xz`
+- Ubuntu workflow reference: [`.github/workflows/ubuntu-x64.yml`](https://github.com/openresearchtools/engine/blob/main/.github/workflows/ubuntu-x64.yml)
 
 macOS arm64 source-build pinning (LGPL shared) used for workflow documentation:
 
 - Workflow reference (contains pinned command block): [`.github/workflows/macos-arm64.yml`](https://github.com/openresearchtools/engine/blob/main/.github/workflows/macos-arm64.yml)
 - Upstream source repository: `https://github.com/FFmpeg/FFmpeg`
 - Pinned source tag: `n8.0.1`
-- Pinned source commit: `d22ecc4f6f3fca77b3e71b18641ceddb25973e97`
+- Pinned source commit: `894da5ca7d742e4429ffb2af534fcda0103ef593`
 - Upstream tag URL: `https://github.com/FFmpeg/FFmpeg/tree/n8.0.1`
-- Upstream commit URL: `https://github.com/FFmpeg/FFmpeg/commit/d22ecc4f6f3fca77b3e71b18641ceddb25973e97`
+- Upstream commit URL: `https://github.com/FFmpeg/FFmpeg/commit/894da5ca7d742e4429ffb2af534fcda0103ef593`
 - Reference build command (macOS arm64):
 
 ```bash
-git clone --depth 1 --branch n8.0.1 https://github.com/FFmpeg/FFmpeg ffmpeg-src
-cd ffmpeg-src
-test "$(git rev-parse HEAD)" = "d22ecc4f6f3fca77b3e71b18641ceddb25973e97"
+set -euo pipefail
+ffmpeg_src="$BUILD_ROOT/sources/ffmpeg"
+ffmpeg_out="$BUILD_ROOT/runtime-deps/ffmpeg"
+rm -rf "$ffmpeg_src" "$ffmpeg_out"
+mkdir -p "$(dirname "$ffmpeg_src")" "$ffmpeg_out"
+
+git clone --depth 1 --branch "$FFMPEG_TAG" https://github.com/FFmpeg/FFmpeg "$ffmpeg_src"
+actual_sha="$(git -C "$ffmpeg_src" rev-parse "HEAD^{commit}")"
+if [[ "$actual_sha" != "$FFMPEG_SHA" ]]; then
+  echo "Pinned SHA mismatch. Expected $FFMPEG_SHA, got $actual_sha"
+  exit 1
+fi
+
+pushd "$ffmpeg_src"
 ./configure \
-  --prefix="$PWD/../ffmpeg-out" \
+  --prefix="$ffmpeg_out" \
   --enable-shared \
   --disable-static \
   --disable-gpl \
   --disable-version3 \
   --disable-nonfree \
+  --disable-autodetect \
+  --disable-xlib \
+  --disable-libxcb \
+  --disable-libxcb-shm \
+  --disable-libxcb-xfixes \
+  --disable-libxcb-shape \
+  --disable-vulkan \
+  --disable-libplacebo \
   --enable-pic \
+  --disable-programs \
+  --disable-doc \
   --cc=clang \
   --arch=arm64 \
   --target-os=darwin
 make -j"$(sysctl -n hw.ncpu)"
 make install
+popd
 ```
 
 Common notes:
 
 - License type (intended build): LGPL (LGPL-only shared build)
 - License file: `ffmpeg-LGPL-2.1.txt`
-- Source/provenance note: `ffmpeg-SOURCE.txt`
+- Source/provenance note in final bundles: `vendor/ffmpeg/ffmpeg-SOURCE.txt`
+- Backend source files in this repo:
+  - `ffmpeg-SOURCE-windows-x64.txt`
+  - `ffmpeg-SOURCE-ubuntu-x64.txt`
+  - `ffmpeg-SOURCE-macos-arm64.txt`
 
 ### 9) NVIDIA CUDA runtime libraries (Windows bundle)
 
@@ -239,10 +275,12 @@ Common notes:
 - Typical shipped files in this project bundle:
   - `cublas64_13.dll`
   - `cublasLt64_13.dll`
+  - `cudart64_13.dll`
 - License/EULA type: NVIDIA CUDA EULA
 - License files in this folder:
   - `nvidia-cuda-EULA.txt`
   - `nvidia-cuda-runtime-NOTICE.txt`
+- Runtime bundle note: CUDA builds also stage `NVIDIA-CUDA-RUNTIME-NOTICE.txt` into bundle root next to CUDA DLLs, with pointers to full licensing files under `licenses/third_party/`.
 - Official EULA page: `https://docs.nvidia.com/cuda/eula/index.html`
 
 ## Conversion / parity tooling (not required at runtime)

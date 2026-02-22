@@ -41,6 +41,11 @@ struct Args {
     batch_size: u32,
     parallel: usize,
     max_retries: usize,
+    devices: Option<String>,
+    tensor_split: Option<String>,
+    split_mode: i32,
+    n_gpu_layers: i32,
+    main_gpu: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +62,11 @@ struct ImageArgs {
     n_threads: i32,
     batch_size: u32,
     max_retries: usize,
+    devices: Option<String>,
+    tensor_split: Option<String>,
+    split_mode: i32,
+    n_gpu_layers: i32,
+    main_gpu: i32,
 }
 
 #[derive(Debug)]
@@ -108,11 +118,18 @@ impl SharedBridge {
         n_threads: i32,
         batch_size: u32,
         parallel: usize,
+        devices: Option<&str>,
+        tensor_split: Option<&str>,
+        split_mode: i32,
+        n_gpu_layers: i32,
+        main_gpu: i32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         prepare_windows_bridge_runtime_paths();
 
         let c_model = CString::new(model_path.to_string_lossy().as_ref())?;
         let c_mmproj = CString::new(mmproj_path.to_string_lossy().as_ref())?;
+        let c_devices = devices.map(CString::new).transpose()?;
+        let c_tensor_split = tensor_split.map(CString::new).transpose()?;
 
         let mut params: llama_server_bridge_params = unsafe { llama_server_bridge_default_params() };
         params.model_path = c_model.as_ptr();
@@ -123,14 +140,23 @@ impl SharedBridge {
         params.n_parallel = parallel as i32;
         params.n_threads = n_threads;
         params.n_threads_batch = n_threads;
-        params.n_gpu_layers = -1;
-        params.main_gpu = 0;
+        params.n_gpu_layers = n_gpu_layers;
+        params.main_gpu = main_gpu;
         params.no_kv_offload = 0;
         params.mmproj_use_gpu = 1;
         params.cache_ram_mib = 0;
         params.seed = -1;
         params.ctx_shift = 1;
         params.kv_unified = 1;
+        params.devices = c_devices
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null());
+        params.tensor_split = c_tensor_split
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null());
+        params.split_mode = split_mode;
 
         let ptr = unsafe { llama_server_bridge_create(&params) };
         if ptr.is_null() {
@@ -246,7 +272,7 @@ fn usage() -> &'static str {
 
 Options:
   --pdf             Full path to input PDF.
-  --pdfium-lib      Optional path to PDFium library file (e.g. pdfium.dll/libpdfium.dylib)
+  --pdfium-lib      Optional path to PDFium library file (e.g. pdfium.dll/libpdfium.dylib/libpdfium.so)
                     or a directory containing it.
   --pdfium-dll      Alias for --pdfium-lib (backward compatibility).
                     If omitted, tries PDFIUM_LIB / PDFIUM_DLL env vars, then relative app paths.
@@ -265,6 +291,11 @@ Options:
   --batch-size      Eval chunk size (default: 2048).
   --parallel        Concurrent slots/pages (default: 4).
   --max-retries     Per-page retries for non-EOS/truncation/loop (default: 2).
+  --devices         Optional backend devices CSV (e.g. 0,1 or none).
+  --n-gpu-layers    GPU layers to offload (default: -1).
+  --main-gpu        Primary GPU index (default: 0).
+  --split-mode      Tensor split mode: none|layer|row.
+  --tensor-split    Tensor split ratios CSV (e.g. 0.6,0.4).
   -h, --help        Show this help.
 
 Output behavior:
@@ -276,6 +307,15 @@ Output behavior:
 
 fn has_flag(args: &[String], key: &str) -> bool {
     args.iter().any(|a| a == key)
+}
+
+fn split_mode_arg_to_i32(value: &str) -> Result<i32, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "none" => Ok(0),
+        "layer" => Ok(1),
+        "row" => Ok(2),
+        _ => Err("invalid --split-mode, expected none/layer/row".to_string()),
+    }
 }
 
 #[cfg(windows)]
@@ -414,6 +454,11 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
     let mut n_threads: i32 = 8;
     let mut batch_size: u32 = 2048;
     let mut max_retries: usize = 2;
+    let mut devices: Option<String> = None;
+    let mut tensor_split: Option<String> = None;
+    let mut split_mode: i32 = -1;
+    let mut n_gpu_layers: i32 = -1;
+    let mut main_gpu: i32 = 0;
 
     let mut i = 1usize;
     while i < argv.len() {
@@ -523,6 +568,45 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
                     .parse::<usize>()
                     .map_err(|_| format!("Invalid --max-retries value: {}", argv[i]))?;
             }
+            "--devices" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--devices requires a value".to_string());
+                }
+                devices = Some(argv[i].clone());
+            }
+            "--tensor-split" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--tensor-split requires a value".to_string());
+                }
+                tensor_split = Some(argv[i].clone());
+            }
+            "--split-mode" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--split-mode requires a value".to_string());
+                }
+                split_mode = split_mode_arg_to_i32(&argv[i])?;
+            }
+            "--n-gpu-layers" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--n-gpu-layers requires a value".to_string());
+                }
+                n_gpu_layers = argv[i]
+                    .parse::<i32>()
+                    .map_err(|_| format!("Invalid --n-gpu-layers value: {}", argv[i]))?;
+            }
+            "--main-gpu" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--main-gpu requires a value".to_string());
+                }
+                main_gpu = argv[i]
+                    .parse::<i32>()
+                    .map_err(|_| format!("Invalid --main-gpu value: {}", argv[i]))?;
+            }
             "--parallel" => {
                 i += 1;
                 if i >= argv.len() {
@@ -552,6 +636,9 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
     }
     if batch_size == 0 {
         return Err("--batch-size must be > 0".to_string());
+    }
+    if main_gpu < 0 {
+        return Err("--main-gpu must be >= 0".to_string());
     }
 
     let image_path = image_path.ok_or_else(|| "--image is required".to_string())?;
@@ -583,6 +670,11 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
         n_threads,
         batch_size,
         max_retries,
+        devices,
+        tensor_split,
+        split_mode,
+        n_gpu_layers,
+        main_gpu,
     })
 }
 
@@ -677,6 +769,11 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut batch_size: u32 = 2048;
     let mut parallel: usize = 4;
     let mut max_retries: usize = 2;
+    let mut devices: Option<String> = None;
+    let mut tensor_split: Option<String> = None;
+    let mut split_mode: i32 = -1;
+    let mut n_gpu_layers: i32 = -1;
+    let mut main_gpu: i32 = 0;
 
     let mut i = 1usize;
     while i < argv.len() {
@@ -809,6 +906,45 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                     .parse::<usize>()
                     .map_err(|_| format!("Invalid --max-retries value: {}", argv[i]))?;
             }
+            "--devices" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--devices requires a value".to_string());
+                }
+                devices = Some(argv[i].clone());
+            }
+            "--tensor-split" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--tensor-split requires a value".to_string());
+                }
+                tensor_split = Some(argv[i].clone());
+            }
+            "--split-mode" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--split-mode requires a value".to_string());
+                }
+                split_mode = split_mode_arg_to_i32(&argv[i])?;
+            }
+            "--n-gpu-layers" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--n-gpu-layers requires a value".to_string());
+                }
+                n_gpu_layers = argv[i]
+                    .parse::<i32>()
+                    .map_err(|_| format!("Invalid --n-gpu-layers value: {}", argv[i]))?;
+            }
+            "--main-gpu" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--main-gpu requires a value".to_string());
+                }
+                main_gpu = argv[i]
+                    .parse::<i32>()
+                    .map_err(|_| format!("Invalid --main-gpu value: {}", argv[i]))?;
+            }
             "-h" | "--help" => return Err(usage().to_string()),
             other => return Err(format!("Unknown argument: {other}\n\n{}", usage())),
         }
@@ -835,6 +971,9 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     }
     if parallel == 0 {
         return Err("--parallel must be > 0".to_string());
+    }
+    if main_gpu < 0 {
+        return Err("--main-gpu must be >= 0".to_string());
     }
 
     let pdf_path = pdf_path.ok_or_else(|| "--pdf is required".to_string())?;
@@ -885,6 +1024,11 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         batch_size,
         parallel,
         max_retries,
+        devices,
+        tensor_split,
+        split_mode,
+        n_gpu_layers,
+        main_gpu,
     })
 }
 
@@ -1091,8 +1235,16 @@ fn run_image_to_markdown_cli_from_args(
     println!("out_md: {}", args.output_md.display());
     println!("render: scale={} oversample={}", args.scale, args.oversample);
     println!(
-        "inference: parallel=1 ctx={} batch={} n_predict={} retries={}",
-        args.n_ctx_total, args.batch_size, args.n_predict, args.max_retries
+        "inference: parallel=1 ctx={} batch={} n_predict={} retries={} devices={} n_gpu_layers={} main_gpu={} split_mode={} tensor_split={}",
+        args.n_ctx_total,
+        args.batch_size,
+        args.n_predict,
+        args.max_retries,
+        args.devices.as_deref().unwrap_or("<default>"),
+        args.n_gpu_layers,
+        args.main_gpu,
+        args.split_mode,
+        args.tensor_split.as_deref().unwrap_or("<default>")
     );
 
     let (png_bytes, (orig_w, orig_h), (temp_w, temp_h), (final_w, final_h)) =
@@ -1115,6 +1267,11 @@ fn run_image_to_markdown_cli_from_args(
         args.n_threads,
         args.batch_size,
         1,
+        args.devices.as_deref(),
+        args.tensor_split.as_deref(),
+        args.split_mode,
+        args.n_gpu_layers,
+        args.main_gpu,
     )?;
 
     let started = Instant::now();
@@ -1212,8 +1369,17 @@ pub fn run_pdf_to_markdown_cli_from_args(argv: &[String]) -> Result<(), Box<dyn 
     println!("out_md: {}", args.output_md.display());
     println!("render: scale={} oversample={}", args.scale, args.oversample);
     println!(
-        "inference: parallel={} ctx={} batch={} n_predict={} retries={}",
-        args.parallel, args.n_ctx_total, args.batch_size, args.n_predict, args.max_retries
+        "inference: parallel={} ctx={} batch={} n_predict={} retries={} devices={} n_gpu_layers={} main_gpu={} split_mode={} tensor_split={}",
+        args.parallel,
+        args.n_ctx_total,
+        args.batch_size,
+        args.n_predict,
+        args.max_retries,
+        args.devices.as_deref().unwrap_or("<default>"),
+        args.n_gpu_layers,
+        args.main_gpu,
+        args.split_mode,
+        args.tensor_split.as_deref().unwrap_or("<default>")
     );
 
     let rendered_pages = render_pages_to_memory(&args)?;
@@ -1228,6 +1394,11 @@ pub fn run_pdf_to_markdown_cli_from_args(argv: &[String]) -> Result<(), Box<dyn 
         args.n_threads,
         args.batch_size,
         args.parallel,
+        args.devices.as_deref(),
+        args.tensor_split.as_deref(),
+        args.split_mode,
+        args.n_gpu_layers,
+        args.main_gpu,
     )?);
 
     let mut q = VecDeque::new();

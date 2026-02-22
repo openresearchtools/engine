@@ -1,0 +1,203 @@
+name: Release All
+run-name: Release All - ${{ github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional release tag override (example: v1.12). Leave empty to auto-increment v1.x."
+        required: false
+        default: ""
+      title:
+        description: Optional release title override.
+        required: false
+        default: ""
+      prerelease:
+        description: Mark release as prerelease
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-all-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  resolve-release-meta:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      title: ${{ steps.meta.outputs.title }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve Tag and Title
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          input_tag="${{ inputs.tag }}"
+          if [[ -n "$input_tag" ]]; then
+            tag="$input_tag"
+          else
+            git fetch --tags --force
+            last_minor="$(git tag -l 'v1.*' | sed -n 's/^v1\.\([0-9]\+\)$/\1/p' | sort -n | tail -n1)"
+            if [[ -z "$last_minor" ]]; then
+              next_minor=0
+            else
+              next_minor=$((last_minor + 1))
+            fi
+            if (( next_minor > 99 )); then
+              echo "Auto-tag reached v1.99 limit. Set workflow input 'tag' (for example v2.0) to continue."
+              exit 1
+            fi
+            tag="v1.${next_minor}"
+          fi
+
+          input_title="${{ inputs.title }}"
+          if [[ -n "$input_title" ]]; then
+            title="$input_title"
+          else
+            title="ENGINE ${tag}"
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag: $tag"
+          echo "Resolved title: $title"
+
+  build-windows-cuda:
+    needs: resolve-release-meta
+    uses: ./.github/workflows/windows-x64.yml
+    with:
+      backend: cuda
+    secrets: inherit
+
+  build-windows-vulkan:
+    needs: resolve-release-meta
+    uses: ./.github/workflows/windows-x64.yml
+    with:
+      backend: vulkan
+    secrets: inherit
+
+  build-macos-metal:
+    needs: resolve-release-meta
+    uses: ./.github/workflows/macos-arm64.yml
+    with:
+      backend: metal
+    secrets: inherit
+
+  build-ubuntu-vulkan:
+    needs: resolve-release-meta
+    uses: ./.github/workflows/ubuntu-x64.yml
+    secrets: inherit
+
+  publish-release:
+    needs:
+      - resolve-release-meta
+      - build-windows-cuda
+      - build-windows-vulkan
+      - build-macos-metal
+      - build-ubuntu-vulkan
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ needs.resolve-release-meta.outputs.tag }}
+      RELEASE_TITLE: ${{ needs.resolve-release-meta.outputs.title }}
+      RELEASE_PRERELEASE: ${{ inputs.prerelease }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: engine-*
+          path: dist
+          merge-multiple: false
+
+      - name: Validate Downloaded Artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=(
+            "engine-win-cuda-x64"
+            "engine-win-vulkan-x64"
+            "engine-macos-arm64-metal"
+            "engine-ubuntu-x64-vulkan"
+          )
+          for name in "${expected[@]}"; do
+            if [[ ! -d "dist/$name" ]]; then
+              echo "Missing expected artifact directory: dist/$name"
+              ls -la dist || true
+              exit 1
+            fi
+          done
+
+      - name: Collect Release Assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+
+          cp dist/engine-win-cuda-x64/engine-win-cuda-x64.zip release-assets/
+          cp dist/engine-win-vulkan-x64/engine-win-vulkan-x64.zip release-assets/
+          cp dist/engine-macos-arm64-metal/engine-macos-arm64-metal.zip release-assets/
+          cp dist/engine-ubuntu-x64-vulkan/engine-ubuntu-x64-vulkan.tar.gz release-assets/
+
+          sha256sum release-assets/* > release-assets/SHA256SUMS.txt
+
+      - name: Generate Release Notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
+          cat <<EOF | sed 's/^          //' > release-notes.md
+          # ${RELEASE_TITLE}
+
+          ## Downloads
+
+          | System | Backend | Asset | Download |
+          |---|---|---|---|
+          | Windows x64 | CUDA 13.1 + CPU | \`engine-win-cuda-x64.zip\` | [Download](${base_url}/engine-win-cuda-x64.zip) |
+          | Windows x64 | Vulkan + CPU | \`engine-win-vulkan-x64.zip\` | [Download](${base_url}/engine-win-vulkan-x64.zip) |
+          | macOS arm64 (Apple Silicon) | Metal (GPU) | \`engine-macos-arm64-metal.zip\` | [Download](${base_url}/engine-macos-arm64-metal.zip) |
+          | Ubuntu x64 | Vulkan + CPU | \`engine-ubuntu-x64-vulkan.tar.gz\` | [Download](${base_url}/engine-ubuntu-x64-vulkan.tar.gz) |
+          | Checksums | SHA256 | \`SHA256SUMS.txt\` | [Download](${base_url}/SHA256SUMS.txt) |
+
+          ## Runtime Notes
+
+          - Windows and Ubuntu builds include CPU runtime support.
+          - Windows CUDA build includes CUDA 13.1 runtime components. If your GPU or driver does not support CUDA 13.1, use the Windows Vulkan build instead.
+          - macOS build supports Apple Silicon only (M1, M2, M3, M4 and newer Arm-based Macs) and is distributed as a Metal-focused GPU build that leverages unified memory.
+          - Vulkan builds are GPU vendor-agnostic and can be a better fallback across mixed hardware.
+          EOF
+
+      - name: Create or Update GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          prerelease_args=()
+          if [[ "$RELEASE_PRERELEASE" == "true" ]]; then
+            prerelease_args+=(--prerelease)
+          fi
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --title "$RELEASE_TITLE" \
+              --notes-file release-notes.md \
+              "${prerelease_args[@]}"
+          else
+            gh release create "$RELEASE_TAG" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TITLE" \
+              --notes-file release-notes.md \
+              "${prerelease_args[@]}"
+          fi
+
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber

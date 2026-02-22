@@ -1,5 +1,5 @@
-name: Build macOS arm64 Backend Bundle
-run-name: Build macOS arm64 Backend Bundle - ${{ github.ref_name }} test
+name: Build macOS arm64 Backend
+run-name: Build macOS arm64 Backend - ${{ github.ref_name }}
 
 on:
   workflow_dispatch:
@@ -11,6 +11,12 @@ on:
         options:
           - metal
         default: metal
+  workflow_call:
+    inputs:
+      backend:
+        description: Backend to build
+        required: true
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.backend }}
@@ -233,7 +239,7 @@ jobs:
             [[ -f "$f" ]] || continue
             base="$(basename "$f")"
             case "$base" in
-              torch-LICENSE.txt|torch-NOTICE.txt|torchaudio-LICENSE.txt|numpy-LICENSE.txt|ffmpeg-SOURCE.txt|nvidia-cuda-EULA.txt|nvidia-cuda-runtime-NOTICE.txt)
+              torch-LICENSE.txt|torch-NOTICE.txt|torchaudio-LICENSE.txt|numpy-LICENSE.txt|ffmpeg-SOURCE*.txt|nvidia-cuda-EULA.txt|nvidia-cuda-runtime-NOTICE.txt)
                 continue
                 ;;
             esac
@@ -309,6 +315,14 @@ jobs:
           copy_license_files "$BUILD_ROOT/runtime-deps/pdfium" "$bundle_pdfium"
           copy_license_files "$BUILD_ROOT/runtime-deps/ffmpeg" "$bundle_ffmpeg_root"
 
+          ffmpeg_source_notice="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-SOURCE-macos-arm64.txt"
+          if [[ ! -f "$ffmpeg_source_notice" ]]; then
+            ffmpeg_source_notice="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-SOURCE.txt"
+          fi
+          if [[ -f "$ffmpeg_source_notice" ]]; then
+            cp "$ffmpeg_source_notice" "$bundle_ffmpeg_root/ffmpeg-SOURCE.txt"
+          fi
+
           # Ensure PDFium vendor folder has visible license texts.
           if ! find "$bundle_pdfium" -type f \( -iname '*LICENSE*' -o -iname '*LICENCE*' -o -iname '*COPYING*' -o -iname '*COPYRIGHT*' -o -iname '*NOTICE*' -o -iname '*PATENTS*' -o -iname '*EULA*' -o -iname '*SOURCE*' \) | grep -q .; then
             pdfium_primary="$GITHUB_WORKSPACE/third_party/licenses/pdfium-LICENSE.txt"
@@ -322,7 +336,10 @@ jobs:
           # Ensure bundle/vendor/ffmpeg is never missing license texts.
           if ! find "$bundle_ffmpeg_root" -type f \( -iname '*LICENSE*' -o -iname '*LICENCE*' -o -iname '*COPYING*' -o -iname '*COPYRIGHT*' -o -iname '*NOTICE*' -o -iname '*PATENTS*' -o -iname '*EULA*' -o -iname '*SOURCE*' \) | grep -q .; then
             ffmpeg_lgpl="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-LGPL-2.1.txt"
-            ffmpeg_source="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-SOURCE.txt"
+            ffmpeg_source="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-SOURCE-macos-arm64.txt"
+            if [[ ! -f "$ffmpeg_source" ]]; then
+              ffmpeg_source="$GITHUB_WORKSPACE/third_party/licenses/ffmpeg-SOURCE.txt"
+            fi
             [[ -f "$ffmpeg_lgpl" ]] || { echo "Missing fallback FFmpeg license file: $ffmpeg_lgpl"; exit 1; }
             [[ -f "$ffmpeg_source" ]] || { echo "Missing fallback FFmpeg source notice file: $ffmpeg_source"; exit 1; }
             cp "$ffmpeg_lgpl" "$bundle_ffmpeg_root/ffmpeg-LGPL-2.1.txt"
@@ -537,20 +554,20 @@ jobs:
           print("ctypes-load-ok")
           PY
 
-      - name: Pack Bundle
+      - name: Pack Runtime
         shell: bash
         run: |
           set -euo pipefail
           bundle="$BUILD_ROOT/bundle"
-          out="$BUILD_ROOT/engine-macos-arm64-${BACKEND}-bundle.tar.gz"
+          out="$BUILD_ROOT/engine-macos-arm64-${BACKEND}.zip"
+          [[ -d "$bundle" ]] || { echo "Bundle folder not found: $bundle"; exit 1; }
           rm -f "$out"
-          tar -C "$bundle" -czf "$out" .
-          echo "BUNDLE_TAR=$out" >> "$GITHUB_ENV"
-          echo "Packed: $out"
+          (cd "$bundle" && zip -r "$out" .)
+          [[ -f "$out" ]] || { echo "Failed to create archive: $out"; exit 1; }
 
-      - name: Upload Bundle Artifact
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: engine-macos-arm64-${{ inputs.backend }}-bundle
-          path: ${{ env.BUNDLE_TAR }}
+          name: engine-macos-arm64-${{ inputs.backend }}
+          path: ${{ env.BUILD_ROOT }}/engine-macos-arm64-${{ inputs.backend }}.zip
           if-no-files-found: error
