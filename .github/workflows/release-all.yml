@@ -17,6 +17,11 @@ on:
         required: false
         type: boolean
         default: false
+      include_cuda:
+        description: Include Windows CUDA build in this release
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: release-all-${{ github.ref }}
@@ -75,6 +80,7 @@ jobs:
           echo "Resolved title: $title"
 
   build-windows-cuda:
+    if: ${{ inputs.include_cuda }}
     needs: resolve-release-meta
     uses: ./.github/workflows/windows-x64.yml
     with:
@@ -101,6 +107,7 @@ jobs:
     secrets: inherit
 
   publish-release:
+    if: ${{ always() && needs.resolve-release-meta.result == 'success' && needs.build-windows-vulkan.result == 'success' && needs.build-macos-metal.result == 'success' && needs.build-ubuntu-vulkan.result == 'success' && (needs.build-windows-cuda.result == 'success' || needs.build-windows-cuda.result == 'skipped') }}
     needs:
       - resolve-release-meta
       - build-windows-cuda
@@ -112,6 +119,7 @@ jobs:
       RELEASE_TAG: ${{ needs.resolve-release-meta.outputs.tag }}
       RELEASE_TITLE: ${{ needs.resolve-release-meta.outputs.title }}
       RELEASE_PRERELEASE: ${{ inputs.prerelease }}
+      INCLUDE_CUDA: ${{ inputs.include_cuda }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Download Build Artifacts
@@ -126,11 +134,13 @@ jobs:
         run: |
           set -euo pipefail
           expected=(
-            "engine-win-cuda-x64"
             "engine-win-vulkan-x64"
             "engine-macos-arm64-metal"
             "engine-ubuntu-x64-vulkan"
           )
+          if [[ "$INCLUDE_CUDA" == "true" ]]; then
+            expected+=("engine-win-cuda-x64")
+          fi
           for name in "${expected[@]}"; do
             if [[ ! -d "dist/$name" ]]; then
               echo "Missing expected artifact directory: dist/$name"
@@ -145,7 +155,9 @@ jobs:
           set -euo pipefail
           mkdir -p release-assets
 
-          (cd dist/engine-win-cuda-x64 && zip -r ../../release-assets/engine-win-cuda-x64.zip .)
+          if [[ "$INCLUDE_CUDA" == "true" ]]; then
+            (cd dist/engine-win-cuda-x64 && zip -r ../../release-assets/engine-win-cuda-x64.zip .)
+          fi
           (cd dist/engine-win-vulkan-x64 && zip -r ../../release-assets/engine-win-vulkan-x64.zip .)
           (cd dist/engine-macos-arm64-metal && zip -r ../../release-assets/engine-macos-arm64-metal.zip .)
           tar -C dist/engine-ubuntu-x64-vulkan -czf release-assets/engine-ubuntu-x64-vulkan.tar.gz .
@@ -157,26 +169,30 @@ jobs:
         run: |
           set -euo pipefail
           base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
-          cat <<EOF | sed 's/^          //' > release-notes.md
-          # ${RELEASE_TITLE}
-
-          ## Downloads
-
-          | System | Backend | Asset | Download |
-          |---|---|---|---|
-          | Windows x64 | CUDA 13.1 + CPU | \`engine-win-cuda-x64.zip\` | [Download](${base_url}/engine-win-cuda-x64.zip) |
-          | Windows x64 | Vulkan + CPU | \`engine-win-vulkan-x64.zip\` | [Download](${base_url}/engine-win-vulkan-x64.zip) |
-          | macOS arm64 (Apple Silicon) | Metal (GPU) | \`engine-macos-arm64-metal.zip\` | [Download](${base_url}/engine-macos-arm64-metal.zip) |
-          | Ubuntu x64 | Vulkan + CPU | \`engine-ubuntu-x64-vulkan.tar.gz\` | [Download](${base_url}/engine-ubuntu-x64-vulkan.tar.gz) |
-          | Checksums | SHA256 | \`SHA256SUMS.txt\` | [Download](${base_url}/SHA256SUMS.txt) |
-
-          ## Runtime Notes
-
-          - Windows and Ubuntu builds include CPU runtime support.
-          - Windows CUDA build includes CUDA 13.1 runtime components. If your GPU or driver does not support CUDA 13.1, use the Windows Vulkan build instead.
-          - macOS build supports Apple Silicon only (M1, M2, M3, M4 and newer Arm-based Macs) and is distributed as a Metal-focused GPU build that leverages unified memory.
-          - Vulkan builds are GPU vendor-agnostic and can be a better fallback across mixed hardware.
-          EOF
+          {
+            echo "# ${RELEASE_TITLE}"
+            echo
+            echo "## Downloads"
+            echo
+            echo "| System | Backend | Asset | Download |"
+            echo "|---|---|---|---|"
+            if [[ "$INCLUDE_CUDA" == "true" ]]; then
+              echo "| Windows x64 | CUDA 13.1 + CPU | \`engine-win-cuda-x64.zip\` | [Download](${base_url}/engine-win-cuda-x64.zip) |"
+            fi
+            echo "| Windows x64 | Vulkan + CPU | \`engine-win-vulkan-x64.zip\` | [Download](${base_url}/engine-win-vulkan-x64.zip) |"
+            echo "| macOS arm64 (Apple Silicon) | Metal (GPU) | \`engine-macos-arm64-metal.zip\` | [Download](${base_url}/engine-macos-arm64-metal.zip) |"
+            echo "| Ubuntu x64 | Vulkan + CPU | \`engine-ubuntu-x64-vulkan.tar.gz\` | [Download](${base_url}/engine-ubuntu-x64-vulkan.tar.gz) |"
+            echo "| Checksums | SHA256 | \`SHA256SUMS.txt\` | [Download](${base_url}/SHA256SUMS.txt) |"
+            echo
+            echo "## Runtime Notes"
+            echo
+            echo "- Windows and Ubuntu builds include CPU runtime support."
+            if [[ "$INCLUDE_CUDA" == "true" ]]; then
+              echo "- Windows CUDA build includes CUDA 13.1 runtime components. If your GPU or driver does not support CUDA 13.1, use the Windows Vulkan build instead."
+            fi
+            echo "- macOS build supports Apple Silicon only (M1, M2, M3, M4 and newer Arm-based Macs) and is distributed as a Metal-focused GPU build that leverages unified memory."
+            echo "- Vulkan builds are GPU vendor-agnostic and can be a better fallback across mixed hardware."
+          } > release-notes.md
 
       - name: Create or Update GitHub Release
         shell: bash

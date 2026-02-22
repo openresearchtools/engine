@@ -323,16 +323,21 @@ License staging note for Ubuntu x64:
 Workflow: `.github/workflows/release-all.yml`
 
 - Trigger is manual only (`workflow_dispatch`).
+- Inputs:
+  - `include_cuda` (default `false`): when `true`, also builds/publishes Windows CUDA; when `false`, release includes Windows Vulkan + macOS Metal + Ubuntu Vulkan only.
+  - `tag` (optional): override release tag.
+  - `title` (optional): override release title.
+  - `prerelease` (optional): mark release as prerelease.
 - Runs all build targets in parallel:
-  - Windows x64 CUDA
   - Windows x64 Vulkan
   - macOS arm64 Metal
   - Ubuntu x64 Vulkan
+  - Windows x64 CUDA (only when `include_cuda=true`)
 - Creates or updates one GitHub Release page and uploads packaged assets:
-  - `engine-win-cuda-x64.zip`
   - `engine-win-vulkan-x64.zip`
   - `engine-macos-arm64-metal.zip`
   - `engine-ubuntu-x64-vulkan.tar.gz`
+  - `engine-win-cuda-x64.zip` (only when `include_cuda=true`)
 - Runtime note used in release page:
   - Windows/Ubuntu artifacts include CPU runtime support.
   - macOS artifact is presented as Metal-focused (Apple Silicon unified-memory GPU path).
