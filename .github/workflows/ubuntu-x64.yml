@@ -457,8 +457,16 @@ jobs:
               printf '%s\n' "$out"
               exit 1
             fi
-            if printf '%s\n' "$out" | grep -F "$BUILD_ROOT" >/dev/null; then
-              echo "Found leaked BUILD_ROOT dependency path in $file"
+            # Allow resolved runtime links under bundle/ (ldd prints absolute paths),
+            # but reject other BUILD_ROOT references (for example runtime-deps paths).
+            leaked_build_root="$(printf '%s\n' "$out" | grep -F "$BUILD_ROOT" | grep -vF "$bundle/" || true)"
+            if [[ -n "$leaked_build_root" ]]; then
+              echo "Found leaked BUILD_ROOT dependency path outside bundle in $file"
+              printf '%s\n' "$out"
+              exit 1
+            fi
+            if printf '%s\n' "$out" | grep -F "$BUILD_ROOT/runtime-deps/" >/dev/null; then
+              echo "Found leaked runtime-deps dependency path in $file"
               printf '%s\n' "$out"
               exit 1
             fi
