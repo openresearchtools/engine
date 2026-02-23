@@ -418,18 +418,41 @@ We have **no affiliation with the Qwen team**. This is simply a personal observa
 
 ## Embeddings
 
-The CLI supports OpenAI-style request bodies via `--body-json`. In PowerShell, using a JSON file path is the most reliable form. Use `--out` if you want to write the response to disk.
+`embed` is JSON-in/JSON-out.
 
-Batched embeddings from a file (separate vectors per input row):
+- `--body-json` accepts either:
+  - a JSON string payload, or
+  - a path to a JSON file
+- If `--out` is not set, response JSON is printed to console.
+- If `--out` is set, response JSON is written to that file.
+
+Minimal inline payload (no temp file):
+
+```powershell
+$payload = '{"input":["row one text","row two text","row three text"],"encoding_format":"float"}'
+
+engine.exe embed `
+  --model ".\models\embedding.gguf" `
+  --body-json $payload
+```
+
+Save response to file:
+
+```powershell
+$payload = '{"input":["row one text","row two text","row three text"],"encoding_format":"float"}'
+
+engine.exe embed `
+  --model ".\models\embedding.gguf" `
+  --body-json $payload `
+  --out ".\embed_response.json"
+```
+
+File-based payload (if you prefer files):
 
 ```powershell
 @'
 {
-  "input": [
-    "row one text",
-    "row two text",
-    "row three text"
-  ],
+  "input": ["a","b","c"],
   "encoding_format": "float"
 }
 '@ | Set-Content .\embed_request.json
@@ -437,29 +460,76 @@ Batched embeddings from a file (separate vectors per input row):
 engine.exe embed `
   --model ".\models\embedding.gguf" `
   --body-json ".\embed_request.json" `
-  --out ".\embed_response.json" `
-  --devices 0 `
-  --n-gpu-layers -1
-```
-
-Batched embeddings quick test:
-
-```powershell
-'{"input":["a","b","c"],"encoding_format":"float"}' | Set-Content .\embed_inline.json
-
-engine.exe embed `
-  --model ".\models\embedding.gguf" `
-  --body-json ".\embed_inline.json" `
-  --out ".\embed_inline_response.json"
+  --out ".\embed_response.json"
 ```
 
 ---
 
 ## Reranking
 
-Reranking follows the same pattern: pass a request body via `--body-json` (file path recommended in PowerShell), and optionally write results via `--out`.
+`rerank` is also JSON-in/JSON-out.
 
-Rerank from a file:
+Request shape:
+
+```json
+{
+  "query": "text to match against",
+  "documents": ["candidate 1", "candidate 2", "candidate 3"],
+  "top_n": 2
+}
+```
+
+Notes:
+
+- `query` is required.
+- `documents` is required (rerank needs candidates to score/sort).
+- `top_n` is optional.
+- `--body-json` accepts inline JSON string or a file path.
+- Without `--out`, response JSON prints to console.
+
+What `documents` means:
+
+- `documents` is an array of plain text strings (sentences/paragraphs/chunks).
+- They are candidate texts that will be ranked by relevance to `query`.
+- `documents` is not a file-format field and not a file path list.
+- If your source is a file (PDF/MD/TXT), extract/split text first, then pass those text chunks in `documents`.
+
+Example payload with real candidate texts:
+
+```json
+{
+  "query": "find statements about adverse effects",
+  "documents": [
+    "Mild headache was reported in 3% of patients.",
+    "The model uses grouped-query attention and rotary embeddings.",
+    "Nausea and dizziness were the most common side effects."
+  ],
+  "top_n": 2
+}
+```
+
+Minimal inline payload (no temp file):
+
+```powershell
+$payload = '{"query":"table extraction quality","documents":["doc1","doc2","doc3"],"top_n":2}'
+
+engine.exe rerank `
+  --model ".\models\reranker.gguf" `
+  --body-json $payload
+```
+
+Save response to file:
+
+```powershell
+$payload = '{"query":"find adverse effects","documents":["row A text","row B text","row C text"],"top_n":3}'
+
+engine.exe rerank `
+  --model ".\models\reranker.gguf" `
+  --body-json $payload `
+  --out ".\rerank_response.json"
+```
+
+File-based payload (if you prefer files):
 
 ```powershell
 @'
@@ -477,41 +547,17 @@ Rerank from a file:
 engine.exe rerank `
   --model ".\models\reranker.gguf" `
   --body-json ".\rerank_request.json" `
-  --out ".\rerank_response.json" `
-  --devices 0 `
-  --n-gpu-layers -1
-```
-
-Rerank quick test:
-
-```powershell
-'{"query":"table extraction quality","documents":["doc1","doc2","doc3"],"top_n":2}' | Set-Content .\rerank_inline.json
-
-engine.exe rerank `
-  --model ".\models\reranker.gguf" `
-  --body-json ".\rerank_inline.json" `
-  --out ".\rerank_inline_response.json"
-```
-
-Another example (same shape, different query/documents):
-
-```powershell
-'{"query":"find adverse effects","documents":["row A text","row B text","row C text"],"top_n":3}' | Set-Content .\rerank_inline_2.json
-
-engine.exe rerank `
-  --model ".\models\reranker.gguf" `
-  --body-json ".\rerank_inline_2.json" `
-  --out ".\rerank_inline_2_response.json" `
-  --devices 0 `
-  --n-gpu-layers -1
+  --out ".\rerank_response.json"
 ```
 
 With multi-GPU split:
 
 ```powershell
+$payload = '{"query":"find adverse effects","documents":["row A text","row B text","row C text"],"top_n":3}'
+
 engine.exe rerank `
   --model ".\models\reranker.gguf" `
-  --body-json ".\rerank_inline_2.json" `
+  --body-json $payload `
   --devices 0,1 `
   --split-mode layer `
   --tensor-split 0.6,0.4 `
