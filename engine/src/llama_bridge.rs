@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::env;
 use std::ffi::{CStr, CString};
 use std::fs;
@@ -262,6 +262,30 @@ fn arg_value(args: &[String], key: &str) -> Option<String> {
     None
 }
 
+fn arg_value_spanned(args: &[String], key: &str, stop_keys: &[&str]) -> Option<String> {
+    let mut i = 0usize;
+    while i < args.len() {
+        if args[i] == key {
+            let start = i + 1;
+            if start >= args.len() {
+                return Some(String::new());
+            }
+
+            let mut end = start;
+            while end < args.len() {
+                let token = args[end].as_str();
+                if stop_keys.iter().any(|k| *k == token) {
+                    break;
+                }
+                end += 1;
+            }
+            return Some(args[start..end].join(" "));
+        }
+        i += 1;
+    }
+    None
+}
+
 fn has_arg(args: &[String], key: &str) -> bool {
     args.iter().any(|a| a == key)
 }
@@ -356,6 +380,36 @@ fn parse_i32_arg(args: &[String], key: &str, default_value: i32) -> Result<i32, 
     }
 }
 
+fn parse_optional_i32_arg(args: &[String], key: &str) -> Result<Option<i32>, String> {
+    match arg_value(args, key) {
+        Some(v) => v
+            .parse::<i32>()
+            .map(Some)
+            .map_err(|e| format!("invalid value for {key}: {e}")),
+        None => Ok(None),
+    }
+}
+
+fn parse_optional_positive_i32_arg(args: &[String], key: &str) -> Result<Option<i32>, String> {
+    let value = parse_optional_i32_arg(args, key)?;
+    if let Some(v) = value {
+        if v <= 0 {
+            return Err(format!("{key} must be > 0"));
+        }
+    }
+    Ok(value)
+}
+
+fn parse_optional_f64_arg(args: &[String], key: &str) -> Result<Option<f64>, String> {
+    match arg_value(args, key) {
+        Some(v) => v
+            .parse::<f64>()
+            .map(Some)
+            .map_err(|e| format!("invalid value for {key}: {e}")),
+        None => Ok(None),
+    }
+}
+
 fn split_mode_arg_to_i32(value: &str) -> Result<i32, String> {
     match value.to_ascii_lowercase().as_str() {
         "none" => Ok(0),
@@ -363,6 +417,128 @@ fn split_mode_arg_to_i32(value: &str) -> Result<i32, String> {
         "row" => Ok(2),
         _ => Err("invalid --split-mode, expected none/layer/row".to_string()),
     }
+}
+
+fn apply_audio_cli_overrides(args: &[String], body_obj: &mut Map<String, Value>) -> Result<(), String> {
+    if let Some(v) = arg_value(args, "--transcription-backend") {
+        body_obj.insert("transcription_backend".to_string(), json!(v));
+    }
+    if let Some(v) = arg_value(args, "--diarization-backend") {
+        body_obj.insert("diarization_backend".to_string(), json!(v));
+    }
+    if let Some(v) = arg_value(args, "--diarization-device") {
+        body_obj.insert("diarization_device".to_string(), json!(v));
+    }
+
+    if let Some(v) = parse_optional_i32_arg(args, "--whisper-threads")? {
+        body_obj.insert("whisper_threads".to_string(), json!(v));
+    }
+    if let Some(v) = parse_optional_i32_arg(args, "--whisper-processors")? {
+        body_obj.insert("whisper_processors".to_string(), json!(v));
+    }
+    if let Some(v) = parse_optional_i32_arg(args, "--whisper-max-len")? {
+        body_obj.insert("whisper_max_len".to_string(), json!(v));
+    }
+    if let Some(v) = parse_optional_i32_arg(args, "--whisper-audio-ctx")? {
+        body_obj.insert("whisper_audio_ctx".to_string(), json!(v));
+    }
+    if let Some(v) = parse_optional_i32_arg(args, "--whisper-best-of")? {
+        body_obj.insert("whisper_best_of".to_string(), json!(v));
+    }
+    if let Some(v) = parse_optional_i32_arg(args, "--whisper-beam-size")? {
+        body_obj.insert("whisper_beam_size".to_string(), json!(v));
+    }
+    if let Some(v) = parse_optional_i32_arg(args, "--whisper-gpu-device")? {
+        body_obj.insert("whisper_gpu_device".to_string(), json!(v));
+    }
+    if let Some(v) = parse_optional_f64_arg(args, "--whisper-temperature")? {
+        body_obj.insert("whisper_temperature".to_string(), json!(v));
+    }
+    if let Some(v) = parse_optional_f64_arg(args, "--whisper-word-time-offset-sec")? {
+        body_obj.insert("whisper_word_time_offset_sec".to_string(), json!(v));
+    }
+    if let Some(v) = parse_optional_f64_arg(args, "--seconds-per-timeline-token")? {
+        body_obj.insert("seconds_per_timeline_token".to_string(), json!(v));
+    }
+    if let Some(v) = parse_optional_f64_arg(args, "--source-audio-seconds")? {
+        body_obj.insert("source_audio_seconds".to_string(), json!(v));
+    }
+    if let Some(v) = parse_optional_f64_arg(args, "--diarization-embedding-min-segment-duration-sec")? {
+        body_obj.insert("diarization_embedding_min_segment_duration_sec".to_string(), json!(v));
+    }
+    if let Some(v) = parse_optional_i32_arg(args, "--diarization-embedding-max-segments-per-speaker")? {
+        body_obj.insert("diarization_embedding_max_segments_per_speaker".to_string(), json!(v));
+    }
+    if let Some(v) = parse_optional_f64_arg(args, "--diarization-min-duration-off-sec")? {
+        body_obj.insert("diarization_min_duration_off_sec".to_string(), json!(v));
+    }
+    if let Some(v) = parse_optional_f64_arg(args, "--speaker-seg-max-gap-sec")? {
+        body_obj.insert("speaker_seg_max_gap_sec".to_string(), json!(v));
+    }
+    if let Some(v) = parse_optional_i32_arg(args, "--speaker-seg-max-words")? {
+        body_obj.insert("speaker_seg_max_words".to_string(), json!(v));
+    }
+    if let Some(v) = parse_optional_f64_arg(args, "--speaker-seg-max-duration-sec")? {
+        body_obj.insert("speaker_seg_max_duration_sec".to_string(), json!(v));
+    }
+    if let Some(v) = parse_optional_f64_arg(args, "--aligner-plda-sim-threshold")? {
+        body_obj.insert("aligner_plda_sim_threshold".to_string(), json!(v));
+    }
+
+    if let Some(v) = arg_value(args, "--whisper-language") {
+        body_obj.insert("whisper_language".to_string(), json!(v));
+    }
+    if let Some(v) = arg_value(args, "--whisper-prompt") {
+        body_obj.insert("whisper_prompt".to_string(), json!(v));
+    }
+
+    if has_arg(args, "--whisper-translate") {
+        body_obj.insert("whisper_translate".to_string(), json!(true));
+    }
+    if has_arg(args, "--whisper-no-fallback") {
+        body_obj.insert("whisper_no_fallback".to_string(), json!(true));
+    }
+    if has_arg(args, "--whisper-suppress-nst") {
+        body_obj.insert("whisper_suppress_nst".to_string(), json!(true));
+    }
+    if has_arg(args, "--whisper-no-gpu") {
+        body_obj.insert("whisper_no_gpu".to_string(), json!(true));
+    }
+    if has_arg(args, "--whisper-offline") {
+        body_obj.insert("whisper_offline".to_string(), json!(true));
+    }
+    if has_arg(args, "--diarization-offline") {
+        body_obj.insert("diarization_offline".to_string(), json!(true));
+    }
+
+    let set_flash_attn = has_arg(args, "--whisper-flash-attn");
+    let unset_flash_attn = has_arg(args, "--whisper-no-flash-attn");
+    if set_flash_attn && unset_flash_attn {
+        return Err("choose one: --whisper-flash-attn OR --whisper-no-flash-attn".to_string());
+    }
+    if set_flash_attn {
+        body_obj.insert("whisper_flash_attn".to_string(), json!(true));
+    }
+    if unset_flash_attn {
+        body_obj.insert("whisper_flash_attn".to_string(), json!(false));
+    }
+
+    let split_on_hard_break = has_arg(args, "--speaker-seg-split-on-hard-break");
+    let no_split_on_hard_break = has_arg(args, "--speaker-seg-no-split-on-hard-break");
+    if split_on_hard_break && no_split_on_hard_break {
+        return Err(
+            "choose one: --speaker-seg-split-on-hard-break OR --speaker-seg-no-split-on-hard-break"
+                .to_string(),
+        );
+    }
+    if split_on_hard_break {
+        body_obj.insert("speaker_seg_split_on_hard_break".to_string(), json!(true));
+    }
+    if no_split_on_hard_break {
+        body_obj.insert("speaker_seg_split_on_hard_break".to_string(), json!(false));
+    }
+
+    Ok(())
 }
 
 fn chunk_text_by_words(input: &str, words_per_chunk: usize) -> Vec<String> {
@@ -407,6 +583,7 @@ fn read_inline_or_file_json(raw_or_path: &str, label: &str) -> Result<String, St
 fn make_bridge(
     model_path: &str,
     mmproj_path: Option<&str>,
+    mmproj_use_gpu: Option<i32>,
     devices: Option<&str>,
     tensor_split: Option<&str>,
     split_mode: i32,
@@ -414,6 +591,8 @@ fn make_bridge(
     n_batch: i32,
     n_ubatch: i32,
     n_parallel: i32,
+    n_threads: Option<i32>,
+    n_threads_batch: Option<i32>,
     n_gpu_layers: i32,
     main_gpu: i32,
     embedding: bool,
@@ -448,10 +627,22 @@ fn make_bridge(
     params.n_batch = n_batch;
     params.n_ubatch = n_ubatch;
     params.n_parallel = n_parallel;
+    if let Some(v) = n_threads {
+        params.n_threads = v;
+    }
+    if let Some(v) = n_threads_batch {
+        params.n_threads_batch = v;
+    }
     params.n_gpu_layers = n_gpu_layers;
     params.main_gpu = main_gpu;
     params.no_kv_offload = 0;
-    params.mmproj_use_gpu = if mmproj_c.is_some() { 1 } else { 0 };
+    params.mmproj_use_gpu = if let Some(v) = mmproj_use_gpu {
+        v
+    } else if mmproj_c.is_some() {
+        1
+    } else {
+        0
+    };
     params.cache_ram_mib = 0;
     params.ctx_shift = 1;
     params.kv_unified = 1;
@@ -476,14 +667,28 @@ fn make_bridge(
 fn bridge_cli_usage() -> &'static str {
     "bridge usage:
   list-devices
-  vlm --model <gguf> --mmproj <gguf> --image <png/jpg/webp> [--prompt <text>] [--out <md>] [--n-predict 5000]
-  audio [--model <gguf>] --audio-file <audio-file> [--audio-format <format-hint>] [--output-dir <dir>] --mode <subtitle|speech|transcript> --custom <value> [whisper source + diarization source flags]
+  vlm --model <gguf> --mmproj <gguf> --image <png/jpg/webp> [--prompt <text>] [--out <md>] [--n-predict 5000] [--mmproj-use-gpu <0|1>]
+  audio --audio-file <audio-file> [--audio-format <format-hint>] [--output-dir <dir>] --mode <subtitle|speech|transcript> --custom <value> [whisper source + diarization source flags + advanced audio knobs]
   chat --model <gguf> [--prompt <text>] [--markdown <md>] [--out <md>] [--devices <csv>] [--n-predict 10000]
   embed --model <gguf> (--markdown <md> | --body-json <json-or-path>) [--out <json>] [--devices <csv>] [--batch-size 32] [--chunk-words 500] [--batches 8]
   rerank --model <gguf> (--markdown <md> | --body-json <json-or-path>) [--out <json>] [--devices <csv>] [--docs-per-query 32] [--chunk-words 500] [--batches 8]
 shared optional flags:
   --n-ctx <int> --n-batch <int> --n-ubatch <int> --n-parallel <int> --n-gpu-layers <int> --main-gpu <int>
-  --split-mode <none|layer|row> --tensor-split <csv>"
+  --threads <int> --threads-batch <int>
+  --split-mode <none|layer|row> --tensor-split <csv>
+audio advanced flags:
+  --ffmpeg-convert --no-ffmpeg-convert (--audio-only is accepted but no longer required)
+  --transcription-backend <auto|whisper_cpp_inproc>
+  --whisper-threads <int> --whisper-processors <int> --whisper-max-len <int> --whisper-audio-ctx <int>
+  --whisper-best-of <int> --whisper-beam-size <int> --whisper-temperature <float>
+  --whisper-language <lang|auto> --whisper-prompt <text> --whisper-translate --whisper-no-fallback --whisper-suppress-nst
+  --whisper-no-gpu --whisper-gpu-device <int> --whisper-flash-attn|--whisper-no-flash-attn --whisper-offline
+  --whisper-word-time-offset-sec <float> --seconds-per-timeline-token <float> --source-audio-seconds <float>
+  --diarization-backend <native_cpp|auto> --diarization-offline --diarization-device <device>
+  --diarization-embedding-min-segment-duration-sec <float> --diarization-embedding-max-segments-per-speaker <int>
+  --diarization-min-duration-off-sec <float> --speaker-seg-max-gap-sec <float> --speaker-seg-max-words <int>
+  --speaker-seg-max-duration-sec <float> --speaker-seg-split-on-hard-break|--speaker-seg-no-split-on-hard-break
+  --aligner-plda-sim-threshold <float>"
 }
 
 fn run_list_devices() -> Result<(), String> {
@@ -537,8 +742,14 @@ fn run_vlm(args: &[String]) -> Result<(), String> {
     let n_batch = parse_i32_arg(args, "--n-batch", 2_048)?;
     let n_ubatch = parse_i32_arg(args, "--n-ubatch", 2_048)?;
     let n_parallel = parse_i32_arg(args, "--n-parallel", 1)?;
+    let n_threads = parse_optional_positive_i32_arg(args, "--threads")?;
+    let n_threads_batch = parse_optional_positive_i32_arg(args, "--threads-batch")?;
     let n_gpu_layers = parse_i32_arg(args, "--n-gpu-layers", -1)?;
     let main_gpu = parse_i32_arg(args, "--main-gpu", 0)?;
+    let mmproj_use_gpu = parse_i32_arg(args, "--mmproj-use-gpu", 1)?;
+    if mmproj_use_gpu != 0 && mmproj_use_gpu != 1 {
+        return Err("--mmproj-use-gpu must be 0 or 1".to_string());
+    }
 
     let image_bytes = fs::read(&image)
         .map_err(|e| format!("failed to read image file '{image}': {e}"))?;
@@ -564,6 +775,7 @@ fn run_vlm(args: &[String]) -> Result<(), String> {
     let bridge = make_bridge(
         &model,
         Some(&mmproj),
+        Some(mmproj_use_gpu),
         devices.as_deref(),
         tensor_split.as_deref(),
         split_mode,
@@ -571,6 +783,8 @@ fn run_vlm(args: &[String]) -> Result<(), String> {
         n_batch,
         n_ubatch,
         n_parallel,
+        n_threads,
+        n_threads_batch,
         n_gpu_layers,
         main_gpu,
         false,
@@ -658,8 +872,10 @@ fn run_vlm(args: &[String]) -> Result<(), String> {
 }
 
 fn run_audio(args: &[String]) -> Result<(), String> {
-    let model = arg_value(args, "--model").unwrap_or_default();
-    let audio_only_mode = model.trim().is_empty();
+    // Audio command always runs model-free in audio-only runtime mode.
+    // A text LLM --model is not required for transcription/diarization.
+    let model = String::new();
+    let audio_only_mode = true;
     let out_path = arg_value(args, "--out");
     let output_dir_override = arg_value(args, "--output-dir");
     let devices = arg_value(args, "--devices");
@@ -673,8 +889,18 @@ fn run_audio(args: &[String]) -> Result<(), String> {
     let n_batch = parse_i32_arg(args, "--n-batch", 2_048)?;
     let n_ubatch = parse_i32_arg(args, "--n-ubatch", 2_048)?;
     let n_parallel = parse_i32_arg(args, "--n-parallel", 1)?;
+    let n_threads = parse_optional_positive_i32_arg(args, "--threads")?;
+    let n_threads_batch = parse_optional_positive_i32_arg(args, "--threads-batch")?;
     let n_gpu_layers = parse_i32_arg(args, "--n-gpu-layers", -1)?;
     let main_gpu = parse_i32_arg(args, "--main-gpu", 0)?;
+    let ffmpeg_convert_enabled = {
+        let force_convert = has_arg(args, "--ffmpeg-convert");
+        let no_convert = has_arg(args, "--no-ffmpeg-convert");
+        if force_convert && no_convert {
+            return Err("choose one: --ffmpeg-convert OR --no-ffmpeg-convert".to_string());
+        }
+        !no_convert
+    };
 
     let mut use_raw_audio = false;
     let mut raw_audio_bytes: Vec<u8> = Vec::new();
@@ -695,6 +921,7 @@ fn run_audio(args: &[String]) -> Result<(), String> {
         let body_obj = body_json
             .as_object_mut()
             .ok_or("--body-json payload must be a JSON object".to_string())?;
+        apply_audio_cli_overrides(args, body_obj)?;
         if let Some(output_dir) = output_dir_override.as_ref() {
             body_obj.insert("output_dir".to_string(), json!(output_dir));
         }
@@ -768,10 +995,9 @@ fn run_audio(args: &[String]) -> Result<(), String> {
             );
         }
 
-        let diarization_models_dir = arg_value(args, "--diarization-models-dir");
+        let diarization_models_dir = arg_value(args, "--diarization-models-dir")
+            .or_else(|| arg_value(args, "--diarization-model-dir"));
         let diarization_hf_repo = arg_value(args, "--diarization-hf-repo");
-        let diarization_device =
-            arg_value(args, "--diarization-device").unwrap_or_else(|| "auto".to_string());
 
         let mut metadata = json!({
             "mode": mode,
@@ -793,9 +1019,10 @@ fn run_audio(args: &[String]) -> Result<(), String> {
         if let Some(repo) = diarization_hf_repo {
             metadata["diarization_hf_repo"] = json!(repo);
         }
-        if has_arg(args, "--diarization-device") {
-            metadata["diarization_device"] = json!(diarization_device);
-        }
+        let metadata_obj = metadata
+            .as_object_mut()
+            .ok_or("audio metadata JSON must be an object".to_string())?;
+        apply_audio_cli_overrides(args, metadata_obj)?;
 
         raw_audio_format_c =
             Some(CString::new(audio_format).map_err(|_| "audio format contains NUL byte".to_string())?);
@@ -806,7 +1033,7 @@ fn run_audio(args: &[String]) -> Result<(), String> {
 
     println!(
         "audio_start model={} devices={} n_ctx={} n_parallel={}",
-        if model.is_empty() { "<empty>" } else { &model },
+        "<audio-only>",
         devices.clone().unwrap_or_else(|| "<default>".to_string()),
         n_ctx,
         n_parallel
@@ -827,6 +1054,7 @@ fn run_audio(args: &[String]) -> Result<(), String> {
     let bridge_res = make_bridge(
         &model,
         None,
+        None,
         devices.as_deref(),
         tensor_split.as_deref(),
         split_mode,
@@ -834,6 +1062,8 @@ fn run_audio(args: &[String]) -> Result<(), String> {
         n_batch,
         n_ubatch,
         n_parallel,
+        n_threads,
+        n_threads_batch,
         n_gpu_layers,
         main_gpu,
         false,
@@ -865,7 +1095,7 @@ fn run_audio(args: &[String]) -> Result<(), String> {
             .as_ref()
             .map(|v| v.as_ptr())
             .unwrap_or(ptr::null());
-        req.ffmpeg_convert = 1;
+        req.ffmpeg_convert = if ffmpeg_convert_enabled { 1 } else { 0 };
         unsafe { llama_server_bridge_audio_transcriptions_raw(bridge.ptr, &req, &mut out) }
     } else {
         let mut req = unsafe { llama_server_bridge_default_audio_request() };
@@ -909,9 +1139,29 @@ fn run_audio(args: &[String]) -> Result<(), String> {
 }
 
 fn run_chat(args: &[String]) -> Result<(), String> {
+    const CHAT_STOP_KEYS: &[&str] = &[
+        "--model",
+        "--prompt",
+        "--markdown",
+        "--out",
+        "--devices",
+        "--tensor-split",
+        "--split-mode",
+        "--n-predict",
+        "--n-ctx",
+        "--n-batch",
+        "--n-ubatch",
+        "--n-parallel",
+        "--threads",
+        "--threads-batch",
+        "--n-gpu-layers",
+        "--main-gpu",
+    ];
+
     let model = arg_value(args, "--model").ok_or("--model is required".to_string())?;
     let markdown = arg_value(args, "--markdown");
-    let user_prompt = arg_value(args, "--prompt");
+    let user_prompt = arg_value_spanned(args, "--prompt", CHAT_STOP_KEYS)
+        .and_then(|s| if s.trim().is_empty() { None } else { Some(s) });
     if markdown.is_none() && user_prompt.is_none() {
         return Err("chat requires --prompt and/or --markdown".to_string());
     }
@@ -928,6 +1178,8 @@ fn run_chat(args: &[String]) -> Result<(), String> {
     let n_batch = parse_i32_arg(args, "--n-batch", 1024)?;
     let n_ubatch = parse_i32_arg(args, "--n-ubatch", 1024)?;
     let n_parallel = parse_i32_arg(args, "--n-parallel", 1)?;
+    let n_threads = parse_optional_positive_i32_arg(args, "--threads")?;
+    let n_threads_batch = parse_optional_positive_i32_arg(args, "--threads-batch")?;
     let n_gpu_layers = parse_i32_arg(args, "--n-gpu-layers", -1)?;
     let main_gpu = parse_i32_arg(args, "--main-gpu", 0)?;
 
@@ -966,6 +1218,7 @@ fn run_chat(args: &[String]) -> Result<(), String> {
     let bridge = make_bridge(
         &model,
         None,
+        None,
         devices.as_deref(),
         tensor_split.as_deref(),
         split_mode,
@@ -973,6 +1226,8 @@ fn run_chat(args: &[String]) -> Result<(), String> {
         n_batch,
         n_ubatch,
         n_parallel,
+        n_threads,
+        n_threads_batch,
         n_gpu_layers,
         main_gpu,
         false,
@@ -1081,11 +1336,14 @@ fn run_embed(args: &[String]) -> Result<(), String> {
     let n_batch = parse_i32_arg(args, "--n-batch", 2048)?;
     let n_ubatch = parse_i32_arg(args, "--n-ubatch", 2048)?;
     let n_parallel = parse_i32_arg(args, "--n-parallel", 1)?;
+    let n_threads = parse_optional_positive_i32_arg(args, "--threads")?;
+    let n_threads_batch = parse_optional_positive_i32_arg(args, "--threads-batch")?;
     let n_gpu_layers = parse_i32_arg(args, "--n-gpu-layers", -1)?;
     let main_gpu = parse_i32_arg(args, "--main-gpu", 0)?;
 
     let bridge = make_bridge(
         &model,
+        None,
         None,
         devices.as_deref(),
         tensor_split.as_deref(),
@@ -1094,6 +1352,8 @@ fn run_embed(args: &[String]) -> Result<(), String> {
         n_batch,
         n_ubatch,
         n_parallel,
+        n_threads,
+        n_threads_batch,
         n_gpu_layers,
         main_gpu,
         true,
@@ -1284,11 +1544,14 @@ fn run_rerank(args: &[String]) -> Result<(), String> {
     let n_batch = parse_i32_arg(args, "--n-batch", 2048)?;
     let n_ubatch = parse_i32_arg(args, "--n-ubatch", 2048)?;
     let n_parallel = parse_i32_arg(args, "--n-parallel", 1)?;
+    let n_threads = parse_optional_positive_i32_arg(args, "--threads")?;
+    let n_threads_batch = parse_optional_positive_i32_arg(args, "--threads-batch")?;
     let n_gpu_layers = parse_i32_arg(args, "--n-gpu-layers", -1)?;
     let main_gpu = parse_i32_arg(args, "--main-gpu", 0)?;
 
     let bridge = make_bridge(
         &model,
+        None,
         None,
         devices.as_deref(),
         tensor_split.as_deref(),
@@ -1297,6 +1560,8 @@ fn run_rerank(args: &[String]) -> Result<(), String> {
         n_batch,
         n_ubatch,
         n_parallel,
+        n_threads,
+        n_threads_batch,
         n_gpu_layers,
         main_gpu,
         true,

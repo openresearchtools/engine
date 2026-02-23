@@ -38,6 +38,7 @@ struct Args {
     n_predict: i32,
     n_ctx_total: u32,
     n_threads: i32,
+    n_threads_batch: i32,
     batch_size: u32,
     parallel: usize,
     max_retries: usize,
@@ -46,6 +47,7 @@ struct Args {
     split_mode: i32,
     n_gpu_layers: i32,
     main_gpu: i32,
+    mmproj_use_gpu: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +62,7 @@ struct ImageArgs {
     n_predict: i32,
     n_ctx_total: u32,
     n_threads: i32,
+    n_threads_batch: i32,
     batch_size: u32,
     max_retries: usize,
     devices: Option<String>,
@@ -67,6 +70,7 @@ struct ImageArgs {
     split_mode: i32,
     n_gpu_layers: i32,
     main_gpu: i32,
+    mmproj_use_gpu: i32,
 }
 
 #[derive(Debug)]
@@ -116,6 +120,7 @@ impl SharedBridge {
         mmproj_path: &Path,
         n_ctx_total: u32,
         n_threads: i32,
+        n_threads_batch: i32,
         batch_size: u32,
         parallel: usize,
         devices: Option<&str>,
@@ -123,6 +128,7 @@ impl SharedBridge {
         split_mode: i32,
         n_gpu_layers: i32,
         main_gpu: i32,
+        mmproj_use_gpu: i32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         prepare_windows_bridge_runtime_paths();
 
@@ -139,11 +145,11 @@ impl SharedBridge {
         params.n_ubatch = batch_size as i32;
         params.n_parallel = parallel as i32;
         params.n_threads = n_threads;
-        params.n_threads_batch = n_threads;
+        params.n_threads_batch = n_threads_batch;
         params.n_gpu_layers = n_gpu_layers;
         params.main_gpu = main_gpu;
         params.no_kv_offload = 0;
-        params.mmproj_use_gpu = 1;
+        params.mmproj_use_gpu = mmproj_use_gpu;
         params.cache_ram_mib = 0;
         params.seed = -1;
         params.ctx_shift = 1;
@@ -288,12 +294,14 @@ Options:
   --n-predict       Max new tokens per page (default: 5000).
   --n-ctx           Total context size (default: 32768).
   --threads         CPU threads (default: 8).
+  --threads-batch   CPU batch threads (default: same as --threads).
   --batch-size      Eval chunk size (default: 2048).
   --parallel        Concurrent slots/pages (default: 4).
   --max-retries     Per-page retries for non-EOS/truncation/loop (default: 2).
   --devices         Optional backend devices CSV (e.g. 0,1 or none).
   --n-gpu-layers    GPU layers to offload (default: -1).
   --main-gpu        Primary GPU index (default: 0).
+  --mmproj-use-gpu  MMProj device selection: 1=GPU (default), 0=CPU.
   --split-mode      Tensor split mode: none|layer|row.
   --tensor-split    Tensor split ratios CSV (e.g. 0.6,0.4).
   -h, --help        Show this help.
@@ -307,6 +315,60 @@ Output behavior:
 
 fn has_flag(args: &[String], key: &str) -> bool {
     args.iter().any(|a| a == key)
+}
+
+const PROMPT_STOP_KEYS: &[&str] = &[
+    "--pdf",
+    "--pdfium-lib",
+    "--pdfium-dll",
+    "--image",
+    "--model",
+    "--mmproj",
+    "--out-md",
+    "--out",
+    "--out-dir",
+    "--pages",
+    "--scale",
+    "--oversample",
+    "--prompt",
+    "--n-predict",
+    "--n-ctx",
+    "--threads",
+    "--threads-batch",
+    "--batch-size",
+    "--parallel",
+    "--max-retries",
+    "--devices",
+    "--tensor-split",
+    "--split-mode",
+    "--n-gpu-layers",
+    "--main-gpu",
+    "--mmproj-use-gpu",
+    "-h",
+    "--help",
+];
+
+fn parse_spanned_arg_value(
+    argv: &[String],
+    flag_index: usize,
+    flag_name: &str,
+    stop_keys: &[&str],
+) -> Result<(String, usize), String> {
+    let value_start = flag_index + 1;
+    if value_start >= argv.len() {
+        return Err(format!("{flag_name} requires a value"));
+    }
+
+    let mut value_end = value_start;
+    while value_end + 1 < argv.len() {
+        let next = argv[value_end + 1].as_str();
+        if stop_keys.contains(&next) {
+            break;
+        }
+        value_end += 1;
+    }
+
+    Ok((argv[value_start..=value_end].join(" "), value_end))
 }
 
 fn split_mode_arg_to_i32(value: &str) -> Result<i32, String> {
@@ -452,6 +514,7 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
     let mut n_predict: i32 = 5000;
     let mut n_ctx_total: u32 = 32768;
     let mut n_threads: i32 = 8;
+    let mut n_threads_batch: Option<i32> = None;
     let mut batch_size: u32 = 2048;
     let mut max_retries: usize = 2;
     let mut devices: Option<String> = None;
@@ -459,6 +522,7 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
     let mut split_mode: i32 = -1;
     let mut n_gpu_layers: i32 = -1;
     let mut main_gpu: i32 = 0;
+    let mut mmproj_use_gpu: i32 = 1;
 
     let mut i = 1usize;
     while i < argv.len() {
@@ -517,11 +581,10 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
                     .map_err(|_| format!("Invalid --oversample value: {}", argv[i]))?;
             }
             "--prompt" => {
-                i += 1;
-                if i >= argv.len() {
-                    return Err("--prompt requires a value".to_string());
-                }
-                prompt = argv[i].clone();
+                let (value, last_idx) =
+                    parse_spanned_arg_value(argv, i, "--prompt", PROMPT_STOP_KEYS)?;
+                prompt = value;
+                i = last_idx;
             }
             "--n-predict" => {
                 i += 1;
@@ -549,6 +612,17 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
                 n_threads = argv[i]
                     .parse::<i32>()
                     .map_err(|_| format!("Invalid --threads value: {}", argv[i]))?;
+            }
+            "--threads-batch" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--threads-batch requires a value".to_string());
+                }
+                n_threads_batch = Some(
+                    argv[i]
+                        .parse::<i32>()
+                        .map_err(|_| format!("Invalid --threads-batch value: {}", argv[i]))?,
+                );
             }
             "--batch-size" => {
                 i += 1;
@@ -607,6 +681,15 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
                     .parse::<i32>()
                     .map_err(|_| format!("Invalid --main-gpu value: {}", argv[i]))?;
             }
+            "--mmproj-use-gpu" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--mmproj-use-gpu requires a value".to_string());
+                }
+                mmproj_use_gpu = argv[i]
+                    .parse::<i32>()
+                    .map_err(|_| format!("Invalid --mmproj-use-gpu value: {}", argv[i]))?;
+            }
             "--parallel" => {
                 i += 1;
                 if i >= argv.len() {
@@ -634,11 +717,18 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
     if n_threads <= 0 {
         return Err("--threads must be > 0".to_string());
     }
+    let n_threads_batch = n_threads_batch.unwrap_or(n_threads);
+    if n_threads_batch <= 0 {
+        return Err("--threads-batch must be > 0".to_string());
+    }
     if batch_size == 0 {
         return Err("--batch-size must be > 0".to_string());
     }
     if main_gpu < 0 {
         return Err("--main-gpu must be >= 0".to_string());
+    }
+    if mmproj_use_gpu != 0 && mmproj_use_gpu != 1 {
+        return Err("--mmproj-use-gpu must be 0 or 1".to_string());
     }
 
     let image_path = image_path.ok_or_else(|| "--image is required".to_string())?;
@@ -668,6 +758,7 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
         n_predict,
         n_ctx_total,
         n_threads,
+        n_threads_batch,
         batch_size,
         max_retries,
         devices,
@@ -675,6 +766,7 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
         split_mode,
         n_gpu_layers,
         main_gpu,
+        mmproj_use_gpu,
     })
 }
 
@@ -766,6 +858,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut n_predict: i32 = 5000;
     let mut n_ctx_total: u32 = 32768;
     let mut n_threads: i32 = 8;
+    let mut n_threads_batch: Option<i32> = None;
     let mut batch_size: u32 = 2048;
     let mut parallel: usize = 4;
     let mut max_retries: usize = 2;
@@ -774,6 +867,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut split_mode: i32 = -1;
     let mut n_gpu_layers: i32 = -1;
     let mut main_gpu: i32 = 0;
+    let mut mmproj_use_gpu: i32 = 1;
 
     let mut i = 1usize;
     while i < argv.len() {
@@ -846,11 +940,10 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                     .map_err(|_| format!("Invalid --oversample value: {}", argv[i]))?;
             }
             "--prompt" => {
-                i += 1;
-                if i >= argv.len() {
-                    return Err("--prompt requires a value".to_string());
-                }
-                prompt = argv[i].clone();
+                let (value, last_idx) =
+                    parse_spanned_arg_value(argv, i, "--prompt", PROMPT_STOP_KEYS)?;
+                prompt = value;
+                i = last_idx;
             }
             "--n-predict" => {
                 i += 1;
@@ -878,6 +971,17 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                 n_threads = argv[i]
                     .parse::<i32>()
                     .map_err(|_| format!("Invalid --threads value: {}", argv[i]))?;
+            }
+            "--threads-batch" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--threads-batch requires a value".to_string());
+                }
+                n_threads_batch = Some(
+                    argv[i]
+                        .parse::<i32>()
+                        .map_err(|_| format!("Invalid --threads-batch value: {}", argv[i]))?,
+                );
             }
             "--batch-size" => {
                 i += 1;
@@ -945,6 +1049,15 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                     .parse::<i32>()
                     .map_err(|_| format!("Invalid --main-gpu value: {}", argv[i]))?;
             }
+            "--mmproj-use-gpu" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--mmproj-use-gpu requires a value".to_string());
+                }
+                mmproj_use_gpu = argv[i]
+                    .parse::<i32>()
+                    .map_err(|_| format!("Invalid --mmproj-use-gpu value: {}", argv[i]))?;
+            }
             "-h" | "--help" => return Err(usage().to_string()),
             other => return Err(format!("Unknown argument: {other}\n\n{}", usage())),
         }
@@ -966,6 +1079,10 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     if n_threads <= 0 {
         return Err("--threads must be > 0".to_string());
     }
+    let n_threads_batch = n_threads_batch.unwrap_or(n_threads);
+    if n_threads_batch <= 0 {
+        return Err("--threads-batch must be > 0".to_string());
+    }
     if batch_size == 0 {
         return Err("--batch-size must be > 0".to_string());
     }
@@ -974,6 +1091,9 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     }
     if main_gpu < 0 {
         return Err("--main-gpu must be >= 0".to_string());
+    }
+    if mmproj_use_gpu != 0 && mmproj_use_gpu != 1 {
+        return Err("--mmproj-use-gpu must be 0 or 1".to_string());
     }
 
     let pdf_path = pdf_path.ok_or_else(|| "--pdf is required".to_string())?;
@@ -1021,6 +1141,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         n_predict,
         n_ctx_total,
         n_threads,
+        n_threads_batch,
         batch_size,
         parallel,
         max_retries,
@@ -1029,6 +1150,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         split_mode,
         n_gpu_layers,
         main_gpu,
+        mmproj_use_gpu,
     })
 }
 
@@ -1235,14 +1357,17 @@ fn run_image_to_markdown_cli_from_args(
     println!("out_md: {}", args.output_md.display());
     println!("render: scale={} oversample={}", args.scale, args.oversample);
     println!(
-        "inference: parallel=1 ctx={} batch={} n_predict={} retries={} devices={} n_gpu_layers={} main_gpu={} split_mode={} tensor_split={}",
+        "inference: parallel=1 ctx={} batch={} n_predict={} retries={} threads={} threads_batch={} devices={} n_gpu_layers={} main_gpu={} mmproj_use_gpu={} split_mode={} tensor_split={}",
         args.n_ctx_total,
         args.batch_size,
         args.n_predict,
         args.max_retries,
+        args.n_threads,
+        args.n_threads_batch,
         args.devices.as_deref().unwrap_or("<default>"),
         args.n_gpu_layers,
         args.main_gpu,
+        args.mmproj_use_gpu,
         args.split_mode,
         args.tensor_split.as_deref().unwrap_or("<default>")
     );
@@ -1265,6 +1390,7 @@ fn run_image_to_markdown_cli_from_args(
         &args.mmproj_path,
         args.n_ctx_total,
         args.n_threads,
+        args.n_threads_batch,
         args.batch_size,
         1,
         args.devices.as_deref(),
@@ -1272,6 +1398,7 @@ fn run_image_to_markdown_cli_from_args(
         args.split_mode,
         args.n_gpu_layers,
         args.main_gpu,
+        args.mmproj_use_gpu,
     )?;
 
     let started = Instant::now();
@@ -1369,15 +1496,18 @@ pub fn run_pdf_to_markdown_cli_from_args(argv: &[String]) -> Result<(), Box<dyn 
     println!("out_md: {}", args.output_md.display());
     println!("render: scale={} oversample={}", args.scale, args.oversample);
     println!(
-        "inference: parallel={} ctx={} batch={} n_predict={} retries={} devices={} n_gpu_layers={} main_gpu={} split_mode={} tensor_split={}",
+        "inference: parallel={} ctx={} batch={} n_predict={} retries={} threads={} threads_batch={} devices={} n_gpu_layers={} main_gpu={} mmproj_use_gpu={} split_mode={} tensor_split={}",
         args.parallel,
         args.n_ctx_total,
         args.batch_size,
         args.n_predict,
         args.max_retries,
+        args.n_threads,
+        args.n_threads_batch,
         args.devices.as_deref().unwrap_or("<default>"),
         args.n_gpu_layers,
         args.main_gpu,
+        args.mmproj_use_gpu,
         args.split_mode,
         args.tensor_split.as_deref().unwrap_or("<default>")
     );
@@ -1392,6 +1522,7 @@ pub fn run_pdf_to_markdown_cli_from_args(argv: &[String]) -> Result<(), Box<dyn 
         &args.mmproj_path,
         args.n_ctx_total,
         args.n_threads,
+        args.n_threads_batch,
         args.batch_size,
         args.parallel,
         args.devices.as_deref(),
@@ -1399,6 +1530,7 @@ pub fn run_pdf_to_markdown_cli_from_args(argv: &[String]) -> Result<(), Box<dyn 
         args.split_mode,
         args.n_gpu_layers,
         args.main_gpu,
+        args.mmproj_use_gpu,
     )?);
 
     let mut q = VecDeque::new();

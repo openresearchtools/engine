@@ -1147,9 +1147,14 @@ struct llama_server_bridge * llama_server_bridge_create(const struct llama_serve
         bridge->routes->update_meta(bridge->ctx);
     }
 
-    bridge->loop_thread = std::thread([raw = bridge.get()]() {
-        raw->ctx.start_loop();
-    });
+    // In audio-only/no-model mode, the transcription route runs directly and does
+    // not require the server task loop. Starting it without a loaded model can
+    // hit model-dependent update paths in server_context.
+    if (has_model_path) {
+        bridge->loop_thread = std::thread([raw = bridge.get()]() {
+            raw->ctx.start_loop();
+        });
+    }
 
     return bridge.release();
 }

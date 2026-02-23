@@ -63,6 +63,16 @@ Start here to confirm what the runtime can see (CPU/GPU devices) before you tune
 engine.exe list-devices
 ```
 
+### Common runtime flags (all bridge commands)
+
+These runtime controls are available across `chat`, `vlm`, `audio`, `embed`, `rerank`, and `pdfvlm`:
+
+* `--main-gpu <int>` (default is `0`)
+* `--n-gpu-layers <int>` (`-1` = full offload where supported)
+* `--devices <csv>` (for example `0`, `1`, `0,1`, or `none` for CPU-only)
+* `--split-mode <none|layer|row>` and `--tensor-split <csv>` (multi-GPU split)
+* `--threads <int>` and `--threads-batch <int>` (CPU compute thread controls)
+
 ### Chat
 
 This runs a direct prompt-based chat request with full GPU offload on a single GPU. It’s a good baseline test for “does the model run and is the GPU config correct?”
@@ -117,6 +127,7 @@ engine.exe vlm `
   --mmproj ".\models\mmproj.gguf" `
   --image ".\page.png" `
   --out ".\page.md" `
+  --mmproj-use-gpu 1 `
   --n-gpu-layers -1 `
   --main-gpu 0
 ```
@@ -130,9 +141,15 @@ engine.exe vlm `
   --mmproj ".\models\mmproj.gguf" `
   --image ".\image.png" `
   --prompt "Describe this image and summarize key elements." `
+  --mmproj-use-gpu 0 `
   --n-gpu-layers -1 `
   --main-gpu 0
 ```
+
+`--mmproj-use-gpu` controls where the vision projector runs:
+
+* `1` (default): run mmproj on GPU
+* `0`: run mmproj on CPU
 
 ### Multi‑GPU split
 
@@ -164,6 +181,8 @@ ENGINE’s audio path is designed for two common workflows:
 You can invoke the audio pipeline in either of these forms:
 
 * `engine audio ...` or `engine bridge audio ...`
+* Audio modes are always executed in audio-only runtime mode. A text `--model` GGUF is not required.
+* If `--model` is provided on `engine audio`, it is ignored for compatibility.
 
 Output behavior:
 
@@ -211,20 +230,69 @@ You can also optionally set:
 A repository of converted GGUF diarization models is available here:
 [https://huggingface.co/openresearchtools/speaker-diarization-community-1-GGUF](https://huggingface.co/openresearchtools/speaker-diarization-community-1-GGUF)
 
-### Advanced diarization knobs (JSON only via `--body-json`)
+### Advanced audio knobs (CLI flags or `--body-json`)
 
-Some diarization controls are only configurable via a JSON request body:
+Advanced audio controls are available directly as `engine.exe audio` flags (including raw-bytes `--audio-file` runs), and can also be passed in request JSON via `--body-json`.
 
-* `diarization_backend` (`native_cpp`/`auto`)
-* `diarization_offline`
-* `diarization_embedding_min_segment_duration_sec`
-* `diarization_embedding_max_segments_per_speaker`
-* `diarization_min_duration_off_sec`
-* `speaker_seg_max_gap_sec`
-* `speaker_seg_max_words`
-* `speaker_seg_max_duration_sec`
-* `speaker_seg_split_on_hard_break`
-* `aligner_plda_sim_threshold`
+Whisper controls:
+
+* `--whisper-threads`, `--whisper-processors`, `--whisper-max-len`, `--whisper-audio-ctx`
+* `--whisper-best-of`, `--whisper-beam-size`, `--whisper-temperature`
+* `--whisper-language`, `--whisper-prompt`, `--whisper-translate`
+* `--whisper-no-fallback`, `--whisper-suppress-nst`
+* `--whisper-no-gpu`, `--whisper-gpu-device`, `--whisper-flash-attn`, `--whisper-no-flash-attn`
+* `--whisper-offline`
+* `--whisper-word-time-offset-sec`
+
+Diarization and alignment controls:
+
+* `--diarization-backend` (`native_cpp`/`auto`)
+* `--diarization-offline`
+* `--diarization-embedding-min-segment-duration-sec`
+* `--diarization-embedding-max-segments-per-speaker`
+* `--diarization-min-duration-off-sec`
+* `--speaker-seg-max-gap-sec`
+* `--speaker-seg-max-words`
+* `--speaker-seg-max-duration-sec`
+* `--speaker-seg-split-on-hard-break`, `--speaker-seg-no-split-on-hard-break`
+* `--aligner-plda-sim-threshold`
+
+Pipeline/runtime controls:
+
+* `--audio-only` (legacy compatibility flag; optional no-op)
+* `--ffmpeg-convert`, `--no-ffmpeg-convert`
+* `--transcription-backend`
+* `--seconds-per-timeline-token`, `--source-audio-seconds`
+
+### Custom Whisper model: timestamp alignment tuning (diarization)
+
+If you use a custom Whisper model and diarized transcript speaker turns look shifted relative to words/subtitles, tune:
+
+* `--whisper-word-time-offset-sec` (primary alignment control)
+* `--source-audio-seconds` (optional timeline clamp)
+* `--seconds-per-timeline-token` (fallback timing when word timestamps are sparse)
+
+Recommended tuning flow:
+
+* Start with `--whisper-word-time-offset-sec 0.73` (default behavior).
+* Run a known audio sample in `--mode transcript` and inspect where speaker boundaries drift.
+* Increase offset if words appear too early; decrease offset if words appear too late.
+* Adjust in small steps (for example `0.05`-`0.15`) until speaker turns and transcript timing match.
+* If needed, set `--source-audio-seconds` to the known audio duration to prevent end-of-file overshoot.
+
+Example with a custom local Whisper model:
+
+```powershell
+engine.exe audio `
+  --audio-file ".\meeting.mp3" `
+  --output-dir ".\outputs" `
+  --mode transcript `
+  --custom auto `
+  --whisper-model ".\models\my-custom-whisper.bin" `
+  --diarization-models-dir ".\models\diarization" `
+  --whisper-word-time-offset-sec 0.85 `
+  --source-audio-seconds 1032.4
+```
 
 ### Audio examples
 
@@ -233,7 +301,6 @@ This is a straightforward “speech mode” transcription run (no diarization). 
 ```powershell
 # speech mode, default custom
 engine.exe audio `
-  --model ".\models\model.gguf" `
   --audio-file ".\sample.mp3" `
   --output-dir ".\outputs" `
   --audio-format mp3 `
@@ -247,7 +314,6 @@ This produces subtitle-style output, where you can control the window size via `
 ```powershell
 # subtitle mode, 4.5-second windowing via custom
 engine.exe audio `
-  --model ".\models\model.gguf" `
   --audio-file ".\sample.wav" `
   --output-dir ".\outputs" `
   --mode subtitle `
@@ -260,7 +326,6 @@ This generates a speaker-aware transcript by enabling diarization. With `--custo
 ```powershell
 # transcript mode, auto speaker count, local diarization models
 engine.exe audio `
-  --model ".\models\model.gguf" `
   --audio-file ".\meeting.mp3" `
   --output-dir ".\outputs" `
   --mode transcript `
@@ -277,7 +342,6 @@ This example also runs a diarized transcript, but forces a fixed speaker count (
 ```powershell
 # transcript mode, fixed 3 speakers, diarization from HF
 engine.exe audio `
-  --model ".\models\model.gguf" `
   --audio-file ".\meeting.mp3" `
   --output-dir ".\outputs" `
   --mode transcript `
@@ -288,11 +352,11 @@ engine.exe audio `
   --diarization-device cuda
 ```
 
-If you need finer diarization tuning (for example segmentation thresholds), pass a JSON request body.
+If you prefer a JSON request payload, you can still pass the same advanced controls through `--body-json`.
 
 ```powershell
-# advanced diarization knobs via body JSON
-engine.exe audio --model ".\models\model.gguf" --body-json ".\audio_request.json"
+# advanced audio knobs via body JSON
+engine.exe audio --body-json ".\audio_request.json"
 ```
 
 ---
@@ -321,7 +385,12 @@ engine.exe pdfvlm `
   --pdfium-lib ".\vendor\pdfium\pdfium.dll" `
   --model ".\models\vision.gguf" `
   --mmproj ".\models\mmproj.gguf" `
-  --out ".\paper_vlm.md"
+  --out ".\paper_vlm.md" `
+  --threads 32 `
+  --threads-batch 32 `
+  --mmproj-use-gpu 1 `
+  --n-gpu-layers -1 `
+  --main-gpu 0
 
 # Option B: bundled app - if PDFium is under vendor/pdfium next to engine(.exe), omit --pdfium-lib
 engine.exe pdfvlm --pdf ".\paper.pdf" --model ".\models\vision.gguf" --mmproj ".\models\mmproj.gguf" --out ".\paper_vlm.md"
