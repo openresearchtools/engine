@@ -1,6 +1,6 @@
-﻿NVIDIA CUDA Runtime Components (Windows CUDA 13)
+NVIDIA CUDA Runtime Components (Windows CUDA 13)
 
-This ENGINE Windows CUDA build includes NVIDIA CUDA runtime libraries for GPU acceleration in the llama bridge path.
+This Openresearchtools-Engine Windows CUDA build includes NVIDIA CUDA runtime libraries for GPU acceleration in the llama bridge path.
 
 Shipped NVIDIA files in the bundle root:
 - cublas64_13.dll

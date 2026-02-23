@@ -3,6 +3,6 @@ FFmpeg source/license provenance (Ubuntu x64 bundle)
 - Runtime distribution source: https://github.com/BtbN/FFmpeg-Builds
 - Runtime distribution release API: https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest
 - Asset name used by workflow: ffmpeg-master-latest-linux64-lgpl-shared.tar.xz
-- Workflow reference: ENGINE/.github/workflows/ubuntu-x64.yml
+- Workflow reference: Openresearchtools-Engine/.github/workflows/ubuntu-x64.yml
 - Upstream FFmpeg source repository: https://github.com/FFmpeg/FFmpeg
 - LGPL text source: https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/COPYING.LGPLv2.1

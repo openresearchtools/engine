@@ -1,4 +1,4 @@
-ENGINE Release Key Licenses
+Openresearchtools-Engine Release Key Licenses
 ===========================
 
 This file aggregates key runtime/release license texts from third_party/licenses/README.md.
@@ -12,7 +12,7 @@ Runtime-staged folders in build outputs also include:
 
 
 -------------------------------------------------------------------------------
-BEGIN: ENGINE [LICENSE]
+BEGIN: Openresearchtools-Engine [LICENSE]
 -------------------------------------------------------------------------------
 
 MIT License
@@ -38,7 +38,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-END: ENGINE
+END: Openresearchtools-Engine
 -------------------------------------------------------------------------------
 
 

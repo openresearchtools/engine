@@ -10,7 +10,7 @@ This repository contains runtime integration code and conversion/parity tooling 
 - Ubuntu x64 Vulkan bundle key licenses: `LICENSES-ubuntu-vulkan.txt`
 - Legacy/default key bundle (full): `LICENSES.txt`
 
-## Runtime (shipped engine)
+## Runtime (shipped Openresearchtools-Engine)
 
 ### 1) llama.cpp
 
@@ -28,7 +28,7 @@ This repository contains runtime integration code and conversion/parity tooling 
 ### 1a) Additional licenses pulled into this app through llama.cpp build
 
 The `llama.cpp` CMake build used by this app aggregates extra third-party licenses into its generated `license.cpp`.
-For the current ENGINE Windows CUDA build, those additional upstream projects are:
+For the current Openresearchtools-Engine Windows CUDA build, those additional upstream projects are:
 
 - Repository: `yhirose/cpp-httplib`
   - Upstream: `https://github.com/yhirose/cpp-httplib`
@@ -161,7 +161,7 @@ Build-note: BoringSSL is fetched by CMake in this build profile (`LLAMA_BUILD_BO
 
 ### 5) docling (reference logic)
 
-- Role: reference for VLM document-conversion behavior used by ENGINE `pdfvlm`.
+- Role: reference for VLM document-conversion behavior used by Openresearchtools-Engine `pdfvlm`.
 - Source: `https://github.com/docling-project/docling`
 - License type: MIT
 - License file: `docling-LICENSE.txt`
@@ -271,7 +271,7 @@ Common notes:
 
 ### 9) NVIDIA CUDA runtime libraries (Windows bundle)
 
-- Role: GPU acceleration runtime libraries used by the CUDA backend in shipped ENGINE binaries.
+- Role: GPU acceleration runtime libraries used by the CUDA backend in shipped Openresearchtools-Engine binaries.
 - Typical shipped files in this project bundle:
   - `cublas64_13.dll`
   - `cublasLt64_13.dll`
@@ -339,7 +339,7 @@ Full transitive tooling export:
 
 ### `clap`
 
-- Role: command-line argument parsing for ENGINE CLI binaries.
+- Role: command-line argument parsing for Openresearchtools-Engine CLI binaries.
 - License type: MIT OR Apache-2.0
 - License files:
   - `clap-LICENSE-MIT.txt`

@@ -1,6 +1,6 @@
 FFmpeg source/license provenance (macOS arm64 bundle)
 
-- Workflow reference: ENGINE/.github/workflows/macos-arm64.yml
+- Workflow reference: Openresearchtools-Engine/.github/workflows/macos-arm64.yml
 - Upstream source repository: https://github.com/FFmpeg/FFmpeg
 - Pinned source tag: n8.0.1
 - Pinned source commit: 894da5ca7d742e4429ffb2af534fcda0103ef593

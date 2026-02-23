@@ -334,10 +334,10 @@ Workflow: `.github/workflows/release-all.yml`
   - Ubuntu x64 Vulkan
   - Windows x64 CUDA (only when `include_cuda=true`)
 - Creates or updates one GitHub Release page and uploads packaged assets:
-  - `engine-win-vulkan-x64.zip`
-  - `engine-macos-arm64-metal.zip`
-  - `engine-ubuntu-x64-vulkan.tar.gz`
-  - `engine-win-cuda-x64.zip` (only when `include_cuda=true`)
+  - `Openresearchtools-Engine-<tag>-windows-x64-vulkan.zip`
+  - `Openresearchtools-Engine-<tag>-macos-arm64-metal.zip`
+  - `Openresearchtools-Engine-<tag>-ubuntu-x64-vulkan.tar.gz`
+  - `Openresearchtools-Engine-<tag>-windows-x64-cuda.zip` (only when `include_cuda=true`)
 - Runtime note used in release page:
   - Windows/Ubuntu artifacts include CPU runtime support.
   - macOS artifact is presented as Metal-focused (Apple Silicon unified-memory GPU path).

@@ -71,7 +71,7 @@ jobs:
           if [[ -n "$input_title" ]]; then
             title="$input_title"
           else
-            title="ENGINE ${tag}"
+            title="Openresearchtools-Engine ${tag}"
           fi
 
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
@@ -154,13 +154,19 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-assets
+          safe_tag="$(echo "$RELEASE_TAG" | tr ' /' '--')"
+          release_prefix="Openresearchtools-Engine-${safe_tag}"
+          win_vulkan_asset="${release_prefix}-windows-x64-vulkan.zip"
+          macos_metal_asset="${release_prefix}-macos-arm64-metal.zip"
+          ubuntu_vulkan_asset="${release_prefix}-ubuntu-x64-vulkan.tar.gz"
+          win_cuda_asset="${release_prefix}-windows-x64-cuda.zip"
 
           if [[ "$INCLUDE_CUDA" == "true" ]]; then
-            (cd dist/engine-win-cuda-x64 && zip -r ../../release-assets/engine-win-cuda-x64.zip .)
+            (cd dist/engine-win-cuda-x64 && zip -r "../../release-assets/${win_cuda_asset}" .)
           fi
-          (cd dist/engine-win-vulkan-x64 && zip -r ../../release-assets/engine-win-vulkan-x64.zip .)
-          (cd dist/engine-macos-arm64-metal && zip -r ../../release-assets/engine-macos-arm64-metal.zip .)
-          tar -C dist/engine-ubuntu-x64-vulkan -czf release-assets/engine-ubuntu-x64-vulkan.tar.gz .
+          (cd dist/engine-win-vulkan-x64 && zip -r "../../release-assets/${win_vulkan_asset}" .)
+          (cd dist/engine-macos-arm64-metal && zip -r "../../release-assets/${macos_metal_asset}" .)
+          tar -C dist/engine-ubuntu-x64-vulkan -czf "release-assets/${ubuntu_vulkan_asset}" .
 
           sha256sum release-assets/* > release-assets/SHA256SUMS.txt
 
@@ -169,6 +175,12 @@ jobs:
         run: |
           set -euo pipefail
           base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
+          safe_tag="$(echo "$RELEASE_TAG" | tr ' /' '--')"
+          release_prefix="Openresearchtools-Engine-${safe_tag}"
+          win_vulkan_asset="${release_prefix}-windows-x64-vulkan.zip"
+          macos_metal_asset="${release_prefix}-macos-arm64-metal.zip"
+          ubuntu_vulkan_asset="${release_prefix}-ubuntu-x64-vulkan.tar.gz"
+          win_cuda_asset="${release_prefix}-windows-x64-cuda.zip"
           {
             echo "# ${RELEASE_TITLE}"
             echo
@@ -177,11 +189,11 @@ jobs:
             echo "| System | Backend | Asset | Download |"
             echo "|---|---|---|---|"
             if [[ "$INCLUDE_CUDA" == "true" ]]; then
-              echo "| Windows x64 | CUDA 13.1 + CPU | \`engine-win-cuda-x64.zip\` | [Download](${base_url}/engine-win-cuda-x64.zip) |"
+              echo "| Windows x64 | CUDA 13.1 + CPU | \`${win_cuda_asset}\` | [Download](${base_url}/${win_cuda_asset}) |"
             fi
-            echo "| Windows x64 | Vulkan + CPU | \`engine-win-vulkan-x64.zip\` | [Download](${base_url}/engine-win-vulkan-x64.zip) |"
-            echo "| macOS arm64 (Apple Silicon) | Metal (GPU) | \`engine-macos-arm64-metal.zip\` | [Download](${base_url}/engine-macos-arm64-metal.zip) |"
-            echo "| Ubuntu x64 | Vulkan + CPU | \`engine-ubuntu-x64-vulkan.tar.gz\` | [Download](${base_url}/engine-ubuntu-x64-vulkan.tar.gz) |"
+            echo "| Windows x64 | Vulkan + CPU | \`${win_vulkan_asset}\` | [Download](${base_url}/${win_vulkan_asset}) |"
+            echo "| macOS arm64 (Apple Silicon) | Metal (GPU) | \`${macos_metal_asset}\` | [Download](${base_url}/${macos_metal_asset}) |"
+            echo "| Ubuntu x64 | Vulkan + CPU | \`${ubuntu_vulkan_asset}\` | [Download](${base_url}/${ubuntu_vulkan_asset}) |"
             echo "| Checksums | SHA256 | \`SHA256SUMS.txt\` | [Download](${base_url}/SHA256SUMS.txt) |"
             echo
             echo "## Runtime Notes"

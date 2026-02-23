@@ -1,8 +1,8 @@
-# ENGINE
+# Openresearchtools-Engine
 
 > **Early-stage repository:** this repo is still evolving quickly. The goal is to deliver a *single, embeddable, local AI runtime* that covers the common building blocks you usually end up wiring together from multiple projects.
 
-ENGINE is a local AI runtime you can embed directly into an application.
+Openresearchtools-Engine is a local AI runtime primarily based on Llama.CPP, that you can embed directly into an application.
 
 It aims to unify chat, vision, embeddings, reranking, audio transcription/diarization, and PDF-to-Markdown in one native stack (Rust + C++), so you don’t have to glue together separate runtimes for each task.
 
@@ -171,7 +171,7 @@ engine.exe chat `
 
 ## Audio: transcription with and without diarization
 
-ENGINE’s audio path is designed for two common workflows:
+Openresearchtools-Engine's audio path is designed for two common workflows:
 
 * **Transcription without diarization** (single-speaker style output) using `--mode speech` or `--mode subtitle`.
 * **Transcription with diarization** (speaker-aware transcript) using `--mode transcript` plus diarization models.
@@ -528,7 +528,7 @@ Build/fetch instructions are in:
 
 ## Acknowledgments
 
-This engine is possible because of the open work done by these projects. We are genuinely grateful to their maintainers and contributors. Without them, this project would not exist.
+Openresearchtools-Engine is possible because of the open work done by these projects. We are genuinely grateful to their maintainers and contributors. Without them, this project would not exist.
 
 * `llama.cpp`: core model runtime, GPU offload controls, KV-cache behavior, multi-GPU split controls, and server-side inference lifecycle patterns used by the bridge and engine orchestration.
 * `whisper.cpp`: transcription pipeline foundations, including audio-to-token flow, timestamp-oriented decoding behavior, and integration patterns for speech tasks.

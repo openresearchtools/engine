@@ -1,4 +1,4 @@
-ENGINE Release Key Licenses
+Openresearchtools-Engine Release Key Licenses
 ===========================
 
 This file aggregates key runtime/release license texts from third_party/licenses/README.md.
@@ -12,7 +12,7 @@ Runtime-staged folders in build outputs also include:
 
 
 -------------------------------------------------------------------------------
-BEGIN: ENGINE [LICENSE]
+BEGIN: Openresearchtools-Engine [LICENSE]
 -------------------------------------------------------------------------------
 
 MIT License
@@ -38,7 +38,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-END: ENGINE
+END: Openresearchtools-Engine
 -------------------------------------------------------------------------------
 
 
@@ -3252,7 +3252,7 @@ BEGIN: nvidia-cuda-runtime-NOTICE [nvidia-cuda-runtime-NOTICE.txt]
 
 NVIDIA CUDA Runtime Components (Windows)
 
-This ENGINE Windows bundle includes NVIDIA CUDA runtime libraries for GPU acceleration in the llama bridge path.
+This Openresearchtools-Engine Windows bundle includes NVIDIA CUDA runtime libraries for GPU acceleration in the llama bridge path.
 
 Shipped NVIDIA files in the bundle:
 - cublas64_13.dll

@@ -1,6 +1,6 @@
 # Third-party layout
 
-This folder stores external source/runtime dependencies used by ENGINE.
+This folder stores external source/runtime dependencies used by Openresearchtools-Engine.
 
 ## Structure
 

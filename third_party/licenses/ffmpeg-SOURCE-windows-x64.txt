@@ -3,6 +3,6 @@ FFmpeg source/license provenance (Windows x64 bundle)
 - Runtime distribution source: https://github.com/BtbN/FFmpeg-Builds
 - Runtime distribution release API: https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest
 - Asset selection pattern: *win64-lgpl-shared*.zip
-- Fetch script used by this repository: ENGINE/build/download-ffmpeg-lgpl-win-x64.ps1
+- Fetch script used by this repository: Openresearchtools-Engine/build/download-ffmpeg-lgpl-win-x64.ps1
 - Upstream FFmpeg source repository: https://github.com/FFmpeg/FFmpeg
 - LGPL text source: https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/COPYING.LGPLv2.1
