@@ -365,7 +365,7 @@ engine.exe audio --body-json ".\audio_request.json"
 
 For PDFs, you generally have two paths:
 
-* Use the **fast digital extractor** when the PDF has good text structure.
+* Use the **fast digital extractor** when the PDF has good text structure. (Important note, tables, formulas and any special layouts will be rendered in line, not great for complex tables, but extremely fast).
 * Use the **VLM conversion** when the PDF is scanned, layout-heavy, or loses structure in digital extraction.
 
 Fast digital PDF conversion:
