@@ -170,6 +170,113 @@ jobs:
 
           sha256sum release-assets/* > release-assets/SHA256SUMS.txt
 
+      - name: Generate Runtime Manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          safe_tag="$(echo "$RELEASE_TAG" | tr ' /' '--')"
+          release_prefix="Openresearchtools-Engine-${safe_tag}"
+          win_vulkan_asset="${release_prefix}-windows-x64-vulkan.zip"
+          macos_metal_asset="${release_prefix}-macos-arm64-metal.zip"
+          ubuntu_vulkan_asset="${release_prefix}-ubuntu-x64-vulkan.tar.gz"
+          win_cuda_asset="${release_prefix}-windows-x64-cuda.zip"
+          generated_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+          RELEASE_TAG="$RELEASE_TAG" \
+          GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+          INCLUDE_CUDA="$INCLUDE_CUDA" \
+          WIN_VULKAN_ASSET="$win_vulkan_asset" \
+          MACOS_METAL_ASSET="$macos_metal_asset" \
+          UBUNTU_VULKAN_ASSET="$ubuntu_vulkan_asset" \
+          WIN_CUDA_ASSET="$win_cuda_asset" \
+          GENERATED_AT="$generated_at" \
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tag = os.environ["RELEASE_TAG"]
+          include_cuda = os.environ.get("INCLUDE_CUDA", "").lower() == "true"
+          generated_at = os.environ["GENERATED_AT"]
+          dist_dir = Path("release-assets")
+          sha_file = dist_dir / "SHA256SUMS.txt"
+          sha = {}
+          if sha_file.exists():
+              for line in sha_file.read_text(encoding="utf-8").splitlines():
+                  line = line.strip()
+                  if not line:
+                      continue
+                  parts = line.split(maxsplit=1)
+                  if len(parts) != 2:
+                      continue
+                  digest, name = parts
+                  sha[Path(name).name] = digest
+
+          assets = []
+
+          def add_asset(asset_id, platform, backend, archive, filename):
+              path = dist_dir / filename
+              if not path.exists():
+                  return
+              assets.append(
+                  {
+                      "id": asset_id,
+                      "platform": platform,
+                      "backend": backend,
+                      "archive": archive,
+                      "file_name": filename,
+                      "url": f"https://github.com/{repo}/releases/download/{tag}/{filename}",
+                      "sha256": sha.get(filename, ""),
+                  }
+              )
+
+          add_asset(
+              "windows-x64-vulkan",
+              "windows-x64",
+              "vulkan",
+              "zip",
+              os.environ["WIN_VULKAN_ASSET"],
+          )
+          add_asset(
+              "macos-arm64-metal",
+              "macos-arm64",
+              "metal",
+              "zip",
+              os.environ["MACOS_METAL_ASSET"],
+          )
+          add_asset(
+              "ubuntu-x64-vulkan",
+              "ubuntu-x64",
+              "vulkan",
+              "tar.gz",
+              os.environ["UBUNTU_VULKAN_ASSET"],
+          )
+          if include_cuda:
+              add_asset(
+                  "windows-x64-cuda",
+                  "windows-x64",
+                  "cuda",
+                  "zip",
+                  os.environ["WIN_CUDA_ASSET"],
+              )
+
+          manifest = {
+              "schema_version": 1,
+              "project": "Openresearchtools-Engine",
+              "repository": repo,
+              "tag": tag,
+              "generated_at": generated_at,
+              "release_url": f"https://github.com/{repo}/releases/tag/{tag}",
+              "assets": assets,
+          }
+
+          (dist_dir / "engine-manifest.json").write_text(
+              json.dumps(manifest, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
       - name: Generate Release Notes
         shell: bash
         run: |
@@ -194,6 +301,7 @@ jobs:
             echo "| Windows x64 | Vulkan + CPU | \`${win_vulkan_asset}\` | [Download](${base_url}/${win_vulkan_asset}) |"
             echo "| macOS arm64 (Apple Silicon) | Metal (GPU) | \`${macos_metal_asset}\` | [Download](${base_url}/${macos_metal_asset}) |"
             echo "| Ubuntu x64 | Vulkan + CPU | \`${ubuntu_vulkan_asset}\` | [Download](${base_url}/${ubuntu_vulkan_asset}) |"
+            echo "| Runtime manifest | Metadata JSON | \`engine-manifest.json\` | [Download](${base_url}/engine-manifest.json) |"
             echo "| Checksums | SHA256 | \`SHA256SUMS.txt\` | [Download](${base_url}/SHA256SUMS.txt) |"
             echo
             echo "## Runtime Notes"
