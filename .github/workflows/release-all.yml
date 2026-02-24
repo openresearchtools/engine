@@ -121,6 +121,7 @@ jobs:
       RELEASE_PRERELEASE: ${{ inputs.prerelease }}
       INCLUDE_CUDA: ${{ inputs.include_cuda }}
       GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Download Build Artifacts
         uses: actions/download-artifact@v4
