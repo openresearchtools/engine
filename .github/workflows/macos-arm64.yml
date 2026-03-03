@@ -77,8 +77,32 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          brew update
-          brew install ninja nasm pkg-config
+          brew_retry() {
+            local attempts="$1"
+            shift
+            local n=1
+            local sleep_s=5
+            while true; do
+              if "$@"; then
+                return 0
+              fi
+              if (( n >= attempts )); then
+                return 1
+              fi
+              echo "retry $n/$attempts failed: $*"
+              sleep "$sleep_s"
+              n=$((n + 1))
+              sleep_s=$((sleep_s * 2))
+            done
+          }
+
+          # Transient GitHub/Homebrew outages are common; do not fail the build
+          # if update fails. We still install required tools strictly.
+          if ! brew_retry 3 env HOMEBREW_NO_AUTO_UPDATE= brew update --quiet; then
+            echo "brew update failed after retries; continuing with existing Homebrew metadata"
+          fi
+
+          brew_retry 3 env HOMEBREW_NO_AUTO_UPDATE=1 brew install ninja nasm pkg-config
 
       - name: Build FFmpeg (macOS arm64 LGPL shared, pinned)
         shell: bash
