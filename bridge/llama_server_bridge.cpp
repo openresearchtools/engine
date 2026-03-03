@@ -22,6 +22,13 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #ifdef LLAMA_SERVER_BRIDGE_USE_FFMPEG
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -46,6 +53,9 @@ struct llama_server_bridge {
     std::string last_error;
 
     std::string model_name;
+    int32_t primary_device_index = -1;
+    std::string primary_device_name;
+    bool primary_device_is_gpu = false;
     bool backend_acquired = false;
 };
 
@@ -175,10 +185,14 @@ static bool parse_devices_csv(
 
     out_devices.clear();
     if (devices_csv == nullptr) {
+        // Default to CPU-only unless the caller explicitly selects devices.
+        out_devices.push_back(nullptr);
         return true;
     }
     const std::string raw = trim_copy(devices_csv);
     if (raw.empty()) {
+        // Empty devices behaves the same as unset: CPU-only.
+        out_devices.push_back(nullptr);
         return true;
     }
 
@@ -295,6 +309,123 @@ static bool parse_split_mode(int32_t input, enum llama_split_mode * out_mode, st
         default:
             error = "invalid split_mode, expected -1/0/1/2";
             return false;
+    }
+}
+
+static bool is_gpu_device_type(enum ggml_backend_dev_type type) {
+    return type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU;
+}
+
+static int32_t find_backend_device_index(ggml_backend_dev_t target) {
+    if (target == nullptr) {
+        return -1;
+    }
+    const size_t n = ggml_backend_dev_count();
+    for (size_t i = 0; i < n; ++i) {
+        if (ggml_backend_dev_get(i) == target) {
+            return static_cast<int32_t>(i);
+        }
+    }
+    return -1;
+}
+
+static void set_env_if_unset(const char * key, const std::string & value) {
+    if (key == nullptr || key[0] == '\0' || value.empty()) {
+        return;
+    }
+#if defined(_WIN32)
+    // Use process-wide env APIs on Windows so all runtimes in-process
+    // (including ggml/llama DLLs) observe the same value.
+    char existing[2] = {0, 0};
+    const DWORD n = GetEnvironmentVariableA(key, existing, static_cast<DWORD>(sizeof(existing)));
+    if (n > 0) {
+        return;
+    }
+    (void) SetEnvironmentVariableA(key, value.c_str());
+    (void) _putenv_s(key, value.c_str());
+#else
+    const char * cur = std::getenv(key);
+    if (cur != nullptr && cur[0] != '\0') {
+        return;
+    }
+    setenv(key, value.c_str(), 0);
+#endif
+}
+
+static bool is_devices_unset_or_none(const char * devices_csv) {
+    if (devices_csv == nullptr) {
+        return true;
+    }
+    const std::string raw = trim_copy(devices_csv);
+    return raw.empty() || raw == "none" || raw == "NONE";
+}
+
+static bool is_devices_unset(const char * devices_csv) {
+    if (devices_csv == nullptr) {
+        return true;
+    }
+    return trim_copy(devices_csv).empty();
+}
+
+static int32_t find_first_gpu_backend_device_index(void) {
+    const size_t n = ggml_backend_dev_count();
+    for (size_t i = 0; i < n; ++i) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (dev == nullptr) {
+            continue;
+        }
+        if (is_gpu_device_type(ggml_backend_dev_type(dev))) {
+            return static_cast<int32_t>(i);
+        }
+    }
+    return -1;
+}
+
+static bool looks_like_zero_initialized_params(const llama_server_bridge_params * p) {
+    if (p == nullptr) {
+        return false;
+    }
+    return p->n_ctx == 0
+        && p->n_batch == 0
+        && p->n_ubatch == 0
+        && p->n_parallel == 0
+        && p->n_threads == 0
+        && p->n_threads_batch == 0
+        && p->n_gpu_layers == 0
+        && p->no_kv_offload == 0
+        && p->mmproj_use_gpu == 0
+        && p->cache_ram_mib == 0
+        && p->seed == 0
+        && p->ctx_shift == 0
+        && p->kv_unified == 0
+        && p->split_mode == 0
+        && p->embedding == 0
+        && p->reranking == 0
+        && p->pooling_type == 0;
+}
+
+static void apply_audio_runtime_device_defaults(const llama_server_bridge * bridge, json & body) {
+    if (bridge == nullptr || !body.is_object()) {
+        return;
+    }
+
+    const auto it_no_gpu = body.find("whisper_no_gpu");
+    const bool whisper_no_gpu = it_no_gpu != body.end() ? json_value(body, "whisper_no_gpu", false) : false;
+
+    if (body.find("whisper_gpu_device") == body.end()) {
+        if (!whisper_no_gpu && bridge->primary_device_is_gpu && bridge->primary_device_index >= 0) {
+            body["whisper_gpu_device"] = bridge->primary_device_index;
+        } else if (it_no_gpu == body.end() && !bridge->primary_device_is_gpu) {
+            body["whisper_no_gpu"] = true;
+        }
+    }
+
+    if (body.find("diarization_device") == body.end()) {
+        if (bridge->primary_device_is_gpu && !bridge->primary_device_name.empty()) {
+            body["diarization_device"] = bridge->primary_device_name;
+        } else {
+            body["diarization_device"] = "cpu";
+        }
     }
 }
 
@@ -881,16 +1012,22 @@ struct llama_server_bridge_params llama_server_bridge_default_params(void) {
     p.n_threads = 8;
     p.n_threads_batch = 8;
     p.n_gpu_layers = -1;
-    p.main_gpu = 0;
+    p.main_gpu = -1;
     p.no_kv_offload = 0;
-    p.mmproj_use_gpu = 1;
+    p.mmproj_use_gpu = -1;
     p.cache_ram_mib = -1;
     p.seed = -1;
     p.ctx_shift = 1;
     p.kv_unified = 1;
+#if defined(__APPLE__)
+    // On macOS/Metal, use "unset devices" as the default so create()
+    // can auto-select the first GPU when the caller does not pass a device.
     p.devices = nullptr;
+#else
+    p.devices = "none";
+#endif
     p.tensor_split = nullptr;
-    p.split_mode = -1;
+    p.split_mode = 0;
     p.embedding = 0;
     p.reranking = 0;
     p.pooling_type = -1;
@@ -1062,27 +1199,69 @@ struct llama_server_bridge * llama_server_bridge_create(const struct llama_serve
         bridge->params.mmproj.path = params->mmproj_path;
     }
 
-    bridge->params.n_ctx = std::max<int32_t>(0, params->n_ctx);
-    bridge->params.n_batch = std::max<int32_t>(32, params->n_batch);
-    bridge->params.n_ubatch = std::max<int32_t>(32, params->n_ubatch);
-    bridge->params.n_parallel = std::max<int32_t>(1, params->n_parallel);
-    bridge->params.n_gpu_layers = params->n_gpu_layers;
-    bridge->params.main_gpu = std::max<int32_t>(0, params->main_gpu);
-    bridge->params.no_kv_offload = params->no_kv_offload != 0;
-    bridge->params.mmproj_use_gpu = params->mmproj_use_gpu != 0;
-    bridge->params.no_mmproj = bridge->params.mmproj.path.empty();
-    bridge->params.cache_ram_mib = params->cache_ram_mib;
-    bridge->params.ctx_shift = params->ctx_shift != 0;
-    bridge->params.kv_unified = params->kv_unified != 0;
-    bridge->params.embedding = params->embedding != 0;
+    const llama_server_bridge_params defaults = llama_server_bridge_default_params();
+    const bool zero_init_params = looks_like_zero_initialized_params(params);
 
-    if (params->pooling_type >= 0) {
-        if (!is_valid_pooling_type(params->pooling_type)) {
+    auto choose_i32 = [&](int32_t raw, int32_t fallback) -> int32_t {
+        return (zero_init_params && raw == 0) ? fallback : raw;
+    };
+
+    const int32_t requested_n_ctx = std::max<int32_t>(0, choose_i32(params->n_ctx, defaults.n_ctx));
+    const int32_t requested_n_batch = std::max<int32_t>(32, choose_i32(params->n_batch, defaults.n_batch));
+    const int32_t requested_n_ubatch = std::max<int32_t>(32, choose_i32(params->n_ubatch, defaults.n_ubatch));
+    const int32_t requested_n_parallel = std::max<int32_t>(1, choose_i32(params->n_parallel, defaults.n_parallel));
+    const int32_t requested_n_threads = choose_i32(params->n_threads, defaults.n_threads);
+    const int32_t requested_n_threads_batch = choose_i32(params->n_threads_batch, defaults.n_threads_batch);
+    const int32_t requested_n_gpu_layers = choose_i32(params->n_gpu_layers, defaults.n_gpu_layers);
+    int32_t requested_main_gpu = choose_i32(params->main_gpu, defaults.main_gpu);
+    requested_main_gpu = std::max<int32_t>(-1, requested_main_gpu);
+    const int32_t requested_no_kv_offload = choose_i32(params->no_kv_offload, defaults.no_kv_offload);
+    const int32_t requested_mmproj_use_gpu = choose_i32(params->mmproj_use_gpu, defaults.mmproj_use_gpu);
+    const int32_t requested_cache_ram_mib = choose_i32(params->cache_ram_mib, defaults.cache_ram_mib);
+    const int32_t requested_seed = choose_i32(params->seed, defaults.seed);
+    const int32_t requested_ctx_shift = choose_i32(params->ctx_shift, defaults.ctx_shift);
+    const int32_t requested_kv_unified = choose_i32(params->kv_unified, defaults.kv_unified);
+    const int32_t requested_split_mode = choose_i32(params->split_mode, defaults.split_mode);
+    const int32_t requested_pooling_type = choose_i32(params->pooling_type, defaults.pooling_type);
+
+    const char * requested_devices = params->devices;
+    if (zero_init_params && is_devices_unset_or_none(requested_devices)) {
+        requested_devices = defaults.devices;
+    }
+    const char * requested_tensor_split = params->tensor_split;
+    if (zero_init_params && requested_tensor_split != nullptr && trim_copy(requested_tensor_split).empty()) {
+        requested_tensor_split = defaults.tensor_split;
+    }
+
+    if (requested_mmproj_use_gpu < -1 || requested_mmproj_use_gpu > 1) {
+        set_bridge_error(bridge.get(), "invalid mmproj_use_gpu, expected -1/0/1");
+        std::fprintf(stderr, "llama_server_bridge_create: invalid mmproj_use_gpu=%d\n", requested_mmproj_use_gpu);
+        return nullptr;
+    }
+
+    bridge->params.n_ctx = requested_n_ctx;
+    bridge->params.n_batch = requested_n_batch;
+    bridge->params.n_ubatch = requested_n_ubatch;
+    bridge->params.n_parallel = requested_n_parallel;
+    bridge->params.n_gpu_layers = requested_n_gpu_layers;
+    bridge->params.main_gpu = requested_main_gpu;
+    bridge->params.no_kv_offload = requested_no_kv_offload != 0;
+    bridge->params.mmproj_use_gpu = requested_mmproj_use_gpu > 0;
+    bridge->params.no_mmproj = bridge->params.mmproj.path.empty();
+    bridge->params.cache_ram_mib = requested_cache_ram_mib;
+    bridge->params.ctx_shift = requested_ctx_shift != 0;
+    bridge->params.kv_unified = requested_kv_unified != 0;
+    bridge->params.embedding = params->embedding != 0;
+    // Default to single-device mode unless explicitly overridden by split_mode.
+    bridge->params.split_mode = LLAMA_SPLIT_MODE_NONE;
+
+    if (requested_pooling_type >= 0) {
+        if (!is_valid_pooling_type(requested_pooling_type)) {
             set_bridge_error(bridge.get(), "invalid pooling_type, expected -1..4");
-            std::fprintf(stderr, "llama_server_bridge_create: invalid pooling_type=%d\n", params->pooling_type);
+            std::fprintf(stderr, "llama_server_bridge_create: invalid pooling_type=%d\n", requested_pooling_type);
             return nullptr;
         }
-        bridge->params.pooling_type = static_cast<enum llama_pooling_type>(params->pooling_type);
+        bridge->params.pooling_type = static_cast<enum llama_pooling_type>(requested_pooling_type);
     }
     if (params->reranking != 0) {
         bridge->params.embedding = true;
@@ -1093,38 +1272,99 @@ struct llama_server_bridge * llama_server_bridge_create(const struct llama_serve
     }
 
     std::string parse_error;
-    if (!parse_split_mode(params->split_mode, &bridge->params.split_mode, parse_error)) {
+    if (!parse_split_mode(requested_split_mode, &bridge->params.split_mode, parse_error)) {
         set_bridge_error(bridge.get(), parse_error);
         std::fprintf(stderr, "llama_server_bridge_create: split_mode parse failed: %s\n", parse_error.c_str());
         return nullptr;
     }
-    if (!parse_tensor_split_csv(params->tensor_split, bridge->params.tensor_split, parse_error)) {
+    if (!parse_tensor_split_csv(requested_tensor_split, bridge->params.tensor_split, parse_error)) {
         set_bridge_error(bridge.get(), parse_error);
         std::fprintf(stderr, "llama_server_bridge_create: tensor_split parse failed: %s\n", parse_error.c_str());
         return nullptr;
     }
 
-    if (params->n_threads > 0) {
-        bridge->params.cpuparams.n_threads = params->n_threads;
+    // NOTE: do not remap list-devices indices through *VISIBLE_DEVICES env vars.
+    // Vulkan visibility uses a different index space (physical-device enumeration),
+    // which can misroute selected devices (e.g. --gpu 1 landing on Vulkan0).
+    std::string effective_devices_storage;
+    const char * effective_devices_csv = requested_devices;
+    if (is_devices_unset_or_none(effective_devices_csv)) {
+        const bool infer_from_main_gpu = requested_main_gpu > 0 || (!zero_init_params && requested_main_gpu >= 0);
+        if (infer_from_main_gpu) {
+            // Allow host apps to pass only main_gpu as a simple device selector.
+            effective_devices_storage = std::to_string(requested_main_gpu);
+            effective_devices_csv = effective_devices_storage.c_str();
+        }
     }
-    if (params->n_threads_batch > 0) {
-        bridge->params.cpuparams_batch.n_threads = params->n_threads_batch;
-    } else if (params->n_threads > 0) {
-        bridge->params.cpuparams_batch.n_threads = params->n_threads;
+
+    if (requested_n_threads > 0) {
+        bridge->params.cpuparams.n_threads = requested_n_threads;
     }
-    if (params->seed >= 0) {
-        bridge->params.sampling.seed = (uint32_t) params->seed;
+    if (requested_n_threads_batch > 0) {
+        bridge->params.cpuparams_batch.n_threads = requested_n_threads_batch;
+    } else if (requested_n_threads > 0) {
+        bridge->params.cpuparams_batch.n_threads = requested_n_threads;
+    }
+    if (requested_seed >= 0) {
+        bridge->params.sampling.seed = (uint32_t) requested_seed;
     }
 
     acquire_backend(bridge->params);
     bridge->backend_acquired = true;
 
-    if (!parse_devices_csv(params->devices, bridge->params.devices, parse_error)) {
+#if defined(__APPLE__)
+    if (is_devices_unset(effective_devices_csv)) {
+        const int32_t mac_default_gpu = find_first_gpu_backend_device_index();
+        if (mac_default_gpu >= 0) {
+            // On macOS, no explicit device means "use the default Metal GPU".
+            effective_devices_storage = std::to_string(mac_default_gpu);
+            effective_devices_csv = effective_devices_storage.c_str();
+        }
+    }
+#endif
+
+    if (!parse_devices_csv(effective_devices_csv, bridge->params.devices, parse_error)) {
         set_bridge_error(bridge.get(), parse_error);
         std::fprintf(stderr, "llama_server_bridge_create: devices parse failed: %s\n", parse_error.c_str());
         release_backend();
         bridge->backend_acquired = false;
         return nullptr;
+    }
+
+    ggml_backend_dev_t primary_dev = nullptr;
+    for (auto * dev : bridge->params.devices) {
+        if (dev != nullptr) {
+            primary_dev = dev;
+            break;
+        }
+    }
+    if (primary_dev != nullptr) {
+        bridge->primary_device_index = find_backend_device_index(primary_dev);
+        const char * dev_name = ggml_backend_dev_name(primary_dev);
+        if (dev_name != nullptr) {
+            bridge->primary_device_name = dev_name;
+        }
+        bridge->primary_device_is_gpu = is_gpu_device_type(ggml_backend_dev_type(primary_dev));
+    }
+
+    if (primary_dev == nullptr) {
+        bridge->params.main_gpu = -1;
+    } else if (bridge->params.split_mode == LLAMA_SPLIT_MODE_NONE && bridge->params.main_gpu < 0) {
+        // In single-device mode, use the first selected device by default.
+        bridge->params.main_gpu = 0;
+    }
+    if (!bridge->primary_device_is_gpu && bridge->params.n_gpu_layers < 0) {
+        bridge->params.n_gpu_layers = 0;
+    }
+    if (requested_mmproj_use_gpu < 0) {
+        bridge->params.mmproj_use_gpu = !bridge->params.no_mmproj && bridge->primary_device_is_gpu;
+    }
+    if (bridge->params.no_mmproj) {
+        bridge->params.mmproj_use_gpu = false;
+    }
+    if (bridge->params.mmproj_use_gpu && bridge->primary_device_is_gpu && !bridge->primary_device_name.empty()) {
+        // Let mtmd/mmproj follow the selected bridge device unless the host app already pinned it.
+        set_env_if_unset("MTMD_BACKEND_DEVICE", bridge->primary_device_name);
     }
 
     if (has_model_path) {
@@ -1353,11 +1593,29 @@ int32_t llama_server_bridge_audio_transcriptions(
         return -1;
     }
 
+    json body = json::object();
+    try {
+        body = json::parse(req->body_json);
+    } catch (const std::exception & e) {
+        const std::string msg = std::string("invalid audio transcriptions body_json: ") + e.what();
+        set_bridge_error(bridge, msg);
+        out->error_json = copy_to_c_string(msg);
+        return -1;
+    }
+    if (!body.is_object()) {
+        const std::string msg = "audio transcriptions body_json must be a JSON object";
+        set_bridge_error(bridge, msg);
+        out->error_json = copy_to_c_string(msg);
+        return -1;
+    }
+    apply_audio_runtime_device_defaults(bridge, body);
+    const std::string body_json = body.dump();
+
     return run_json_route(
         bridge,
         handler,
         "/v1/audio/transcriptions",
-        req->body_json,
+        body_json,
         out);
 }
 
@@ -1387,6 +1645,7 @@ int32_t llama_server_bridge_audio_transcriptions_raw(
         out->error_json = copy_to_c_string(prep_error);
         return -1;
     }
+    apply_audio_runtime_device_defaults(bridge, metadata);
 
     const auto raw_handler = resolve_audio_transcriptions_raw_handler(bridge->routes.get());
     if (raw_handler) {

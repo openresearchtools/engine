@@ -419,7 +419,54 @@ fn split_mode_arg_to_i32(value: &str) -> Result<i32, String> {
     }
 }
 
+fn resolve_device_name_by_index(index: i32) -> Result<String, String> {
+    if index < 0 {
+        return Err("--gpu must be >= 0".to_string());
+    }
+
+    prepare_windows_bridge_runtime_paths();
+
+    let mut ptr_devices = ptr::null_mut();
+    let mut count: usize = 0;
+    let rc = unsafe { llama_server_bridge_list_devices(&mut ptr_devices, &mut count) };
+    if rc != 0 {
+        return Err("llama_server_bridge_list_devices() failed".to_string());
+    }
+
+    let mut resolved: Option<String> = None;
+    for i in 0..count {
+        let dev = unsafe { &*ptr_devices.add(i) };
+        if dev.index == index {
+            resolved = Some(cstr_mut_ptr_to_string(dev.name));
+            break;
+        }
+    }
+
+    unsafe {
+        llama_server_bridge_free_devices(ptr_devices, count);
+    }
+
+    match resolved {
+        Some(v) if !v.trim().is_empty() => Ok(v),
+        _ => Err(format!("invalid --gpu index: {index}")),
+    }
+}
+
 fn apply_audio_cli_overrides(args: &[String], body_obj: &mut Map<String, Value>) -> Result<(), String> {
+    let gpu_index = parse_optional_i32_arg(args, "--gpu")?;
+    if let Some(gpu) = gpu_index {
+        if gpu < 0 {
+            return Err("--gpu must be >= 0".to_string());
+        }
+        if arg_value(args, "--whisper-gpu-device").is_none() && !has_arg(args, "--whisper-no-gpu") {
+            body_obj.insert("whisper_gpu_device".to_string(), json!(gpu));
+        }
+        if arg_value(args, "--diarization-device").is_none() {
+            let device_name = resolve_device_name_by_index(gpu)?;
+            body_obj.insert("diarization_device".to_string(), json!(device_name));
+        }
+    }
+
     if let Some(v) = arg_value(args, "--transcription-backend") {
         body_obj.insert("transcription_backend".to_string(), json!(v));
     }
@@ -667,15 +714,19 @@ fn make_bridge(
 fn bridge_cli_usage() -> &'static str {
     "bridge usage:
   list-devices
-  vlm --model <gguf> --mmproj <gguf> --image <png/jpg/webp> [--prompt <text>] [--out <md>] [--n-predict 5000] [--mmproj-use-gpu <0|1>]
+  vlm --model <gguf> --mmproj <gguf> --image <png/jpg/webp> [--prompt <text>] [--out <md>] [--n-predict 5000] [--mmproj-use-gpu <-1|0|1>]
   audio --audio-file <audio-file> [--audio-format <format-hint>] [--output-dir <dir>] --mode <subtitle|speech|transcript> --custom <value> [whisper source + diarization source flags + advanced audio knobs]
   chat --model <gguf> [--prompt <text>] [--markdown <md>] [--out <md>] [--devices <csv>] [--n-predict 10000]
   embed --model <gguf> (--markdown <md> | --body-json <json-or-path>) [--out <json>] [--devices <csv>] [--batch-size 32] [--chunk-words 500] [--batches 8]
   rerank --model <gguf> (--markdown <md> | --body-json <json-or-path>) [--out <json>] [--devices <csv>] [--docs-per-query 32] [--chunk-words 500] [--batches 8]
 shared optional flags:
+  --gpu <device-index> (single-device shortcut)
   --n-ctx <int> --n-batch <int> --n-ubatch <int> --n-parallel <int> --n-gpu-layers <int> --main-gpu <int>
   --threads <int> --threads-batch <int>
   --split-mode <none|layer|row> --tensor-split <csv>
+defaults:
+  if neither --gpu nor --devices is set: macOS => first GPU, others => CPU-only
+  if --gpu is set, defaults are single-device full offload on that device
 audio advanced flags:
   --ffmpeg-convert --no-ffmpeg-convert (--audio-only is accepted but no longer required)
   --transcription-backend <auto|whisper_cpp_inproc>
@@ -729,11 +780,27 @@ fn run_vlm(args: &[String]) -> Result<(), String> {
     let mmproj = arg_value(args, "--mmproj").ok_or("--mmproj is required".to_string())?;
     let image = arg_value(args, "--image").ok_or("--image is required".to_string())?;
     let out_path = arg_value(args, "--out");
-    let devices = arg_value(args, "--devices");
+    let gpu = parse_optional_i32_arg(args, "--gpu")?;
+    let mut devices = arg_value(args, "--devices");
+    if let Some(gpu_index) = gpu {
+        if gpu_index < 0 {
+            return Err("--gpu must be >= 0".to_string());
+        }
+        if devices.is_some() {
+            return Err("choose one: --gpu OR --devices".to_string());
+        }
+        devices = Some(gpu_index.to_string());
+    }
     let tensor_split = arg_value(args, "--tensor-split");
     let split_mode = match arg_value(args, "--split-mode") {
         Some(v) => split_mode_arg_to_i32(&v)?,
-        None => -1,
+        None => {
+            if gpu.is_some() {
+                0
+            } else {
+                -1
+            }
+        }
     };
 
     let prompt = arg_value(args, "--prompt").unwrap_or_else(|| DEFAULT_VLM_PROMPT.to_string());
@@ -745,10 +812,10 @@ fn run_vlm(args: &[String]) -> Result<(), String> {
     let n_threads = parse_optional_positive_i32_arg(args, "--threads")?;
     let n_threads_batch = parse_optional_positive_i32_arg(args, "--threads-batch")?;
     let n_gpu_layers = parse_i32_arg(args, "--n-gpu-layers", -1)?;
-    let main_gpu = parse_i32_arg(args, "--main-gpu", 0)?;
-    let mmproj_use_gpu = parse_i32_arg(args, "--mmproj-use-gpu", 1)?;
-    if mmproj_use_gpu != 0 && mmproj_use_gpu != 1 {
-        return Err("--mmproj-use-gpu must be 0 or 1".to_string());
+    let main_gpu = parse_i32_arg(args, "--main-gpu", -1)?;
+    let mmproj_use_gpu = parse_i32_arg(args, "--mmproj-use-gpu", -1)?;
+    if mmproj_use_gpu != -1 && mmproj_use_gpu != 0 && mmproj_use_gpu != 1 {
+        return Err("--mmproj-use-gpu must be -1, 0 or 1".to_string());
     }
 
     let image_bytes = fs::read(&image)
@@ -878,11 +945,27 @@ fn run_audio(args: &[String]) -> Result<(), String> {
     let audio_only_mode = true;
     let out_path = arg_value(args, "--out");
     let output_dir_override = arg_value(args, "--output-dir");
-    let devices = arg_value(args, "--devices");
+    let gpu = parse_optional_i32_arg(args, "--gpu")?;
+    let mut devices = arg_value(args, "--devices");
+    if let Some(gpu_index) = gpu {
+        if gpu_index < 0 {
+            return Err("--gpu must be >= 0".to_string());
+        }
+        if devices.is_some() {
+            return Err("choose one: --gpu OR --devices".to_string());
+        }
+        devices = Some(gpu_index.to_string());
+    }
     let tensor_split = arg_value(args, "--tensor-split");
     let split_mode = match arg_value(args, "--split-mode") {
         Some(v) => split_mode_arg_to_i32(&v)?,
-        None => -1,
+        None => {
+            if gpu.is_some() {
+                0
+            } else {
+                -1
+            }
+        }
     };
 
     let n_ctx = parse_i32_arg(args, "--n-ctx", 32_768)?;
@@ -892,7 +975,7 @@ fn run_audio(args: &[String]) -> Result<(), String> {
     let n_threads = parse_optional_positive_i32_arg(args, "--threads")?;
     let n_threads_batch = parse_optional_positive_i32_arg(args, "--threads-batch")?;
     let n_gpu_layers = parse_i32_arg(args, "--n-gpu-layers", -1)?;
-    let main_gpu = parse_i32_arg(args, "--main-gpu", 0)?;
+    let main_gpu = parse_i32_arg(args, "--main-gpu", -1)?;
     let ffmpeg_convert_enabled = {
         let force_convert = has_arg(args, "--ffmpeg-convert");
         let no_convert = has_arg(args, "--no-ffmpeg-convert");
@@ -1144,6 +1227,7 @@ fn run_chat(args: &[String]) -> Result<(), String> {
         "--prompt",
         "--markdown",
         "--out",
+        "--gpu",
         "--devices",
         "--tensor-split",
         "--split-mode",
@@ -1166,11 +1250,27 @@ fn run_chat(args: &[String]) -> Result<(), String> {
         return Err("chat requires --prompt and/or --markdown".to_string());
     }
     let out_path = arg_value(args, "--out");
-    let devices = arg_value(args, "--devices");
+    let gpu = parse_optional_i32_arg(args, "--gpu")?;
+    let mut devices = arg_value(args, "--devices");
+    if let Some(gpu_index) = gpu {
+        if gpu_index < 0 {
+            return Err("--gpu must be >= 0".to_string());
+        }
+        if devices.is_some() {
+            return Err("choose one: --gpu OR --devices".to_string());
+        }
+        devices = Some(gpu_index.to_string());
+    }
     let tensor_split = arg_value(args, "--tensor-split");
     let split_mode = match arg_value(args, "--split-mode") {
         Some(v) => split_mode_arg_to_i32(&v)?,
-        None => -1,
+        None => {
+            if gpu.is_some() {
+                0
+            } else {
+                -1
+            }
+        }
     };
 
     let n_predict = parse_i32_arg(args, "--n-predict", 10_000)?;
@@ -1181,7 +1281,7 @@ fn run_chat(args: &[String]) -> Result<(), String> {
     let n_threads = parse_optional_positive_i32_arg(args, "--threads")?;
     let n_threads_batch = parse_optional_positive_i32_arg(args, "--threads-batch")?;
     let n_gpu_layers = parse_i32_arg(args, "--n-gpu-layers", -1)?;
-    let main_gpu = parse_i32_arg(args, "--main-gpu", 0)?;
+    let main_gpu = parse_i32_arg(args, "--main-gpu", -1)?;
 
     let markdown_text = if let Some(path) = &markdown {
         Some(
@@ -1321,11 +1421,27 @@ fn run_embed(args: &[String]) -> Result<(), String> {
         return Err("embed accepts only one input source: --markdown OR --body-json".to_string());
     }
     let out_path = arg_value(args, "--out");
-    let devices = arg_value(args, "--devices");
+    let gpu = parse_optional_i32_arg(args, "--gpu")?;
+    let mut devices = arg_value(args, "--devices");
+    if let Some(gpu_index) = gpu {
+        if gpu_index < 0 {
+            return Err("--gpu must be >= 0".to_string());
+        }
+        if devices.is_some() {
+            return Err("choose one: --gpu OR --devices".to_string());
+        }
+        devices = Some(gpu_index.to_string());
+    }
     let tensor_split = arg_value(args, "--tensor-split");
     let split_mode = match arg_value(args, "--split-mode") {
         Some(v) => split_mode_arg_to_i32(&v)?,
-        None => -1,
+        None => {
+            if gpu.is_some() {
+                0
+            } else {
+                -1
+            }
+        }
     };
 
     let batch_size = parse_usize_arg(args, "--batch-size", 32)?;
@@ -1339,7 +1455,7 @@ fn run_embed(args: &[String]) -> Result<(), String> {
     let n_threads = parse_optional_positive_i32_arg(args, "--threads")?;
     let n_threads_batch = parse_optional_positive_i32_arg(args, "--threads-batch")?;
     let n_gpu_layers = parse_i32_arg(args, "--n-gpu-layers", -1)?;
-    let main_gpu = parse_i32_arg(args, "--main-gpu", 0)?;
+    let main_gpu = parse_i32_arg(args, "--main-gpu", -1)?;
 
     let bridge = make_bridge(
         &model,
@@ -1529,11 +1645,27 @@ fn run_rerank(args: &[String]) -> Result<(), String> {
         return Err("rerank accepts only one input source: --markdown OR --body-json".to_string());
     }
     let out_path = arg_value(args, "--out");
-    let devices = arg_value(args, "--devices");
+    let gpu = parse_optional_i32_arg(args, "--gpu")?;
+    let mut devices = arg_value(args, "--devices");
+    if let Some(gpu_index) = gpu {
+        if gpu_index < 0 {
+            return Err("--gpu must be >= 0".to_string());
+        }
+        if devices.is_some() {
+            return Err("choose one: --gpu OR --devices".to_string());
+        }
+        devices = Some(gpu_index.to_string());
+    }
     let tensor_split = arg_value(args, "--tensor-split");
     let split_mode = match arg_value(args, "--split-mode") {
         Some(v) => split_mode_arg_to_i32(&v)?,
-        None => -1,
+        None => {
+            if gpu.is_some() {
+                0
+            } else {
+                -1
+            }
+        }
     };
 
     let docs_per_query = parse_usize_arg(args, "--docs-per-query", 32)?;
@@ -1547,7 +1679,7 @@ fn run_rerank(args: &[String]) -> Result<(), String> {
     let n_threads = parse_optional_positive_i32_arg(args, "--threads")?;
     let n_threads_batch = parse_optional_positive_i32_arg(args, "--threads-batch")?;
     let n_gpu_layers = parse_i32_arg(args, "--n-gpu-layers", -1)?;
-    let main_gpu = parse_i32_arg(args, "--main-gpu", 0)?;
+    let main_gpu = parse_i32_arg(args, "--main-gpu", -1)?;
 
     let bridge = make_bridge(
         &model,

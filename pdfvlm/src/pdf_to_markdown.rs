@@ -298,10 +298,11 @@ Options:
   --batch-size      Eval chunk size (default: 2048).
   --parallel        Concurrent slots/pages (default: 4).
   --max-retries     Per-page retries for non-EOS/truncation/loop (default: 2).
+  --gpu             Single device index from list-devices (shortcut for single-GPU mode).
   --devices         Optional backend devices CSV (e.g. 0,1 or none).
   --n-gpu-layers    GPU layers to offload (default: -1).
-  --main-gpu        Primary GPU index (default: 0).
-  --mmproj-use-gpu  MMProj device selection: 1=GPU (default), 0=CPU.
+  --main-gpu        Primary GPU index inside selected devices (default: -1).
+  --mmproj-use-gpu  MMProj device selection: -1=auto (default), 1=GPU, 0=CPU.
   --split-mode      Tensor split mode: none|layer|row.
   --tensor-split    Tensor split ratios CSV (e.g. 0.6,0.4).
   -h, --help        Show this help.
@@ -338,6 +339,7 @@ const PROMPT_STOP_KEYS: &[&str] = &[
     "--batch-size",
     "--parallel",
     "--max-retries",
+    "--gpu",
     "--devices",
     "--tensor-split",
     "--split-mode",
@@ -517,12 +519,13 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
     let mut n_threads_batch: Option<i32> = None;
     let mut batch_size: u32 = 2048;
     let mut max_retries: usize = 2;
+    let mut gpu: Option<i32> = None;
     let mut devices: Option<String> = None;
     let mut tensor_split: Option<String> = None;
     let mut split_mode: i32 = -1;
     let mut n_gpu_layers: i32 = -1;
-    let mut main_gpu: i32 = 0;
-    let mut mmproj_use_gpu: i32 = 1;
+    let mut main_gpu: i32 = -1;
+    let mut mmproj_use_gpu: i32 = -1;
 
     let mut i = 1usize;
     while i < argv.len() {
@@ -642,6 +645,17 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
                     .parse::<usize>()
                     .map_err(|_| format!("Invalid --max-retries value: {}", argv[i]))?;
             }
+            "--gpu" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--gpu requires a value".to_string());
+                }
+                gpu = Some(
+                    argv[i]
+                        .parse::<i32>()
+                        .map_err(|_| format!("Invalid --gpu value: {}", argv[i]))?,
+                );
+            }
             "--devices" => {
                 i += 1;
                 if i >= argv.len() {
@@ -702,6 +716,19 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
         i += 1;
     }
 
+    if let Some(gpu_index) = gpu {
+        if gpu_index < 0 {
+            return Err("--gpu must be >= 0".to_string());
+        }
+        if devices.is_some() {
+            return Err("choose one: --gpu OR --devices".to_string());
+        }
+        devices = Some(gpu_index.to_string());
+        if split_mode < 0 {
+            split_mode = 0;
+        }
+    }
+
     if scale <= 0.0 {
         return Err("--scale must be > 0".to_string());
     }
@@ -724,11 +751,11 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
     if batch_size == 0 {
         return Err("--batch-size must be > 0".to_string());
     }
-    if main_gpu < 0 {
-        return Err("--main-gpu must be >= 0".to_string());
+    if main_gpu < -1 {
+        return Err("--main-gpu must be >= -1".to_string());
     }
-    if mmproj_use_gpu != 0 && mmproj_use_gpu != 1 {
-        return Err("--mmproj-use-gpu must be 0 or 1".to_string());
+    if mmproj_use_gpu != -1 && mmproj_use_gpu != 0 && mmproj_use_gpu != 1 {
+        return Err("--mmproj-use-gpu must be -1, 0 or 1".to_string());
     }
 
     let image_path = image_path.ok_or_else(|| "--image is required".to_string())?;
@@ -862,12 +889,13 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut batch_size: u32 = 2048;
     let mut parallel: usize = 4;
     let mut max_retries: usize = 2;
+    let mut gpu: Option<i32> = None;
     let mut devices: Option<String> = None;
     let mut tensor_split: Option<String> = None;
     let mut split_mode: i32 = -1;
     let mut n_gpu_layers: i32 = -1;
-    let mut main_gpu: i32 = 0;
-    let mut mmproj_use_gpu: i32 = 1;
+    let mut main_gpu: i32 = -1;
+    let mut mmproj_use_gpu: i32 = -1;
 
     let mut i = 1usize;
     while i < argv.len() {
@@ -1010,6 +1038,17 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                     .parse::<usize>()
                     .map_err(|_| format!("Invalid --max-retries value: {}", argv[i]))?;
             }
+            "--gpu" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--gpu requires a value".to_string());
+                }
+                gpu = Some(
+                    argv[i]
+                        .parse::<i32>()
+                        .map_err(|_| format!("Invalid --gpu value: {}", argv[i]))?,
+                );
+            }
             "--devices" => {
                 i += 1;
                 if i >= argv.len() {
@@ -1064,6 +1103,19 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         i += 1;
     }
 
+    if let Some(gpu_index) = gpu {
+        if gpu_index < 0 {
+            return Err("--gpu must be >= 0".to_string());
+        }
+        if devices.is_some() {
+            return Err("choose one: --gpu OR --devices".to_string());
+        }
+        devices = Some(gpu_index.to_string());
+        if split_mode < 0 {
+            split_mode = 0;
+        }
+    }
+
     if scale <= 0.0 {
         return Err("--scale must be > 0".to_string());
     }
@@ -1089,11 +1141,11 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     if parallel == 0 {
         return Err("--parallel must be > 0".to_string());
     }
-    if main_gpu < 0 {
-        return Err("--main-gpu must be >= 0".to_string());
+    if main_gpu < -1 {
+        return Err("--main-gpu must be >= -1".to_string());
     }
-    if mmproj_use_gpu != 0 && mmproj_use_gpu != 1 {
-        return Err("--mmproj-use-gpu must be 0 or 1".to_string());
+    if mmproj_use_gpu != -1 && mmproj_use_gpu != 0 && mmproj_use_gpu != 1 {
+        return Err("--mmproj-use-gpu must be -1, 0 or 1".to_string());
     }
 
     let pdf_path = pdf_path.ok_or_else(|| "--pdf is required".to_string())?;

@@ -61,21 +61,39 @@ Start here to confirm what the runtime can see (CPU/GPU devices) before you tune
 ```powershell
 # Device enumeration
 engine.exe list-devices
+# Equivalent bridge form:
+engine.exe bridge list-devices
 ```
 
 ### Common runtime flags (all bridge commands)
 
 These runtime controls are available across `chat`, `vlm`, `audio`, `embed`, `rerank`, and `pdfvlm`:
 
-* `--main-gpu <int>` (default is `0`)
-* `--n-gpu-layers <int>` (`-1` = full offload where supported)
+* `--gpu <int>` single-device shortcut (device index from `list-devices`)
 * `--devices <csv>` (for example `0`, `1`, `0,1`, or `none` for CPU-only)
+* `--main-gpu <int>` index inside selected devices (default `-1`, auto in single-device mode)
+* `--n-gpu-layers <int>` (`-1` = full offload where supported)
+* `--mmproj-use-gpu <-1|0|1>` (`-1` auto, `1` GPU, `0` CPU)
 * `--split-mode <none|layer|row>` and `--tensor-split <csv>` (multi-GPU split)
 * `--threads <int>` and `--threads-batch <int>` (CPU compute thread controls)
 
+Default behavior:
+* Windows/Linux: if no GPU is specified (`--gpu`/`--devices` omitted), runtime is CPU-only
+* macOS (Apple Silicon / Metal builds): if no GPU is specified, runtime selects the first GPU
+* if `--gpu N` is specified, defaults become single-device on that GPU with full offload
+* by default there is no tensor split; split only happens if `--split-mode` / `--tensor-split` is passed
+* `--devices none` forces CPU-only on all platforms
+* explicit flags always override defaults
+
+Minimal runtime contract (DLL/embedded callers):
+* pass only required task/model inputs plus optional device selector (`--gpu N` or `--devices ...`) when you want simple routing
+* if a device selector is passed, model + KV cache + mmproj (auto mode) run on that selected device by default
+* audio follows the same selected runtime device unless explicitly overridden with `--whisper-gpu-device` / `--diarization-device`
+* all advanced flags are still supported; passing them overrides these defaults
+
 ### Chat
 
-This runs a direct prompt-based chat request with full GPU offload on a single GPU. It’s a good baseline test for “does the model run and is the GPU config correct?”
+This runs a direct prompt-based chat request with full GPU offload on a single GPU. It's a good baseline test for "does the model run and is the GPU config correct?"
 
 ```powershell
 # Chat with prompt (single GPU, full offload)
@@ -148,7 +166,8 @@ engine.exe vlm `
 
 `--mmproj-use-gpu` controls where the vision projector runs:
 
-* `1` (default): run mmproj on GPU
+* `-1` (default): auto-follow selected runtime device
+* `1`: run mmproj on GPU
 * `0`: run mmproj on CPU
 
 ### Multi‑GPU split
@@ -183,6 +202,8 @@ You can invoke the audio pipeline in either of these forms:
 * `engine audio ...` or `engine bridge audio ...`
 * Audio modes are always executed in audio-only runtime mode. A text `--model` GGUF is not required.
 * If `--model` is provided on `engine audio`, it is ignored for compatibility.
+* If `--gpu N` is set and no explicit `--whisper-gpu-device` / `--diarization-device` is provided, both follow the selected runtime device.
+* If no device is set, audio follows the same defaults as the rest of the runtime (Windows/Linux CPU-only, macOS first GPU).
 
 Output behavior:
 
