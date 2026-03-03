@@ -34,6 +34,7 @@ struct llama_server_bridge_params {
 
     int32_t n_gpu_layers;
     int32_t main_gpu;
+    int32_t gpu; // -1 unset/default, >=0 single-device selector from list-devices
     int32_t no_kv_offload;
     int32_t mmproj_use_gpu;  // -1 auto, 0 CPU, 1 GPU
     int32_t cache_ram_mib;

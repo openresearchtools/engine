@@ -28,6 +28,7 @@ pub struct llama_server_bridge_params {
 
     pub n_gpu_layers: i32,
     pub main_gpu: i32,
+    pub gpu: i32,
     pub no_kv_offload: i32,
     pub mmproj_use_gpu: i32,
     pub cache_ram_mib: i32,
@@ -631,6 +632,7 @@ fn make_bridge(
     model_path: &str,
     mmproj_path: Option<&str>,
     mmproj_use_gpu: Option<i32>,
+    gpu: i32,
     devices: Option<&str>,
     tensor_split: Option<&str>,
     split_mode: i32,
@@ -682,6 +684,7 @@ fn make_bridge(
     }
     params.n_gpu_layers = n_gpu_layers;
     params.main_gpu = main_gpu;
+    params.gpu = gpu;
     params.no_kv_offload = 0;
     params.mmproj_use_gpu = if let Some(v) = mmproj_use_gpu {
         v
@@ -781,7 +784,7 @@ fn run_vlm(args: &[String]) -> Result<(), String> {
     let image = arg_value(args, "--image").ok_or("--image is required".to_string())?;
     let out_path = arg_value(args, "--out");
     let gpu = parse_optional_i32_arg(args, "--gpu")?;
-    let mut devices = arg_value(args, "--devices");
+    let devices = arg_value(args, "--devices");
     if let Some(gpu_index) = gpu {
         if gpu_index < 0 {
             return Err("--gpu must be >= 0".to_string());
@@ -789,7 +792,6 @@ fn run_vlm(args: &[String]) -> Result<(), String> {
         if devices.is_some() {
             return Err("choose one: --gpu OR --devices".to_string());
         }
-        devices = Some(gpu_index.to_string());
     }
     let tensor_split = arg_value(args, "--tensor-split");
     let split_mode = match arg_value(args, "--split-mode") {
@@ -843,6 +845,7 @@ fn run_vlm(args: &[String]) -> Result<(), String> {
         &model,
         Some(&mmproj),
         Some(mmproj_use_gpu),
+        gpu.unwrap_or(-1),
         devices.as_deref(),
         tensor_split.as_deref(),
         split_mode,
@@ -946,7 +949,7 @@ fn run_audio(args: &[String]) -> Result<(), String> {
     let out_path = arg_value(args, "--out");
     let output_dir_override = arg_value(args, "--output-dir");
     let gpu = parse_optional_i32_arg(args, "--gpu")?;
-    let mut devices = arg_value(args, "--devices");
+    let devices = arg_value(args, "--devices");
     if let Some(gpu_index) = gpu {
         if gpu_index < 0 {
             return Err("--gpu must be >= 0".to_string());
@@ -954,7 +957,6 @@ fn run_audio(args: &[String]) -> Result<(), String> {
         if devices.is_some() {
             return Err("choose one: --gpu OR --devices".to_string());
         }
-        devices = Some(gpu_index.to_string());
     }
     let tensor_split = arg_value(args, "--tensor-split");
     let split_mode = match arg_value(args, "--split-mode") {
@@ -1138,6 +1140,7 @@ fn run_audio(args: &[String]) -> Result<(), String> {
         &model,
         None,
         None,
+        gpu.unwrap_or(-1),
         devices.as_deref(),
         tensor_split.as_deref(),
         split_mode,
@@ -1251,7 +1254,7 @@ fn run_chat(args: &[String]) -> Result<(), String> {
     }
     let out_path = arg_value(args, "--out");
     let gpu = parse_optional_i32_arg(args, "--gpu")?;
-    let mut devices = arg_value(args, "--devices");
+    let devices = arg_value(args, "--devices");
     if let Some(gpu_index) = gpu {
         if gpu_index < 0 {
             return Err("--gpu must be >= 0".to_string());
@@ -1259,7 +1262,6 @@ fn run_chat(args: &[String]) -> Result<(), String> {
         if devices.is_some() {
             return Err("choose one: --gpu OR --devices".to_string());
         }
-        devices = Some(gpu_index.to_string());
     }
     let tensor_split = arg_value(args, "--tensor-split");
     let split_mode = match arg_value(args, "--split-mode") {
@@ -1319,6 +1321,7 @@ fn run_chat(args: &[String]) -> Result<(), String> {
         &model,
         None,
         None,
+        gpu.unwrap_or(-1),
         devices.as_deref(),
         tensor_split.as_deref(),
         split_mode,
@@ -1422,7 +1425,7 @@ fn run_embed(args: &[String]) -> Result<(), String> {
     }
     let out_path = arg_value(args, "--out");
     let gpu = parse_optional_i32_arg(args, "--gpu")?;
-    let mut devices = arg_value(args, "--devices");
+    let devices = arg_value(args, "--devices");
     if let Some(gpu_index) = gpu {
         if gpu_index < 0 {
             return Err("--gpu must be >= 0".to_string());
@@ -1430,7 +1433,6 @@ fn run_embed(args: &[String]) -> Result<(), String> {
         if devices.is_some() {
             return Err("choose one: --gpu OR --devices".to_string());
         }
-        devices = Some(gpu_index.to_string());
     }
     let tensor_split = arg_value(args, "--tensor-split");
     let split_mode = match arg_value(args, "--split-mode") {
@@ -1461,6 +1463,7 @@ fn run_embed(args: &[String]) -> Result<(), String> {
         &model,
         None,
         None,
+        gpu.unwrap_or(-1),
         devices.as_deref(),
         tensor_split.as_deref(),
         split_mode,
@@ -1646,7 +1649,7 @@ fn run_rerank(args: &[String]) -> Result<(), String> {
     }
     let out_path = arg_value(args, "--out");
     let gpu = parse_optional_i32_arg(args, "--gpu")?;
-    let mut devices = arg_value(args, "--devices");
+    let devices = arg_value(args, "--devices");
     if let Some(gpu_index) = gpu {
         if gpu_index < 0 {
             return Err("--gpu must be >= 0".to_string());
@@ -1654,7 +1657,6 @@ fn run_rerank(args: &[String]) -> Result<(), String> {
         if devices.is_some() {
             return Err("choose one: --gpu OR --devices".to_string());
         }
-        devices = Some(gpu_index.to_string());
     }
     let tensor_split = arg_value(args, "--tensor-split");
     let split_mode = match arg_value(args, "--split-mode") {
@@ -1685,6 +1687,7 @@ fn run_rerank(args: &[String]) -> Result<(), String> {
         &model,
         None,
         None,
+        gpu.unwrap_or(-1),
         devices.as_deref(),
         tensor_split.as_deref(),
         split_mode,

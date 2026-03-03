@@ -20,6 +20,7 @@ pub struct llama_server_bridge_params {
 
     pub n_gpu_layers: i32,
     pub main_gpu: i32,
+    pub gpu: i32,
     pub no_kv_offload: i32,
     pub mmproj_use_gpu: i32,
     pub cache_ram_mib: i32,
@@ -99,4 +100,3 @@ unsafe extern "C" {
     pub fn llama_server_bridge_result_free(out: *mut llama_server_bridge_vlm_result);
     pub fn llama_server_bridge_last_error(bridge: *const llama_server_bridge) -> *const c_char;
 }
-

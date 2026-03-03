@@ -42,6 +42,7 @@ struct Args {
     batch_size: u32,
     parallel: usize,
     max_retries: usize,
+    gpu: i32,
     devices: Option<String>,
     tensor_split: Option<String>,
     split_mode: i32,
@@ -65,6 +66,7 @@ struct ImageArgs {
     n_threads_batch: i32,
     batch_size: u32,
     max_retries: usize,
+    gpu: i32,
     devices: Option<String>,
     tensor_split: Option<String>,
     split_mode: i32,
@@ -123,6 +125,7 @@ impl SharedBridge {
         n_threads_batch: i32,
         batch_size: u32,
         parallel: usize,
+        gpu: i32,
         devices: Option<&str>,
         tensor_split: Option<&str>,
         split_mode: i32,
@@ -148,6 +151,7 @@ impl SharedBridge {
         params.n_threads_batch = n_threads_batch;
         params.n_gpu_layers = n_gpu_layers;
         params.main_gpu = main_gpu;
+        params.gpu = gpu;
         params.no_kv_offload = 0;
         params.mmproj_use_gpu = mmproj_use_gpu;
         params.cache_ram_mib = 0;
@@ -723,7 +727,7 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
         if devices.is_some() {
             return Err("choose one: --gpu OR --devices".to_string());
         }
-        devices = Some(gpu_index.to_string());
+        // Keep gpu as a first-class selector for bridge params.
         if split_mode < 0 {
             split_mode = 0;
         }
@@ -788,6 +792,7 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
         n_threads_batch,
         batch_size,
         max_retries,
+        gpu: gpu.unwrap_or(-1),
         devices,
         tensor_split,
         split_mode,
@@ -1110,7 +1115,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         if devices.is_some() {
             return Err("choose one: --gpu OR --devices".to_string());
         }
-        devices = Some(gpu_index.to_string());
+        // Keep gpu as a first-class selector for bridge params.
         if split_mode < 0 {
             split_mode = 0;
         }
@@ -1197,6 +1202,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         batch_size,
         parallel,
         max_retries,
+        gpu: gpu.unwrap_or(-1),
         devices,
         tensor_split,
         split_mode,
@@ -1409,13 +1415,14 @@ fn run_image_to_markdown_cli_from_args(
     println!("out_md: {}", args.output_md.display());
     println!("render: scale={} oversample={}", args.scale, args.oversample);
     println!(
-        "inference: parallel=1 ctx={} batch={} n_predict={} retries={} threads={} threads_batch={} devices={} n_gpu_layers={} main_gpu={} mmproj_use_gpu={} split_mode={} tensor_split={}",
+        "inference: parallel=1 ctx={} batch={} n_predict={} retries={} threads={} threads_batch={} gpu={} devices={} n_gpu_layers={} main_gpu={} mmproj_use_gpu={} split_mode={} tensor_split={}",
         args.n_ctx_total,
         args.batch_size,
         args.n_predict,
         args.max_retries,
         args.n_threads,
         args.n_threads_batch,
+        args.gpu,
         args.devices.as_deref().unwrap_or("<default>"),
         args.n_gpu_layers,
         args.main_gpu,
@@ -1445,6 +1452,7 @@ fn run_image_to_markdown_cli_from_args(
         args.n_threads_batch,
         args.batch_size,
         1,
+        args.gpu,
         args.devices.as_deref(),
         args.tensor_split.as_deref(),
         args.split_mode,
@@ -1548,7 +1556,7 @@ pub fn run_pdf_to_markdown_cli_from_args(argv: &[String]) -> Result<(), Box<dyn 
     println!("out_md: {}", args.output_md.display());
     println!("render: scale={} oversample={}", args.scale, args.oversample);
     println!(
-        "inference: parallel={} ctx={} batch={} n_predict={} retries={} threads={} threads_batch={} devices={} n_gpu_layers={} main_gpu={} mmproj_use_gpu={} split_mode={} tensor_split={}",
+        "inference: parallel={} ctx={} batch={} n_predict={} retries={} threads={} threads_batch={} gpu={} devices={} n_gpu_layers={} main_gpu={} mmproj_use_gpu={} split_mode={} tensor_split={}",
         args.parallel,
         args.n_ctx_total,
         args.batch_size,
@@ -1556,6 +1564,7 @@ pub fn run_pdf_to_markdown_cli_from_args(argv: &[String]) -> Result<(), Box<dyn 
         args.max_retries,
         args.n_threads,
         args.n_threads_batch,
+        args.gpu,
         args.devices.as_deref().unwrap_or("<default>"),
         args.n_gpu_layers,
         args.main_gpu,
@@ -1577,6 +1586,7 @@ pub fn run_pdf_to_markdown_cli_from_args(argv: &[String]) -> Result<(), Box<dyn 
         args.n_threads_batch,
         args.batch_size,
         args.parallel,
+        args.gpu,
         args.devices.as_deref(),
         args.tensor_split.as_deref(),
         args.split_mode,

@@ -392,6 +392,7 @@ static bool looks_like_zero_initialized_params(const llama_server_bridge_params 
         && p->n_threads == 0
         && p->n_threads_batch == 0
         && p->n_gpu_layers == 0
+        && p->gpu == 0
         && p->no_kv_offload == 0
         && p->mmproj_use_gpu == 0
         && p->cache_ram_mib == 0
@@ -1013,6 +1014,7 @@ struct llama_server_bridge_params llama_server_bridge_default_params(void) {
     p.n_threads_batch = 8;
     p.n_gpu_layers = -1;
     p.main_gpu = -1;
+    p.gpu = -1;
     p.no_kv_offload = 0;
     p.mmproj_use_gpu = -1;
     p.cache_ram_mib = -1;
@@ -1215,6 +1217,8 @@ struct llama_server_bridge * llama_server_bridge_create(const struct llama_serve
     const int32_t requested_n_gpu_layers = choose_i32(params->n_gpu_layers, defaults.n_gpu_layers);
     int32_t requested_main_gpu = choose_i32(params->main_gpu, defaults.main_gpu);
     requested_main_gpu = std::max<int32_t>(-1, requested_main_gpu);
+    int32_t requested_gpu = choose_i32(params->gpu, defaults.gpu);
+    requested_gpu = std::max<int32_t>(-1, requested_gpu);
     const int32_t requested_no_kv_offload = choose_i32(params->no_kv_offload, defaults.no_kv_offload);
     const int32_t requested_mmproj_use_gpu = choose_i32(params->mmproj_use_gpu, defaults.mmproj_use_gpu);
     const int32_t requested_cache_ram_mib = choose_i32(params->cache_ram_mib, defaults.cache_ram_mib);
@@ -1236,6 +1240,11 @@ struct llama_server_bridge * llama_server_bridge_create(const struct llama_serve
     if (requested_mmproj_use_gpu < -1 || requested_mmproj_use_gpu > 1) {
         set_bridge_error(bridge.get(), "invalid mmproj_use_gpu, expected -1/0/1");
         std::fprintf(stderr, "llama_server_bridge_create: invalid mmproj_use_gpu=%d\n", requested_mmproj_use_gpu);
+        return nullptr;
+    }
+    if (requested_gpu >= 0 && !is_devices_unset_or_none(requested_devices)) {
+        set_bridge_error(bridge.get(), "choose one: gpu OR devices");
+        std::fprintf(stderr, "llama_server_bridge_create: both gpu=%d and devices are set\n", requested_gpu);
         return nullptr;
     }
 
@@ -1288,7 +1297,14 @@ struct llama_server_bridge * llama_server_bridge_create(const struct llama_serve
     // which can misroute selected devices (e.g. --gpu 1 landing on Vulkan0).
     std::string effective_devices_storage;
     const char * effective_devices_csv = requested_devices;
-    if (is_devices_unset_or_none(effective_devices_csv)) {
+    if (requested_gpu >= 0) {
+        effective_devices_storage = std::to_string(requested_gpu);
+        effective_devices_csv = effective_devices_storage.c_str();
+        if (bridge->params.split_mode == LLAMA_SPLIT_MODE_NONE) {
+            // Single-device shortcut: main_gpu is index inside selected devices.
+            bridge->params.main_gpu = 0;
+        }
+    } else if (is_devices_unset_or_none(effective_devices_csv)) {
         const bool infer_from_main_gpu = requested_main_gpu > 0 || (!zero_init_params && requested_main_gpu >= 0);
         if (infer_from_main_gpu) {
             // Allow host apps to pass only main_gpu as a simple device selector.
