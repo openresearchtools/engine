@@ -42,6 +42,12 @@ It aims to unify chat, vision, embeddings, reranking, audio transcription/diariz
   * `pdf.dll`
   * `pdfvlm.dll`
 
+## Detailed DLL docs
+
+For function-by-function embedding docs (minimal calls, GPU selection, and full parameter coverage), see:
+
+* [`docs/README.md`](docs/README.md)
+
 ## Project layout
 
 * `bridge/` native in-process bridge for llama runtime APIs.

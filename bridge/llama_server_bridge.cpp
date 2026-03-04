@@ -329,6 +329,103 @@ static int32_t find_backend_device_index(ggml_backend_dev_t target) {
     return -1;
 }
 
+static bool lookup_backend_device_by_index(int32_t index, std::string & out_name, bool & out_is_gpu) {
+    out_name.clear();
+    out_is_gpu = false;
+
+    if (index < 0) {
+        return false;
+    }
+
+    const size_t n = ggml_backend_dev_count();
+    if (static_cast<size_t>(index) >= n) {
+        return false;
+    }
+
+    ggml_backend_dev_t dev = ggml_backend_dev_get(static_cast<size_t>(index));
+    if (dev == nullptr) {
+        return false;
+    }
+
+    const char * dev_name = ggml_backend_dev_name(dev);
+    if (dev_name != nullptr) {
+        out_name = dev_name;
+    }
+    out_is_gpu = is_gpu_device_type(ggml_backend_dev_type(dev));
+    return true;
+}
+
+static bool parse_gpu_selector_text(const std::string & raw, int32_t & out_index) {
+    const std::string trimmed = trim_copy(raw);
+    if (trimmed.empty()) {
+        return false;
+    }
+
+    int32_t idx = -1;
+    if (parse_i32(trimmed, &idx) && idx >= 0) {
+        out_index = idx;
+        return true;
+    }
+
+    std::string lowered = trimmed;
+    std::transform(
+        lowered.begin(),
+        lowered.end(),
+        lowered.begin(),
+        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+
+    if (lowered.rfind("gpu", 0) != 0) {
+        return false;
+    }
+
+    std::string suffix = trim_copy(lowered.substr(3));
+    if (!suffix.empty() && (suffix[0] == ':' || suffix[0] == '=')) {
+        suffix = trim_copy(suffix.substr(1));
+    }
+    if (suffix.empty()) {
+        return false;
+    }
+
+    if (!parse_i32(suffix, &idx) || idx < 0) {
+        return false;
+    }
+    out_index = idx;
+    return true;
+}
+
+static bool parse_audio_gpu_override(const json & body, int32_t & out_index) {
+    if (!body.is_object()) {
+        return false;
+    }
+
+    auto parse_value = [&](const json & value) -> bool {
+        if (value.is_number_integer()) {
+            const int64_t v = value.get<int64_t>();
+            if (v < 0 || v > INT32_MAX) {
+                return false;
+            }
+            out_index = static_cast<int32_t>(v);
+            return true;
+        }
+        if (value.is_string()) {
+            return parse_gpu_selector_text(value.get<std::string>(), out_index);
+        }
+        return false;
+    };
+
+    const auto it_gpu = body.find("gpu");
+    if (it_gpu != body.end() && parse_value(*it_gpu)) {
+        return true;
+    }
+
+    const auto it_device = body.find("device");
+    if (it_device != body.end() && parse_value(*it_device)) {
+        return true;
+    }
+
+    return false;
+}
+
 static void set_env_if_unset(const char * key, const std::string & value) {
     if (key == nullptr || key[0] == '\0' || value.empty()) {
         return;
@@ -336,19 +433,10 @@ static void set_env_if_unset(const char * key, const std::string & value) {
 #if defined(_WIN32)
     // Use process-wide env APIs on Windows so all runtimes in-process
     // (including ggml/llama DLLs) observe the same value.
-    char existing[2] = {0, 0};
-    const DWORD n = GetEnvironmentVariableA(key, existing, static_cast<DWORD>(sizeof(existing)));
-    if (n > 0) {
-        return;
-    }
     (void) SetEnvironmentVariableA(key, value.c_str());
     (void) _putenv_s(key, value.c_str());
 #else
-    const char * cur = std::getenv(key);
-    if (cur != nullptr && cur[0] != '\0') {
-        return;
-    }
-    setenv(key, value.c_str(), 0);
+    setenv(key, value.c_str(), 1);
 #endif
 }
 
@@ -410,19 +498,30 @@ static void apply_audio_runtime_device_defaults(const llama_server_bridge * brid
         return;
     }
 
+    int32_t override_gpu_index = -1;
+    const bool has_gpu_override = parse_audio_gpu_override(body, override_gpu_index);
+    bool override_is_gpu = false;
+    std::string override_device_name;
+    const bool override_valid = has_gpu_override
+        && lookup_backend_device_by_index(override_gpu_index, override_device_name, override_is_gpu);
+
     const auto it_no_gpu = body.find("whisper_no_gpu");
     const bool whisper_no_gpu = it_no_gpu != body.end() ? json_value(body, "whisper_no_gpu", false) : false;
 
     if (body.find("whisper_gpu_device") == body.end()) {
-        if (!whisper_no_gpu && bridge->primary_device_is_gpu && bridge->primary_device_index >= 0) {
+        if (!whisper_no_gpu && override_valid && override_is_gpu) {
+            body["whisper_gpu_device"] = override_gpu_index;
+        } else if (!whisper_no_gpu && bridge->primary_device_is_gpu && bridge->primary_device_index >= 0) {
             body["whisper_gpu_device"] = bridge->primary_device_index;
-        } else if (it_no_gpu == body.end() && !bridge->primary_device_is_gpu) {
+        } else if (it_no_gpu == body.end() && (!override_valid || !override_is_gpu) && !bridge->primary_device_is_gpu) {
             body["whisper_no_gpu"] = true;
         }
     }
 
     if (body.find("diarization_device") == body.end()) {
-        if (bridge->primary_device_is_gpu && !bridge->primary_device_name.empty()) {
+        if (override_valid && override_is_gpu && !override_device_name.empty()) {
+            body["diarization_device"] = override_device_name;
+        } else if (bridge->primary_device_is_gpu && !bridge->primary_device_name.empty()) {
             body["diarization_device"] = bridge->primary_device_name;
         } else {
             body["diarization_device"] = "cpu";

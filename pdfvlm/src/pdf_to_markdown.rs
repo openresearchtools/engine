@@ -715,7 +715,17 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
                 }
             }
             "-h" | "--help" => return Err(usage().to_string()),
-            other => return Err(format!("Unknown argument in --image mode: {other}\n\n{}", usage())),
+            other => {
+                if let Some(value) = other.strip_prefix("gpu=").or_else(|| other.strip_prefix("--gpu=")) {
+                    gpu = Some(
+                        value
+                            .parse::<i32>()
+                            .map_err(|_| format!("Invalid gpu= value: {value}"))?,
+                    );
+                } else {
+                    return Err(format!("Unknown argument in --image mode: {other}\n\n{}", usage()));
+                }
+            }
         }
         i += 1;
     }
@@ -1103,7 +1113,17 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                     .map_err(|_| format!("Invalid --mmproj-use-gpu value: {}", argv[i]))?;
             }
             "-h" | "--help" => return Err(usage().to_string()),
-            other => return Err(format!("Unknown argument: {other}\n\n{}", usage())),
+            other => {
+                if let Some(value) = other.strip_prefix("gpu=").or_else(|| other.strip_prefix("--gpu=")) {
+                    gpu = Some(
+                        value
+                            .parse::<i32>()
+                            .map_err(|_| format!("Invalid gpu= value: {value}"))?,
+                    );
+                } else {
+                    return Err(format!("Unknown argument: {other}\n\n{}", usage()));
+                }
+            }
         }
         i += 1;
     }

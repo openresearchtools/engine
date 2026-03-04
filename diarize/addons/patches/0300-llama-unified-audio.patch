@@ -2322,3 +2322,106 @@ index c4cc3d386..4cb616722 100644
  		} catch (error) {
  			console.warn('Failed to fetch router models:', error);
  			this.routerModels = [];
+
+diff --git a/tools/mtmd/mtmd.h b/tools/mtmd/mtmd.h
+index ef25d32..6039b7d 100644
+--- a/tools/mtmd/mtmd.h
++++ b/tools/mtmd/mtmd.h
+@@ -89,6 +89,7 @@ struct mtmd_context_params {
+     int n_threads;
+     const char * image_marker; // deprecated, use media_marker instead
+     const char * media_marker;
++    const char * backend_device; // optional explicit ggml backend device name (e.g. Vulkan1 / CUDA1)
+     enum llama_flash_attn_type flash_attn_type;
+     bool warmup; // whether to run a warmup encode pass after initialization
+ 
+diff --git a/tools/mtmd/clip.h b/tools/mtmd/clip.h
+index 71b5848..8320093 100644
+--- a/tools/mtmd/clip.h
++++ b/tools/mtmd/clip.h
+@@ -34,6 +34,7 @@ enum clip_flash_attn_type {
+ 
+ struct clip_context_params {
+     bool use_gpu;
++    const char * backend_device; // optional explicit ggml backend device name
+     enum clip_flash_attn_type flash_attn_type;
+     int image_min_tokens;
+     int image_max_tokens;
+diff --git a/tools/mtmd/mtmd.cpp b/tools/mtmd/mtmd.cpp
+index 8ca979c..29edd32 100644
+--- a/tools/mtmd/mtmd.cpp
++++ b/tools/mtmd/mtmd.cpp
+@@ -108,6 +108,7 @@ mtmd_context_params mtmd_context_params_default() {
+         /* n_threads         */ 4,
+         /* image_marker      */ MTMD_DEFAULT_IMAGE_MARKER,
+         /* media_marker      */ mtmd_default_marker(),
++        /* backend_device    */ nullptr,
+         /* flash_attn_type   */ LLAMA_FLASH_ATTN_TYPE_AUTO,
+         /* warmup            */ true,
+         /* image_min_tokens  */ -1,
+@@ -175,6 +176,7 @@ struct mtmd_context {
+ 
+         clip_context_params ctx_clip_params {
+             /* use_gpu           */ ctx_params.use_gpu,
++            /* backend_device    */ ctx_params.backend_device,
+             /* flash_attn_type   */ mtmd_get_clip_flash_attn_type(ctx_params.flash_attn_type),
+             /* image_min_tokens  */ ctx_params.image_min_tokens,
+             /* image_max_tokens  */ ctx_params.image_max_tokens,
+diff --git a/tools/mtmd/clip.cpp b/tools/mtmd/clip.cpp
+index 607d4b8..db4121b 100644
+--- a/tools/mtmd/clip.cpp
++++ b/tools/mtmd/clip.cpp
+@@ -166,11 +166,17 @@ struct clip_ctx {
+             throw std::runtime_error("failed to initialize CPU backend");
+         }
+         if (ctx_params.use_gpu) {
+-            auto backend_name = std::getenv("MTMD_BACKEND_DEVICE");
+-            if (backend_name != nullptr) {
++            const char * backend_name = ctx_params.backend_device;
++            if (backend_name == nullptr || backend_name[0] == '\0') {
++                backend_name = std::getenv("MTMD_BACKEND_DEVICE");
++            }
++            const bool has_requested_backend = backend_name != nullptr && backend_name[0] != '\0';
++            if (has_requested_backend) {
+                 backend = ggml_backend_init_by_name(backend_name, nullptr);
+                 if (!backend) {
+-                    LOG_WRN("%s: Warning: Failed to initialize \"%s\" backend, falling back to default GPU backend\n", __func__, backend_name);
++                    throw std::runtime_error(string_format(
++                        "failed to initialize requested mtmd backend \"%s\"",
++                        backend_name));
+                 }
+             }
+             if (!backend) {
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index a47149c..66fab89 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -693,9 +693,28 @@ private:
+                 mtmd_helper_log_set(common_log_default_callback, nullptr);
+             }
+ 
++            std::string mmproj_backend_device;
++            if (params_base.mmproj_use_gpu) {
++                for (auto * dev : params_base.devices) {
++                    if (dev == nullptr) {
++                        continue;
++                    }
++                    const auto dev_type = ggml_backend_dev_type(dev);
++                    if (dev_type != GGML_BACKEND_DEVICE_TYPE_GPU && dev_type != GGML_BACKEND_DEVICE_TYPE_IGPU) {
++                        continue;
++                    }
++                    const char * dev_name = ggml_backend_dev_name(dev);
++                    if (dev_name != nullptr && dev_name[0] != '\0') {
++                        mmproj_backend_device = dev_name;
++                    }
++                    break;
++                }
++            }
++
+             mtmd_context_params mparams = mtmd_context_params_default();
+ 
+             mparams.use_gpu          = params_base.mmproj_use_gpu;
++            mparams.backend_device   = mmproj_backend_device.empty() ? nullptr : mmproj_backend_device.c_str();
+             mparams.print_timings    = false;
+             mparams.n_threads        = params_base.cpuparams.n_threads;
+             mparams.flash_attn_type  = params_base.flash_attn_type;
