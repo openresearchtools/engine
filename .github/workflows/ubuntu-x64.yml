@@ -14,9 +14,9 @@ permissions:
 
 jobs:
   ubuntu-x64:
-    # Keep Linux artifacts runnable on older Ubuntu hosts (for example 20.04 / glibc 2.31)
-    # by compiling on an older runner image instead of ubuntu-24.04.
-    runs-on: ubuntu-20.04
+    # GitHub-hosted ubuntu-20.04 is no longer available.
+    # Use ubuntu-22.04 for stable Vulkan CI availability.
+    runs-on: ubuntu-22.04
     timeout-minutes: 240
     env:
       BACKEND: vulkan
@@ -226,8 +226,7 @@ jobs:
             -DLLAMA_SERVER_BRIDGE_ENABLE_FFMPEG=ON
             -DLLAMA_SERVER_BRIDGE_FFMPEG_ROOT="$ffmpeg_root"
             -DGGML_BACKEND_DL=ON
-            # Ubuntu 20.04 toolchain (GCC 9) cannot compile some newer AVX-512 BF16
-            # variant targets used by GGML_CPU_ALL_VARIANTS=ON.
+            # Keep this off for broad toolchain compatibility in CI.
             -DGGML_CPU_ALL_VARIANTS=OFF
             -DGGML_NATIVE=OFF
             -DGGML_VULKAN=ON
@@ -529,8 +528,8 @@ jobs:
         run: |
           set -euo pipefail
           bundle="$BUILD_ROOT/bundle"
-          baseline_glibc="2.31"
-          baseline_glibcxx="3.4.28"
+          baseline_glibc="2.35"
+          baseline_glibcxx="3.4.30"
 
           check_version_not_newer() {
             local current="$1"
