@@ -32,6 +32,15 @@ It aims to unify chat, vision, embeddings, reranking, audio transcription/diariz
 * References to third-party project names are for compatibility and attribution only.
 * All third-party names and marks (including `llama.cpp`, `pyannote.audio`, `whisper.cpp`, `Docling`, `PDFium`, `FFmpeg`, and Qwen/Qwen3-VL) remain the property of their respective owners.
 
+## License and notices
+
+Openresearchtools-engine source code is licensed under the MIT License; third-party dependencies and bundled components remain licensed under their respective original licenses.
+
+For full notices, license types, and source provenance:
+
+* `NOTICES.md`
+* `third_party/licenses/README.md`
+
 ## How to embed it
 
 * `engine.exe` is an example wrapper showing how to call functions.

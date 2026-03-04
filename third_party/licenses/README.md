@@ -2,6 +2,8 @@
 
 This repository contains runtime integration code and conversion/parity tooling that reference third-party projects.
 
+Openresearchtools-engine source code is licensed under the MIT License; third-party dependencies and bundled components remain licensed under their respective original licenses.
+
 ## Backend key-license bundles
 
 - CUDA bundle key licenses: `LICENSES-cuda.txt`

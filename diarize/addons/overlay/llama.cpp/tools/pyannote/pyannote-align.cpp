@@ -21,7 +21,8 @@
 
 using json = nlohmann::json;
 
-struct diar_seg {
+// Keep this type name distinct from pyannote-diarize.cpp to avoid ODR collisions.
+struct align_diar_seg {
     double start_sec = 0.0;
     double end_sec = 0.0;
     std::string speaker = "UNKNOWN";
@@ -341,8 +342,8 @@ static std::vector<word_item> parse_words(const json & root) {
     return words;
 }
 
-static std::vector<diar_seg> parse_diar_segments_array(const json & arr) {
-    std::vector<diar_seg> segs;
+static std::vector<align_diar_seg> parse_diar_segments_array(const json & arr) {
+    std::vector<align_diar_seg> segs;
     if (!arr.is_array()) {
         return segs;
     }
@@ -351,7 +352,7 @@ static std::vector<diar_seg> parse_diar_segments_array(const json & arr) {
         if (!it.is_object()) {
             continue;
         }
-        diar_seg s;
+        align_diar_seg s;
         s.start_sec = get_number(it, {"start_sec", "start"}, 0.0);
         s.end_sec = get_number(it, {"end_sec", "end"}, s.start_sec);
         s.start_sec = std::max(0.0, s.start_sec);
@@ -362,7 +363,7 @@ static std::vector<diar_seg> parse_diar_segments_array(const json & arr) {
         }
         segs.push_back(std::move(s));
     }
-    std::sort(segs.begin(), segs.end(), [](const diar_seg & a, const diar_seg & b) {
+    std::sort(segs.begin(), segs.end(), [](const align_diar_seg & a, const align_diar_seg & b) {
         if (a.start_sec != b.start_sec) {
             return a.start_sec < b.start_sec;
         }
@@ -374,7 +375,7 @@ static std::vector<diar_seg> parse_diar_segments_array(const json & arr) {
     return segs;
 }
 
-static std::pair<std::vector<diar_seg>, std::string> parse_diarization_segments(const json & root, bool prefer_exclusive) {
+static std::pair<std::vector<align_diar_seg>, std::string> parse_diarization_segments(const json & root, bool prefer_exclusive) {
     const json * payload = &root;
     if (root.is_object() && root.contains("diarization_json") && root.at("diarization_json").is_object()) {
         payload = &root.at("diarization_json");
@@ -383,18 +384,18 @@ static std::pair<std::vector<diar_seg>, std::string> parse_diarization_segments(
         throw std::runtime_error("diarization JSON must be an object");
     }
 
-    auto get_by_key = [&](const char * key) -> std::vector<diar_seg> {
+    auto get_by_key = [&](const char * key) -> std::vector<align_diar_seg> {
         if (!payload->contains(key)) {
             return {};
         }
         return parse_diar_segments_array(payload->at(key));
     };
 
-    std::vector<diar_seg> exclusive = get_by_key("exclusive_speaker_diarization");
+    std::vector<align_diar_seg> exclusive = get_by_key("exclusive_speaker_diarization");
     if (exclusive.empty()) {
         exclusive = get_by_key("exclusive_diarization");
     }
-    std::vector<diar_seg> regular = get_by_key("regular_speaker_diarization");
+    std::vector<align_diar_seg> regular = get_by_key("regular_speaker_diarization");
     if (regular.empty()) {
         regular = get_by_key("speaker_diarization");
     }
@@ -696,7 +697,7 @@ static double interval_overlap(double a_start, double a_end, double b_start, dou
 static std::string pick_speaker_for_span(
     double start_sec,
     double end_sec,
-    const std::vector<diar_seg> & diarization_segments) {
+    const std::vector<align_diar_seg> & diarization_segments) {
     std::string best_speaker = "UNKNOWN";
     double best_overlap = 0.0;
     double best_center_distance = std::numeric_limits<double>::infinity();
@@ -739,7 +740,7 @@ static std::string pick_speaker_for_span(
 
 static std::vector<word_item> assign_speakers_to_words(
     const std::vector<word_item> & words,
-    const std::vector<diar_seg> & diarization_segments,
+    const std::vector<align_diar_seg> & diarization_segments,
     const plda_refinement_state & plda_state) {
     std::vector<word_item> out = words;
     if (diarization_segments.empty()) {
