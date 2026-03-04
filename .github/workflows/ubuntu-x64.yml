@@ -15,8 +15,8 @@ permissions:
 jobs:
   ubuntu-x64:
     # GitHub-hosted ubuntu-20.04 is no longer available.
-    # Use ubuntu-22.04 for stable Vulkan CI availability.
-    runs-on: ubuntu-22.04
+    # Use ubuntu-24.04 because it provides `glslc` in apt by default.
+    runs-on: ubuntu-24.04
     timeout-minutes: 240
     env:
       BACKEND: vulkan
@@ -528,8 +528,16 @@ jobs:
         run: |
           set -euo pipefail
           bundle="$BUILD_ROOT/bundle"
-          baseline_glibc="2.35"
-          baseline_glibcxx="3.4.30"
+          baseline_glibc="$(ldd --version | head -n1 | grep -oE '[0-9]+\.[0-9]+' | tail -n1)"
+          baseline_glibcxx="$(
+            strings /usr/lib/x86_64-linux-gnu/libstdc++.so.6 2>/dev/null \
+              | grep -oE 'GLIBCXX_[0-9]+\.[0-9]+(\.[0-9]+)?' \
+              | sed 's/^GLIBCXX_//' \
+              | sort -V \
+              | tail -n1 || true
+          )"
+          [[ -n "$baseline_glibc" ]] || { echo "Could not detect runner GLIBC baseline"; exit 1; }
+          [[ -n "$baseline_glibcxx" ]] || { echo "Could not detect runner GLIBCXX baseline"; exit 1; }
 
           check_version_not_newer() {
             local current="$1"
