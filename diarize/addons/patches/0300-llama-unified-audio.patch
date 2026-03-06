@@ -2425,3 +2425,558 @@ index a47149c..66fab89 100644
              mparams.print_timings    = false;
              mparams.n_threads        = params_base.cpuparams.n_threads;
              mparams.flash_attn_type  = params_base.flash_attn_type;
+
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index 5e7897b44..6ce9e369d 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -3080,6 +3080,283 @@ static std::string srv_audio_read_text(const std::filesystem::path & path) {
+     return oss.str();
+ }
+ 
++static bool srv_audio_is_utf8_continuation(unsigned char c) {
++    return (c & 0xC0) == 0x80;
++}
++
++static std::string srv_audio_repair_utf8(const std::string & text, size_t * replacements) {
++    if (replacements != nullptr) {
++        *replacements = 0;
++    }
++    std::string out;
++    out.reserve(text.size());
++
++    auto append_replacement = [&](size_t * i, size_t n) {
++        out.append("\xEF\xBF\xBD");
++        if (replacements != nullptr) {
++            (*replacements)++;
++        }
++        ++(*i);
++        while (*i < n && srv_audio_is_utf8_continuation((unsigned char) text[*i])) {
++            ++(*i);
++        }
++    };
++
++    const size_t n = text.size();
++    for (size_t i = 0; i < n;) {
++        const unsigned char c0 = (unsigned char) text[i];
++        if (c0 <= 0x7F) {
++            out.push_back((char) c0);
++            ++i;
++            continue;
++        }
++
++        if (c0 >= 0xC2 && c0 <= 0xDF) {
++            if (i + 1 < n) {
++                const unsigned char c1 = (unsigned char) text[i + 1];
++                if (srv_audio_is_utf8_continuation(c1)) {
++                    out.append(text, i, 2);
++                    i += 2;
++                    continue;
++                }
++            }
++            append_replacement(&i, n);
++            continue;
++        }
++
++        if (c0 == 0xE0) {
++            if (i + 2 < n) {
++                const unsigned char c1 = (unsigned char) text[i + 1];
++                const unsigned char c2 = (unsigned char) text[i + 2];
++                if (c1 >= 0xA0 && c1 <= 0xBF && srv_audio_is_utf8_continuation(c2)) {
++                    out.append(text, i, 3);
++                    i += 3;
++                    continue;
++                }
++            }
++            append_replacement(&i, n);
++            continue;
++        }
++
++        if (c0 >= 0xE1 && c0 <= 0xEC) {
++            if (i + 2 < n) {
++                const unsigned char c1 = (unsigned char) text[i + 1];
++                const unsigned char c2 = (unsigned char) text[i + 2];
++                if (srv_audio_is_utf8_continuation(c1) && srv_audio_is_utf8_continuation(c2)) {
++                    out.append(text, i, 3);
++                    i += 3;
++                    continue;
++                }
++            }
++            append_replacement(&i, n);
++            continue;
++        }
++
++        if (c0 == 0xED) {
++            if (i + 2 < n) {
++                const unsigned char c1 = (unsigned char) text[i + 1];
++                const unsigned char c2 = (unsigned char) text[i + 2];
++                if (c1 >= 0x80 && c1 <= 0x9F && srv_audio_is_utf8_continuation(c2)) {
++                    out.append(text, i, 3);
++                    i += 3;
++                    continue;
++                }
++            }
++            append_replacement(&i, n);
++            continue;
++        }
++
++        if (c0 >= 0xEE && c0 <= 0xEF) {
++            if (i + 2 < n) {
++                const unsigned char c1 = (unsigned char) text[i + 1];
++                const unsigned char c2 = (unsigned char) text[i + 2];
++                if (srv_audio_is_utf8_continuation(c1) && srv_audio_is_utf8_continuation(c2)) {
++                    out.append(text, i, 3);
++                    i += 3;
++                    continue;
++                }
++            }
++            append_replacement(&i, n);
++            continue;
++        }
++
++        if (c0 == 0xF0) {
++            if (i + 3 < n) {
++                const unsigned char c1 = (unsigned char) text[i + 1];
++                const unsigned char c2 = (unsigned char) text[i + 2];
++                const unsigned char c3 = (unsigned char) text[i + 3];
++                if (c1 >= 0x90 && c1 <= 0xBF &&
++                    srv_audio_is_utf8_continuation(c2) &&
++                    srv_audio_is_utf8_continuation(c3)) {
++                    out.append(text, i, 4);
++                    i += 4;
++                    continue;
++                }
++            }
++            append_replacement(&i, n);
++            continue;
++        }
++
++        if (c0 >= 0xF1 && c0 <= 0xF3) {
++            if (i + 3 < n) {
++                const unsigned char c1 = (unsigned char) text[i + 1];
++                const unsigned char c2 = (unsigned char) text[i + 2];
++                const unsigned char c3 = (unsigned char) text[i + 3];
++                if (srv_audio_is_utf8_continuation(c1) &&
++                    srv_audio_is_utf8_continuation(c2) &&
++                    srv_audio_is_utf8_continuation(c3)) {
++                    out.append(text, i, 4);
++                    i += 4;
++                    continue;
++                }
++            }
++            append_replacement(&i, n);
++            continue;
++        }
++
++        if (c0 == 0xF4) {
++            if (i + 3 < n) {
++                const unsigned char c1 = (unsigned char) text[i + 1];
++                const unsigned char c2 = (unsigned char) text[i + 2];
++                const unsigned char c3 = (unsigned char) text[i + 3];
++                if (c1 >= 0x80 && c1 <= 0x8F &&
++                    srv_audio_is_utf8_continuation(c2) &&
++                    srv_audio_is_utf8_continuation(c3)) {
++                    out.append(text, i, 4);
++                    i += 4;
++                    continue;
++                }
++            }
++            append_replacement(&i, n);
++            continue;
++        }
++
++        append_replacement(&i, n);
++    }
++
++    return out;
++}
++
++struct srv_audio_json_parse_result {
++    json value = json::object();
++    size_t utf8_repairs = 0;
++    size_t escaped_non_ascii_bytes = 0;
++    bool byte_escaped_strings = false;
++    bool raw_parse_ok = false;
++    bool fallback_used = false;
++    std::string parse_mode = "raw";
++};
++
++static void srv_audio_append_json_u00_escape(std::string & out, unsigned char c) {
++    static const char * kHex = "0123456789ABCDEF";
++    out.push_back('\\');
++    out.push_back('u');
++    out.push_back('0');
++    out.push_back('0');
++    out.push_back(kHex[(c >> 4) & 0x0F]);
++    out.push_back(kHex[c & 0x0F]);
++}
++
++static std::string srv_audio_escape_non_ascii_json_string_bytes(const std::string & raw_json, size_t * escaped_bytes) {
++    if (escaped_bytes != nullptr) {
++        *escaped_bytes = 0;
++    }
++    std::string out;
++    out.reserve(raw_json.size() + raw_json.size() / 2);
++
++    bool in_string = false;
++    bool escape_next = false;
++    for (size_t i = 0; i < raw_json.size(); ++i) {
++        const unsigned char c = (unsigned char) raw_json[i];
++        if (!in_string) {
++            out.push_back((char) c);
++            if (c == '"') {
++                in_string = true;
++                escape_next = false;
++            }
++            continue;
++        }
++
++        if (escape_next) {
++            out.push_back((char) c);
++            escape_next = false;
++            continue;
++        }
++
++        if (c == '\\') {
++            out.push_back((char) c);
++            escape_next = true;
++            continue;
++        }
++        if (c == '"') {
++            out.push_back((char) c);
++            in_string = false;
++            continue;
++        }
++
++        if (c < 0x20 || c >= 0x80) {
++            srv_audio_append_json_u00_escape(out, c);
++            if (escaped_bytes != nullptr) {
++                (*escaped_bytes)++;
++            }
++            continue;
++        }
++
++        out.push_back((char) c);
++    }
++
++    return out;
++}
++
++static srv_audio_json_parse_result srv_audio_parse_json_utf8_safe(const std::string & raw_json) {
++    srv_audio_json_parse_result result;
++
++    try {
++        result.raw_parse_ok = true;
++        result.parse_mode = "raw";
++        result.value = json::parse(raw_json);
++        return result;
++    } catch (const std::exception & first_error) {
++        std::string escaped_error;
++        size_t escaped_non_ascii_bytes = 0;
++        const std::string byte_escaped_json = srv_audio_escape_non_ascii_json_string_bytes(
++            raw_json,
++            &escaped_non_ascii_bytes);
++        if (escaped_non_ascii_bytes > 0) {
++            try {
++                result.value = json::parse(byte_escaped_json);
++                result.byte_escaped_strings = true;
++                result.escaped_non_ascii_bytes = escaped_non_ascii_bytes;
++                result.fallback_used = true;
++                result.parse_mode = "byte_escape";
++                return result;
++            } catch (const std::exception & e) {
++                escaped_error = e.what();
++            }
++        }
++
++        size_t repairs = 0;
++        const std::string repaired = srv_audio_repair_utf8(raw_json, &repairs);
++        if (repairs == 0) {
++            throw;
++        }
++        try {
++            result.value = json::parse(repaired);
++            result.utf8_repairs = repairs;
++            result.fallback_used = true;
++            result.parse_mode = "utf8_repair";
++            return result;
++        } catch (const std::exception & repaired_error) {
++            throw std::runtime_error(
++                "JSON parse failed after fallback(s): escaped_non_ascii=" + std::to_string(escaped_non_ascii_bytes) +
++                ", utf8_repairs=" + std::to_string(repairs) +
++                ", escaped_error=" + escaped_error +
++                ", repaired_error=" + std::string(repaired_error.what()) +
++                " | original error: " + std::string(first_error.what()));
++        }
++    }
++}
++
+ static std::filesystem::path srv_audio_find_latest_file(
+         const std::filesystem::path & dir,
+         const std::string & prefix,
+@@ -3291,7 +3568,166 @@ struct srv_audio_whisper_parse {
+     json words = json::array();
+ };
+ 
+-static srv_audio_whisper_parse srv_audio_parse_whisper_json(const json & whisper_json) {
++static std::string srv_audio_decode_byte_escaped_raw_bytes(const std::string & text) {
++    std::string raw;
++    raw.reserve(text.size());
++
++    auto append_decoded = [&](uint32_t cp, size_t pos, size_t len) {
++        if (cp <= 0xFF) {
++            raw.push_back((char) cp);
++        } else {
++            raw.append(text, pos, len);
++        }
++    };
++
++    const size_t n = text.size();
++    for (size_t i = 0; i < n;) {
++        const unsigned char c0 = (unsigned char) text[i];
++        if (c0 <= 0x7F) {
++            raw.push_back((char) c0);
++            ++i;
++            continue;
++        }
++
++        if (c0 >= 0xC2 && c0 <= 0xDF && i + 1 < n) {
++            const unsigned char c1 = (unsigned char) text[i + 1];
++            if (srv_audio_is_utf8_continuation(c1)) {
++                const uint32_t cp = ((uint32_t) (c0 & 0x1F) << 6) | (uint32_t) (c1 & 0x3F);
++                append_decoded(cp, i, 2);
++                i += 2;
++                continue;
++            }
++        }
++
++        if (c0 == 0xE0 && i + 2 < n) {
++            const unsigned char c1 = (unsigned char) text[i + 1];
++            const unsigned char c2 = (unsigned char) text[i + 2];
++            if (c1 >= 0xA0 && c1 <= 0xBF && srv_audio_is_utf8_continuation(c2)) {
++                const uint32_t cp = ((uint32_t) (c0 & 0x0F) << 12) |
++                                    ((uint32_t) (c1 & 0x3F) << 6) |
++                                    (uint32_t) (c2 & 0x3F);
++                append_decoded(cp, i, 3);
++                i += 3;
++                continue;
++            }
++        }
++        if (c0 >= 0xE1 && c0 <= 0xEC && i + 2 < n) {
++            const unsigned char c1 = (unsigned char) text[i + 1];
++            const unsigned char c2 = (unsigned char) text[i + 2];
++            if (srv_audio_is_utf8_continuation(c1) && srv_audio_is_utf8_continuation(c2)) {
++                const uint32_t cp = ((uint32_t) (c0 & 0x0F) << 12) |
++                                    ((uint32_t) (c1 & 0x3F) << 6) |
++                                    (uint32_t) (c2 & 0x3F);
++                append_decoded(cp, i, 3);
++                i += 3;
++                continue;
++            }
++        }
++        if (c0 == 0xED && i + 2 < n) {
++            const unsigned char c1 = (unsigned char) text[i + 1];
++            const unsigned char c2 = (unsigned char) text[i + 2];
++            if (c1 >= 0x80 && c1 <= 0x9F && srv_audio_is_utf8_continuation(c2)) {
++                const uint32_t cp = ((uint32_t) (c0 & 0x0F) << 12) |
++                                    ((uint32_t) (c1 & 0x3F) << 6) |
++                                    (uint32_t) (c2 & 0x3F);
++                append_decoded(cp, i, 3);
++                i += 3;
++                continue;
++            }
++        }
++        if (c0 >= 0xEE && c0 <= 0xEF && i + 2 < n) {
++            const unsigned char c1 = (unsigned char) text[i + 1];
++            const unsigned char c2 = (unsigned char) text[i + 2];
++            if (srv_audio_is_utf8_continuation(c1) && srv_audio_is_utf8_continuation(c2)) {
++                const uint32_t cp = ((uint32_t) (c0 & 0x0F) << 12) |
++                                    ((uint32_t) (c1 & 0x3F) << 6) |
++                                    (uint32_t) (c2 & 0x3F);
++                append_decoded(cp, i, 3);
++                i += 3;
++                continue;
++            }
++        }
++
++        if (c0 == 0xF0 && i + 3 < n) {
++            const unsigned char c1 = (unsigned char) text[i + 1];
++            const unsigned char c2 = (unsigned char) text[i + 2];
++            const unsigned char c3 = (unsigned char) text[i + 3];
++            if (c1 >= 0x90 && c1 <= 0xBF &&
++                srv_audio_is_utf8_continuation(c2) &&
++                srv_audio_is_utf8_continuation(c3)) {
++                const uint32_t cp = ((uint32_t) (c0 & 0x07) << 18) |
++                                    ((uint32_t) (c1 & 0x3F) << 12) |
++                                    ((uint32_t) (c2 & 0x3F) << 6) |
++                                    (uint32_t) (c3 & 0x3F);
++                append_decoded(cp, i, 4);
++                i += 4;
++                continue;
++            }
++        }
++        if (c0 >= 0xF1 && c0 <= 0xF3 && i + 3 < n) {
++            const unsigned char c1 = (unsigned char) text[i + 1];
++            const unsigned char c2 = (unsigned char) text[i + 2];
++            const unsigned char c3 = (unsigned char) text[i + 3];
++            if (srv_audio_is_utf8_continuation(c1) &&
++                srv_audio_is_utf8_continuation(c2) &&
++                srv_audio_is_utf8_continuation(c3)) {
++                const uint32_t cp = ((uint32_t) (c0 & 0x07) << 18) |
++                                    ((uint32_t) (c1 & 0x3F) << 12) |
++                                    ((uint32_t) (c2 & 0x3F) << 6) |
++                                    (uint32_t) (c3 & 0x3F);
++                append_decoded(cp, i, 4);
++                i += 4;
++                continue;
++            }
++        }
++        if (c0 == 0xF4 && i + 3 < n) {
++            const unsigned char c1 = (unsigned char) text[i + 1];
++            const unsigned char c2 = (unsigned char) text[i + 2];
++            const unsigned char c3 = (unsigned char) text[i + 3];
++            if (c1 >= 0x80 && c1 <= 0x8F &&
++                srv_audio_is_utf8_continuation(c2) &&
++                srv_audio_is_utf8_continuation(c3)) {
++                const uint32_t cp = ((uint32_t) (c0 & 0x07) << 18) |
++                                    ((uint32_t) (c1 & 0x3F) << 12) |
++                                    ((uint32_t) (c2 & 0x3F) << 6) |
++                                    (uint32_t) (c3 & 0x3F);
++                append_decoded(cp, i, 4);
++                i += 4;
++                continue;
++            }
++        }
++
++        raw.push_back((char) c0);
++        ++i;
++    }
++
++    return raw;
++}
++
++static std::string srv_audio_decode_byte_escaped_utf8_text(const std::string & text, size_t * utf8_repairs) {
++    std::string raw = srv_audio_decode_byte_escaped_raw_bytes(text);
++    size_t repairs = 0;
++    std::string repaired = srv_audio_repair_utf8(raw, &repairs);
++    if (utf8_repairs != nullptr) {
++        *utf8_repairs += repairs;
++    }
++    return repaired;
++}
++
++static std::string srv_audio_decode_whisper_json_text(
++    const std::string & text,
++    bool byte_escaped_strings,
++    size_t * utf8_repairs) {
++    if (!byte_escaped_strings) {
++        return text;
++    }
++    return srv_audio_decode_byte_escaped_utf8_text(text, utf8_repairs);
++}
++
++static srv_audio_whisper_parse srv_audio_parse_whisper_json(
++        const json & whisper_json,
++        bool byte_escaped_strings,
++        size_t * utf8_repairs) {
+     srv_audio_whisper_parse out;
+     if (!whisper_json.is_object()) {
+         return out;
+@@ -3308,7 +3744,9 @@ static srv_audio_whisper_parse srv_audio_parse_whisper_json(const json & whisper
+             continue;
+         }
+ 
+-        std::string seg_text = srv_audio_collapse_ws(json_value(seg, "text", std::string()));
++        std::string seg_text = json_value(seg, "text", std::string());
++        seg_text = srv_audio_decode_whisper_json_text(seg_text, byte_escaped_strings, utf8_repairs);
++        seg_text = srv_audio_collapse_ws(seg_text);
+         if (!seg_text.empty()) {
+             transcript_parts.push_back(seg_text);
+         }
+@@ -3342,6 +3780,9 @@ static srv_audio_whisper_parse srv_audio_parse_whisper_json(const json & whisper
+                         continue;
+                     }
+                     has = true;
++                    if (c >= 0x80) {
++                        return false;
++                    }
+                     if (std::isalnum(c)) {
+                         return false;
+                     }
+@@ -3352,13 +3793,23 @@ static srv_audio_whisper_parse srv_audio_parse_whisper_json(const json & whisper
+             std::string cur_word;
+             double cur_start = 0.0;
+             double cur_end = 0.0;
++            bool cur_has_leading_space = false;
+             bool has_cur = false;
+ 
+             auto flush_cur = [&]() {
+-                const std::string w = srv_audio_sanitize_word_token(cur_word);
++                std::string word_text = cur_word;
++                if (byte_escaped_strings) {
++                    size_t repairs = 0;
++                    word_text = srv_audio_repair_utf8(word_text, &repairs);
++                    if (utf8_repairs != nullptr) {
++                        *utf8_repairs += repairs;
++                    }
++                }
++                const std::string w = srv_audio_sanitize_word_token(word_text);
+                 if (!w.empty()) {
+                     out.words.push_back({
+                         {"word", w},
++                        {"has_leading_space", cur_has_leading_space},
+                         {"start_sec", srv_audio_round3(cur_start)},
+                         {"end_sec", srv_audio_round3(std::max(cur_start, cur_end))},
+                     });
+@@ -3367,6 +3818,7 @@ static srv_audio_whisper_parse srv_audio_parse_whisper_json(const json & whisper
+                 cur_word.clear();
+                 cur_start = 0.0;
+                 cur_end = 0.0;
++                cur_has_leading_space = false;
+                 has_cur = false;
+             };
+ 
+@@ -3376,6 +3828,11 @@ static srv_audio_whisper_parse srv_audio_parse_whisper_json(const json & whisper
+                 }
+ 
+                 std::string tok_text = json_value(tok, "text", std::string());
++                if (byte_escaped_strings) {
++                    tok_text = srv_audio_decode_byte_escaped_raw_bytes(tok_text);
++                } else {
++                    tok_text = srv_audio_decode_whisper_json_text(tok_text, false, utf8_repairs);
++                }
+                 if (tok_text.empty()) {
+                     continue;
+                 }
+@@ -3410,6 +3867,7 @@ static srv_audio_whisper_parse srv_audio_parse_whisper_json(const json & whisper
+                     cur_word = tok_text;
+                     cur_start = tok_start;
+                     cur_end = tok_end;
++                    cur_has_leading_space = has_leading_space;
+                     has_cur = true;
+                     continue;
+                 }
+@@ -3419,6 +3877,7 @@ static srv_audio_whisper_parse srv_audio_parse_whisper_json(const json & whisper
+                     cur_word = tok_text;
+                     cur_start = tok_start;
+                     cur_end = tok_end;
++                    cur_has_leading_space = has_leading_space;
+                     has_cur = true;
+                     continue;
+                 }
+@@ -5144,8 +5603,13 @@ void server_routes::init_routes() {
+             return res;
+         }
+ 
+-        const json whisper_json = json::parse(srv_audio_read_text(whisper_json_path));
+-        const auto parsed_whisper = srv_audio_parse_whisper_json(whisper_json);
++        const auto whisper_json_parse = srv_audio_parse_json_utf8_safe(
++            srv_audio_read_text(whisper_json_path));
++        size_t whisper_text_utf8_repairs = 0;
++        const auto parsed_whisper = srv_audio_parse_whisper_json(
++            whisper_json_parse.value,
++            whisper_json_parse.byte_escaped_strings,
++            &whisper_text_utf8_repairs);
+         transcript = parsed_whisper.transcript;
+         words = parsed_whisper.words;
+         srv_audio_shift_word_timestamps(words, whisper_word_time_offset_sec, /* source_audio_seconds */ -1.0);
