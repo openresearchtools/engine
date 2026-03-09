@@ -106,6 +106,7 @@ struct server_routes {
     server_http_context::handler_t post_embeddings_oai;
     server_http_context::handler_t post_rerank;
     server_http_context::handler_t post_audio_transcriptions;
+    std::function<server_http_res_ptr(const std::string &, const raw_buffer &, const json &)> post_audio_transcriptions_raw;
     server_http_context::handler_t get_lora_adapters;
     server_http_context::handler_t post_lora_adapters;
 private:

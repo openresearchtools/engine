@@ -1,3 +1,7 @@
+#[allow(dead_code)]
+mod audio_assembler;
+#[allow(dead_code)]
+mod audio_orchestrator;
 mod llama_bridge;
 
 use std::env;
@@ -14,6 +18,7 @@ bridge subcommands:
   list-devices
   vlm
   audio
+  audio-session
   chat
   embed
   rerank
@@ -21,6 +26,8 @@ bridge subcommands:
 examples:
   engine list-devices
   engine bridge audio --audio-file <audio-file> --mode speech --custom default --whisper-model <whisper.bin>
+  engine bridge audio-session --audio-file <audio-file> --diarization-model-path <sortformer.gguf> --whisper-model <whisper.bin>
+  engine bridge audio-session --stdin-pcm-s16le --transcription-realtime-model <voxtral.gguf>
   engine chat --model <gguf> --markdown <file.md>
   engine vlm --model <gguf> --mmproj <gguf> --image <image.png>
   engine pdf extract --input <file-or-dir> --output <path>

@@ -3,6 +3,7 @@
 This document covers transcription and diarization calls through:
 - `llama_server_bridge_audio_transcriptions` (JSON body)
 - `llama_server_bridge_audio_transcriptions_raw` (raw bytes + metadata)
+- `llama_server_bridge_audio_session_*` (shared PCM session with separate task control)
 
 Reference header: `bridge/llama_server_bridge.h`.
 
@@ -102,15 +103,135 @@ Body must be a JSON object accepted by `/v1/audio/transcriptions` route.
 Call:
 - `llama_server_bridge_audio_transcriptions_raw(bridge, &req, &out)`
 
+## Audio session API
+
+The session API is the new bridge-level control surface for Rust orchestration:
+- one shared audio ingress timeline
+- separate `start_diarization(...)` and `start_transcription(...)`
+- staged or simultaneous execution on the same buffered audio
+- one unified event queue back to Rust
+
+Current exported session calls:
+- `llama_server_bridge_audio_session_create`
+- `llama_server_bridge_audio_session_push_audio`
+- `llama_server_bridge_audio_session_push_encoded`
+- `llama_server_bridge_audio_session_flush_audio`
+- `llama_server_bridge_audio_session_start_diarization`
+- `llama_server_bridge_audio_session_stop_diarization`
+- `llama_server_bridge_audio_session_start_transcription`
+- `llama_server_bridge_audio_session_stop_transcription`
+- `llama_server_bridge_audio_session_wait_events`
+- `llama_server_bridge_audio_session_drain_events`
+- `llama_server_bridge_audio_session_last_error`
+
+### Session model
+
+Control plane:
+- diarization can run alone
+- transcription can run alone
+- both can run together
+- either task can be started after audio has already been buffered
+
+Data plane:
+- audio is pushed once into the session
+- the session keeps one shared PCM timeline
+- late-start diarization replays the original buffered chunk boundaries into the existing realtime backend
+- offline/final transcription runs from the buffered PCM after `flush_audio()`
+
+### PCM ingress
+
+`llama_server_bridge_audio_session_push_audio(...)` currently accepts:
+- mono PCM only
+- session sample rate only
+- `F32` or `S16`
+
+Default session format:
+- `16000 Hz`
+- `1 channel`
+
+If you have encoded file bytes:
+- use `llama_server_bridge_audio_session_push_encoded(...)`
+- the bridge reuses shared FFmpeg conversion and pushes the normalized stream into the same session timeline
+
+### Current event behavior
+
+Diarization emits bridge-normalized commit events:
+- diarization started/stopped
+- speaker span commit
+- backend status/error
+- future realtime transcript commit support is reserved in the ABI
+
+Transcription currently emits:
+- transcription started
+- `TRANSCRIPTION_WORD_COMMIT`
+- `TRANSCRIPTION_PIECE_COMMIT`
+- one final `TRANSCRIPTION_RESULT_JSON` event
+- transcription stopped
+
+The session transcription path forces the native audio route into `mode=timeline`, which returns:
+- `transcript`
+- `words`
+- `whisper_pieces`
+- `segments`
+
+The bridge translates `words` and `whisper_pieces` into typed session events and still emits the final native JSON payload for debugging/replay. This keeps the current model logic intact while Rust takes ownership of downstream alignment/orchestration policy.
+
+### Rust orchestration path
+
+The `engine` crate now exposes a bridge-level runner for this ABI:
+
+```powershell
+engine bridge audio-session `
+  --audio-file C:\path\clip.wav `
+  --diarization-model-path C:\models\sortformer.gguf `
+  --whisper-model C:\models\whisper.bin `
+  --out C:\path\diarized_transcript.md `
+  --timeline-json-out C:\path\timeline.json
+```
+
+Live raw PCM stdin with native realtime transcription and diarization:
+
+```cmd
+engine bridge audio-session ^
+  --stdin-pcm-s16le ^
+  --session-sample-rate 16000 ^
+  --diarization-model-path C:\models\sortformer.gguf ^
+  --transcription-realtime-model C:\models\voxtral.gguf ^
+  --out C:\path\live_transcript.md ^
+  < C:\path\clip.raw
+```
+
+`audio-session` now supports:
+- file input with `--audio-file`
+- live raw PCM stdin with `--stdin-pcm-s16le` or `--stdin-pcm-f32le`
+- diarization only, transcription only, or combined
+- staged execution with `--staged`
+- offline Whisper route or native realtime transcription on the same Rust-side session path
+- rolling committed updates:
+  - when `--out` is set, the transcript file is rewritten during the run as committed text/turns arrive
+  - when `--timeline-json-out` is set, the latest transcription JSON is rewritten during the run
+  - for live stdin runs without `--out`, committed transcript updates are written to stdout incrementally
+
+Useful flags:
+- `--staged` to run diarization first and transcription second on the same buffered audio
+- `--alignment-offset-ms` to apply a bounded global transcript-vs-diarization offset in Rust
+- `--nearest-tolerance-ms` to control small nearest-span assignment fallback
+
+The Rust assembler uses:
+- speaker spans as the ownership truth source
+- Whisper pieces as the primary transcript unit
+- adjacency-only reassignment for `UNASSIGNED` text
+- word timestamps only for local sentence-boundary cleanup
+
 ## Metadata keys supported by runtime
 
 Core mode/source keys:
-- `mode`: `subtitle`, `speech`, or `transcript`
+- `mode`: `subtitle`, `speech`, `transcript`, or `timeline`
 - `custom`: mode-specific (`default`, `auto`, or numeric depending on mode)
 - `whisper_model` or `whisper_model_path`
 - `whisper_hf_repo` + `whisper_hf_file`
+- `diarization_model_path`
 - `diarization_models_dir` or `diarization_model_dir`
-- `diarization_hf_repo`
 
 Device keys:
 - `gpu` (index)
@@ -140,15 +261,11 @@ Advanced whisper keys:
 
 Advanced diarization/alignment keys:
 - `diarization_backend`
-- `diarization_offline`
-- `diarization_embedding_min_segment_duration_sec`
-- `diarization_embedding_max_segments_per_speaker`
-- `diarization_min_duration_off_sec`
+- `diarization_feed_ms`
 - `speaker_seg_max_gap_sec`
 - `speaker_seg_max_words`
 - `speaker_seg_max_duration_sec`
 - `speaker_seg_split_on_hard_break`
-- `aligner_plda_sim_threshold`
 
 ## Full audio example (advanced metadata)
 
@@ -158,12 +275,13 @@ const char *metadata =
     "\"mode\":\"transcript\","
     "\"custom\":\"auto\","
     "\"whisper_model\":\"C:/models/whisper.bin\","
-    "\"diarization_models_dir\":\"C:/models/diarization\","
+    "\"diarization_model_path\":\"C:/models/diarization/sortformer.gguf\","
     "\"gpu\":1,"
     "\"whisper_threads\":8,"
     "\"whisper_flash_attn\":true,"
-    "\"diarization_backend\":\"native_cpp\","
-    "\"diarization_embedding_min_segment_duration_sec\":0.8"
+    "\"diarization_backend\":\"sortformer\","
+    "\"diarization_feed_ms\":470,"
+    "\"speaker_seg_split_on_hard_break\":true"
     "}";
 
 llama_server_bridge_audio_raw_request req = llama_server_bridge_default_audio_raw_request();

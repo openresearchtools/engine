@@ -1,12 +1,9 @@
 # Extras (conversion tooling)
 
-Tooling scripts for pyannote model conversion and GGUF packaging.
+Tooling scripts for upstream sync, release inventory, and one-off packaging support.
 
 ## Scripts
 
-- `convert_pyannote_checkpoint_to_gguf.py`
-- `convert_pyannote_npz_to_gguf.py`
-- `convert_pyannote_to_gguf.ps1`
 - `update_upstreams.ps1`
 - `release_inventory.ps1`
 
@@ -25,8 +22,7 @@ These scripts are tooling-only and not part of runtime inference.
 
 ## Local dependencies
 
-- [`third_party/llama.cpp/gguf-py/`](https://github.com/openresearchtools/engine/tree/main/third_party/llama.cpp/gguf-py/) for GGUF writer import
-- Python environment with conversion dependencies
+- Python is only needed for the helper scripts in this folder.
 
 ## Licenses and notices
 

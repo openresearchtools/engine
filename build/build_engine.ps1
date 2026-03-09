@@ -170,14 +170,21 @@ function Stage-RepoLicenseFiles {
 
     New-Item -ItemType Directory -Force -Path $BundleLicenseRoot | Out-Null
 
+    $licenseGenerator = Join-Path $RepoRoot "build\generate_license_bundles.ps1"
+    if (Test-Path -LiteralPath $licenseGenerator) {
+        & $licenseGenerator -RepoRoot $RepoRoot -OutputRoot $BundleLicenseRoot
+    } else {
+        Write-Warning "License bundle generator not found at '$licenseGenerator' (using checked-in LICENSES*.txt only)"
+    }
+
     $destDir = Join-Path $BundleLicenseRoot "third_party"
     New-Item -ItemType Directory -Force -Path $destDir | Out-Null
 
     $excludedTopLevelFiles = @(
         "torch-LICENSE.txt",
         "torch-NOTICE.txt",
-        "torchaudio-LICENSE.txt",
         "numpy-LICENSE.txt",
+        "PyYAML-LICENSE.txt",
         "ffmpeg-SOURCE.txt",
         "ffmpeg-SOURCE-windows-x64.txt",
         "ffmpeg-SOURCE-ubuntu-x64.txt",

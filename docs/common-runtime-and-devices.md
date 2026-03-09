@@ -110,4 +110,4 @@ All fields in `llama_server_bridge_params`:
 
 - Always initialize structs with `*_default_*()` helpers.
 - Keep one bridge instance alive for multiple requests to avoid repeated model load cost.
-- Increase `n_parallel` only if you intentionally run concurrent requests.
+- Increase `n_parallel` only for concurrent requests.

@@ -21,7 +21,6 @@ param(
     [bool]$StageWhisperSource = $true,
     [bool]$BuildWhisperCli = $false,
     [switch]$BuildLlamaServerCli,
-    [switch]$BuildPyannoteCli,
     [switch]$EnableFfmpeg,
     [bool]$EnableCpuAllVariants = $false,
     [ValidateSet("off", "openssl", "boringssl", "libressl")]
@@ -328,7 +327,6 @@ $bridgeArgs = @{
     StageBridgeSources = $true
     StageWhisperSource = $StageWhisperSource
     BuildLlamaServerCli = $BuildLlamaServerCli.IsPresent
-    BuildPyannoteCli = $BuildPyannoteCli.IsPresent
     Jobs = $Jobs
 }
 if ($EnableCpuAllVariants) {

@@ -81,6 +81,33 @@ Defaults:
 - Repo source: `third_party/llama.cpp`
 - Patch: `diarize/addons/patches/0300-llama-unified-audio.patch`
 
+Overlay behavior:
+
+- repo overlay sources under `diarize/addons/overlay/llama.cpp/tools/` are copied into the prepared workspace
+- this includes the standalone native realtime subsystem under `tools/realtime/`
+- the patch is now primarily for upstream wiring/hooks, not as the only storage location for the realtime source files
+
+## Realtime native tooling
+
+The native realtime Sortformer runtime now lives as normal overlay source under:
+
+- `diarize/addons/overlay/llama.cpp/tools/realtime/`
+- `diarize/addons/overlay/llama.cpp/tools/server/`
+
+The only repo-kept model tool for that path is:
+
+- `build/sortformer/convert_nemo_sortformer_to_gguf.py`
+
+## License bundle maintenance
+
+Regenerate the curated top-level license bundle files after updating `third_party/licenses/README.md` or the top-level license set:
+
+```powershell
+.\build\generate_license_bundles.ps1
+```
+
+`build_engine.ps1` now regenerates the bundle `LICENSES*.txt` files into the output `licenses/` folder during staging, and the GitHub Actions workflows regenerate the checked-out `LICENSES*.txt` files before their preflight checks.
+
 ## One-command full backend flow (CUDA or Vulkan)
 
 This builds patched llama+bridge for the selected backend, fetches runtime deps, then builds/stages engine bundle.
@@ -132,7 +159,6 @@ Default outputs:
   -Config Release `
   -BuildDir "..\ENGINEbuilds\llama\cmake-cuda-release" `
   -BuildLlamaServerCli:$false `
-  -BuildPyannoteCli:$false `
   -EnableFfmpeg
 ```
 
@@ -165,7 +191,7 @@ Default outputs:
 - `licenses/LICENSES.txt` (key runtime/release license texts combined into one file)
 - `licenses/THIRD_PARTY_NOTICES.md` (bundle-level notice index with pointers)
 - `licenses/third_party/*` copied from repo `third_party/licenses` top-level curated files
-  (tooling-only `torch`/`numpy`/`torchaudio` files are intentionally excluded)
+  (tooling-only `torch`/`numpy`/`PyYAML` files are not included in these curated shipped bundles)
 - `licenses/rust-full/*` copied from repo `third_party/licenses/rust-full`
 
 ## GitHub Actions: Windows x64 (CUDA or Vulkan)

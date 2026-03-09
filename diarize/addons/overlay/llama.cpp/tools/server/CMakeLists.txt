@@ -16,9 +16,6 @@ add_library(${TARGET} STATIC
 )
 
 target_sources(${TARGET} PRIVATE
-    ../pyannote/pyannote-align.cpp
-    ../pyannote/pyannote-diarize.cpp
-    ../pyannote/pyannote-entrypoints.h
     ../whisper/whisper-cli-entrypoint.cpp
     ../whisper/whisper-cli-entrypoint.h
     ../whisper/whisper-common-audio.cpp
@@ -26,7 +23,6 @@ target_sources(${TARGET} PRIVATE
     ../../../whisper.cpp/src/whisper.cpp
 )
 target_compile_definitions(${TARGET} PRIVATE
-    LLAMA_PYANNOTE_NO_MAIN=1
     WHISPER_VERSION=\"llama-server-inproc\"
 )
 
@@ -35,14 +31,14 @@ if (BUILD_SHARED_LIBS)
 endif()
 
 target_include_directories(${TARGET} PRIVATE ../mtmd)
-target_include_directories(${TARGET} PRIVATE ../pyannote)
+target_include_directories(${TARGET} PRIVATE ../realtime)
 target_include_directories(${TARGET} PRIVATE ../whisper)
 target_include_directories(${TARGET} PRIVATE ../../../whisper.cpp/examples)
 target_include_directories(${TARGET} PRIVATE ../../../whisper.cpp/include)
 target_include_directories(${TARGET} PRIVATE ../../../whisper.cpp/src)
 target_include_directories(${TARGET} PRIVATE ../../vendor ../../ggml/include)
 target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
-target_link_libraries(${TARGET} PUBLIC common mtmd ${CMAKE_THREAD_LIBS_INIT})
+target_link_libraries(${TARGET} PUBLIC common mtmd llama-realtime-core ${CMAKE_THREAD_LIBS_INIT})
 
 
 # llama-server executable
@@ -89,15 +85,3 @@ if (WIN32)
 endif()
 
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
-
-#
-# Debug utility for reproducing in-process whisper + pyannote pipeline outside HTTP handling.
-#
-add_executable(inproc-pipeline-repro
-    inproc-pipeline-repro.cpp
-)
-target_include_directories(inproc-pipeline-repro PRIVATE ../pyannote)
-target_include_directories(inproc-pipeline-repro PRIVATE ../whisper)
-target_include_directories(inproc-pipeline-repro PRIVATE ${CMAKE_SOURCE_DIR})
-target_link_libraries(inproc-pipeline-repro PRIVATE server-context)
-target_compile_features(inproc-pipeline-repro PRIVATE cxx_std_17)

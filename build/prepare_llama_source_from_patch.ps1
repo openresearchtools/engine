@@ -1,6 +1,7 @@
 param(
     [string]$OutDir = "",
-    [switch]$Force
+    [switch]$Force,
+    [switch]$SkipPatch
 )
 
 $ErrorActionPreference = "Stop"
@@ -53,6 +54,9 @@ if (-not [string]::IsNullOrWhiteSpace($OutDir)) {
 }
 if ($Force) {
     $args += "--force"
+}
+if ($SkipPatch) {
+    $args += "--skip-patch"
 }
 
 & $pythonExe @args

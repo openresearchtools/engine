@@ -1,5 +1,7 @@
 param(
     [string]$CmakeExe = "cmake",
+    [string]$CmakeGenerator = "Visual Studio 17 2022",
+    [string]$CmakeArch = "x64",
     [ValidateSet("Debug", "Release", "RelWithDebInfo", "MinSizeRel")]
     [string]$Config = "Release",
     [ValidateSet("cpu", "cuda", "vulkan")]
@@ -13,7 +15,8 @@ param(
     [bool]$StageBridgeSources = $true,
     [bool]$StageWhisperSource = $true,
     [switch]$BuildLlamaServerCli,
-    [switch]$BuildPyannoteCli,
+    [switch]$BuildRealtimeSmoke,
+    [switch]$BuildRealtimeBridgeSmoke,
     [switch]$EnableFfmpeg,
     [bool]$EnableBackendDl = $false,
     [bool]$EnableCpuAllVariants = $false,
@@ -64,6 +67,9 @@ function Copy-DirectoryTree {
     if (-not (Test-Path -LiteralPath $SourceRoot)) {
         throw "Source directory not found: $SourceRoot"
     }
+    if ([System.IO.Path]::GetFullPath($SourceRoot).TrimEnd('\') -eq [System.IO.Path]::GetFullPath($DestinationRoot).TrimEnd('\')) {
+        throw "Refusing to copy a directory onto itself: $SourceRoot"
+    }
 
     if (Test-Path -LiteralPath $DestinationRoot) {
         Remove-Item -LiteralPath $DestinationRoot -Recurse -Force
@@ -107,11 +113,6 @@ function Assert-AudioPatchApplied {
             Path = Join-Path $LlamaRoot "tools\\whisper\\whisper-cli-entrypoint.cpp"
             Pattern = "whisper_cli_inproc_main"
             Name = "whisper in-process entrypoint"
-        },
-        @{
-            Path = Join-Path $LlamaRoot "tools\\pyannote\\pyannote-entrypoints.h"
-            Pattern = "llama_pyannote_diarize_main"
-            Name = "pyannote in-process entrypoint"
         },
         @{
             Path = Join-Path $LlamaRoot "whisper.cpp\\examples\\grammar-parser.cpp"
@@ -254,11 +255,21 @@ function Ensure-BridgeCmakeHooks {
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $buildsRoot = Join-Path (Split-Path -Parent $repoRoot) "ENGINEbuilds"
 $CmakeExe = Resolve-CmakeExecutable -ToolValue $CmakeExe
+$repoLlamaCppDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "third_party\\llama.cpp"))
+$repoWhisperCppDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "third_party\\whisper.cpp"))
+$autoPreparedSource = $false
 
 if ([string]::IsNullOrWhiteSpace($LlamaCppDir)) {
-    $LlamaCppDir = Join-Path $repoRoot "third_party\\llama.cpp"
+    $LlamaCppDir = Join-Path $buildsRoot "sources\\llama.cpp"
+    $autoPreparedSource = $true
 }
 $LlamaCppDir = Resolve-AbsolutePath -PathValue $LlamaCppDir -RepoRoot $repoRoot
+
+if ([System.IO.Path]::GetFullPath($LlamaCppDir).TrimEnd('\') -eq $repoLlamaCppDir.TrimEnd('\')) {
+    $LlamaCppDir = Join-Path $buildsRoot "sources\\llama.cpp"
+    $LlamaCppDir = Resolve-AbsolutePath -PathValue $LlamaCppDir -RepoRoot $repoRoot
+    $autoPreparedSource = $true
+}
 
 if ([string]::IsNullOrWhiteSpace($WhisperCppDir)) {
     $WhisperCppDir = Join-Path $repoRoot "third_party\\whisper.cpp"
@@ -277,6 +288,30 @@ $BuildDir = Resolve-AbsolutePath -PathValue $BuildDir -RepoRoot $repoRoot
 
 if (Test-IsUnderPath -PathValue $BuildDir -BasePath $repoRoot) {
     throw "BuildDir must be outside the repo. Use a path under ..\\ENGINEbuilds. Current: $BuildDir"
+}
+
+if (Test-IsUnderPath -PathValue $LlamaCppDir -BasePath $repoRoot) {
+    $llamaInsideRepo = [System.IO.Path]::GetFullPath($LlamaCppDir).TrimEnd('\')
+    if ($llamaInsideRepo -ne $repoLlamaCppDir.TrimEnd('\')) {
+        throw "LlamaCppDir must be outside the repo. Current: $LlamaCppDir"
+    }
+}
+
+if ($autoPreparedSource) {
+    $prepareScript = Join-Path $PSScriptRoot "prepare_llama_source_from_patch.ps1"
+    if (-not (Test-Path -LiteralPath $prepareScript)) {
+        throw "Missing llama source prep script: $prepareScript"
+    }
+    & $prepareScript -OutDir $LlamaCppDir -Force
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to prepare external llama source."
+    }
+    $preparedSiblingWhisper = Join-Path (Split-Path -Parent $LlamaCppDir) "whisper.cpp"
+    if ([string]::IsNullOrWhiteSpace($WhisperCppDir) -or [System.IO.Path]::GetFullPath($WhisperCppDir).TrimEnd('\') -eq $repoWhisperCppDir.TrimEnd('\')) {
+        $WhisperCppDir = $preparedSiblingWhisper
+    }
+    $StageBridgeSources = $false
+    $StageWhisperSource = $false
 }
 
 if ([string]::IsNullOrWhiteSpace($BridgeSrcDir)) {
@@ -307,6 +342,9 @@ if ($cmakeText -notmatch 'project\("llama\.cpp"') {
 }
 
 if ($StageBridgeSources) {
+    if (Test-IsUnderPath -PathValue $LlamaCppDir -BasePath $repoRoot) {
+        throw "StageBridgeSources cannot target repo sources. Use an external prepared llama source."
+    }
     Ensure-BridgeCmakeHooks -LlamaRoot $LlamaCppDir
 }
 
@@ -320,20 +358,44 @@ if ($StageBridgeSources) {
 }
 
 if ($StageWhisperSource) {
+    if (Test-IsUnderPath -PathValue $LlamaCppDir -BasePath $repoRoot) {
+        throw "StageWhisperSource cannot target repo sources. Use an external prepared llama source."
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $WhisperCppDir "CMakeLists.txt"))) {
+        $llamaParentDir = Split-Path -Parent $LlamaCppDir
+        $fallbackCandidates = @(
+            (Join-Path $llamaParentDir "whisper.cpp"),
+            (Join-Path $LlamaCppDir "whisper.cpp")
+        )
+        foreach ($candidate in $fallbackCandidates) {
+            if (Test-Path -LiteralPath (Join-Path $candidate "CMakeLists.txt")) {
+                $WhisperCppDir = $candidate
+                break
+            }
+        }
+    }
     $whisperCmake = Join-Path $WhisperCppDir "CMakeLists.txt"
     if (-not (Test-Path -LiteralPath $whisperCmake)) {
         throw "whisper.cpp source not found at: $WhisperCppDir"
     }
+    $llamaParentDir = Split-Path -Parent $LlamaCppDir
     $whisperDestInTree = Join-Path $LlamaCppDir "whisper.cpp"
-    Copy-DirectoryTree -SourceRoot $WhisperCppDir -DestinationRoot $whisperDestInTree
-    Write-Host "Staged whisper.cpp source tree: $whisperDestInTree"
+    if ([System.IO.Path]::GetFullPath($WhisperCppDir).TrimEnd('\') -ne [System.IO.Path]::GetFullPath($whisperDestInTree).TrimEnd('\')) {
+        Copy-DirectoryTree -SourceRoot $WhisperCppDir -DestinationRoot $whisperDestInTree
+        Write-Host "Staged whisper.cpp source tree: $whisperDestInTree"
+    } else {
+        Write-Host "whisper.cpp source tree already staged in llama source: $whisperDestInTree"
+    }
 
     # Some legacy CMake paths resolve whisper.cpp as a sibling of the llama source root.
     # Stage a second copy there to preserve compatibility with legacy relative paths.
-    $llamaParentDir = Split-Path -Parent $LlamaCppDir
     $whisperDestSibling = Join-Path $llamaParentDir "whisper.cpp"
-    Copy-DirectoryTree -SourceRoot $WhisperCppDir -DestinationRoot $whisperDestSibling
-    Write-Host "Staged whisper.cpp sibling source tree: $whisperDestSibling"
+    if ([System.IO.Path]::GetFullPath($WhisperCppDir).TrimEnd('\') -ne [System.IO.Path]::GetFullPath($whisperDestSibling).TrimEnd('\')) {
+        Copy-DirectoryTree -SourceRoot $WhisperCppDir -DestinationRoot $whisperDestSibling
+        Write-Host "Staged whisper.cpp sibling source tree: $whisperDestSibling"
+    } else {
+        Write-Host "whisper.cpp sibling source already staged: $whisperDestSibling"
+    }
 }
 
 if ($StageWhisperSource) {
@@ -345,11 +407,16 @@ New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 $cmakeArgs = @(
     "-S", $LlamaCppDir,
     "-B", $BuildDir,
+    "-G", $CmakeGenerator,
     "-DBUILD_SHARED_LIBS=ON",
     "-DLLAMA_BUILD_SERVER=ON",
     "-DLLAMA_BUILD_MARKDOWN_BRIDGE=ON",
     "-DLLAMA_HTTPLIB=ON"
 )
+
+if (-not [string]::IsNullOrWhiteSpace($CmakeArch)) {
+    $cmakeArgs += @("-A", $CmakeArch)
+}
 
 switch ($HttpsBackend) {
     "off" {
@@ -419,11 +486,13 @@ $buildTargets = @("llama-server-bridge")
 if ($BuildLlamaServerCli) {
     $buildTargets += "llama-server"
 }
-Invoke-CmakeBuildTargets -Cmake $CmakeExe -BuildDirPath $BuildDir -ConfigName $Config -Targets $buildTargets -ParallelJobs $Jobs
-
-if ($BuildPyannoteCli) {
-    Invoke-CmakeBuildTargets -Cmake $CmakeExe -BuildDirPath $BuildDir -ConfigName $Config -Targets @("llama-pyannote-align", "llama-pyannote-diarize", "llama-pyannote-inspect") -ParallelJobs $Jobs
+if ($BuildRealtimeSmoke) {
+    $buildTargets += "llama-realtime-smoke"
 }
+if ($BuildRealtimeBridgeSmoke) {
+    $buildTargets += "llama-server-bridge-realtime-smoke"
+}
+Invoke-CmakeBuildTargets -Cmake $CmakeExe -BuildDirPath $BuildDir -ConfigName $Config -Targets $buildTargets -ParallelJobs $Jobs
 
 Write-Host "Bridge build completed."
 Write-Host "CMake build dir: $BuildDir"

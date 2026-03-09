@@ -4,10 +4,15 @@ if (NOT TARGET server-context)
     message(FATAL_ERROR "LLAMA markdown bridge requires LLAMA_BUILD_SERVER=ON")
 endif()
 
+if (NOT TARGET llama-realtime-core)
+    message(FATAL_ERROR "LLAMA markdown bridge requires llama-realtime-core")
+endif()
+
 option(LLAMA_SERVER_BRIDGE_ENABLE_FFMPEG "Enable FFmpeg-based in-memory audio conversion for raw audio requests" OFF)
 set(LLAMA_SERVER_BRIDGE_FFMPEG_ROOT "" CACHE PATH "Path to FFmpeg root containing include/ and lib/ for shared LGPL builds")
 
 set(TARGET llama-server-bridge)
+set(TARGET_RT_SMOKE llama-server-bridge-realtime-smoke)
 
 add_library(${TARGET} SHARED
     llama_server_bridge.cpp
@@ -18,6 +23,7 @@ target_compile_features(${TARGET} PRIVATE cxx_std_17)
 
 target_include_directories(${TARGET} PRIVATE
     ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/common
     ${CMAKE_SOURCE_DIR}/tools/server
 )
@@ -27,6 +33,7 @@ target_compile_definitions(${TARGET} PRIVATE LLAMA_SERVER_BRIDGE_BUILD)
 target_link_libraries(${TARGET}
     PRIVATE
         server-context
+        llama-realtime-core
         common
         mtmd
         ${CMAKE_THREAD_LIBS_INIT}
@@ -65,3 +72,26 @@ install(TARGETS ${TARGET}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+add_executable(${TARGET_RT_SMOKE}
+    llama_server_bridge_realtime_smoke.cpp
+)
+
+target_compile_features(${TARGET_RT_SMOKE} PRIVATE cxx_std_17)
+
+target_include_directories(${TARGET_RT_SMOKE} PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/common
+    ${CMAKE_SOURCE_DIR}/tools/server
+)
+
+target_link_libraries(${TARGET_RT_SMOKE}
+    PRIVATE
+        ${TARGET}
+        llama-realtime-core
+)
+
+if (LLAMA_TOOLS_INSTALL)
+    install(TARGETS ${TARGET_RT_SMOKE} RUNTIME)
+endif()

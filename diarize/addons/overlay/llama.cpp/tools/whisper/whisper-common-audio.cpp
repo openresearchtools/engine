@@ -1,11 +1,20 @@
 #define _USE_MATH_DEFINES
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include "common-whisper.h"
 
 #include "whisper.h"
 
 #define MA_NO_DEVICE_IO
 #define MA_NO_ENCODING
+#define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio/miniaudio.h"
 
 #ifdef _WIN32
