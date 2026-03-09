@@ -29,7 +29,7 @@ Default download destinations:
 Both scripts now reject repo-internal destinations.
 
 `build_full_stack_cuda.ps1` fetches PDFium automatically, and fetches FFmpeg automatically when `-EnableFfmpeg` is set.
-Build source preparation is patch-only: repo `third_party/llama.cpp` snapshot + `0300` patch into `..\ENGINEbuilds\...` (no in-place overwrite of repo sources).
+Build source preparation is patch-only: repo `third_party/llama.cpp` snapshot + sorted patch set from `diarize/addons/patches/*.patch` into `..\ENGINEbuilds\...` (no in-place overwrite of repo sources).
 
 Windows x64 workflow fetch:
 
@@ -79,13 +79,14 @@ Defaults:
 
 - Prepared source: `..\ENGINEbuilds\sources\llama.cpp\`
 - Repo source: `third_party/llama.cpp`
-- Patch: `diarize/addons/patches/0300-llama-unified-audio.patch`
+- Patches: `diarize/addons/patches/*.patch` (applied in sorted order)
 
 Overlay behavior:
 
 - repo overlay sources under `diarize/addons/overlay/llama.cpp/tools/` are copied into the prepared workspace
 - this includes the standalone native realtime subsystem under `tools/realtime/`
-- the patch is now primarily for upstream wiring/hooks, not as the only storage location for the realtime source files
+- upstream file modifications under `tools/` are patch-driven
+- overlay copy-in is for repo-added files such as `tools/realtime/*` and `tools/whisper/*`
 
 ## Realtime native tooling
 
@@ -94,9 +95,13 @@ The native realtime Sortformer runtime now lives as normal overlay source under:
 - `diarize/addons/overlay/llama.cpp/tools/realtime/`
 - `diarize/addons/overlay/llama.cpp/tools/server/`
 
-The only repo-kept model tool for that path is:
+The repo-kept model conversion/parity tools for that path are:
 
 - `build/sortformer/convert_nemo_sortformer_to_gguf.py`
+- `build/voxtral/convert_voxtral_to_gguf.py`
+
+The current Sortformer converter is a repo-written ENGINE script based on NVIDIA NeMo Sortformer archive/parity references.
+The Voxtral converter is adapted from `voxtral-cpp/tools/convert_voxtral_to_gguf.py`.
 
 ## License bundle maintenance
 

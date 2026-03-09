@@ -25,7 +25,7 @@ for (size_t i = 0; i < device_count; ++i) {
 llama_server_bridge_free_devices(devices, device_count);
 
 llama_server_bridge_params p = llama_server_bridge_default_params();
-p.model_path = "C:/models/model.gguf";
+p.model_path = "./models/model.gguf";
 p.gpu = 1; // choose a single enumerated device index
 
 llama_server_bridge *bridge = llama_server_bridge_create(&p);

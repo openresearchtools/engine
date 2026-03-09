@@ -51,6 +51,32 @@ function Resolve-AbsolutePath {
     return [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $PathValue))
 }
 
+function Resolve-ExistingPdfiumDll {
+    param(
+        [string]$PdfiumDllPath,
+        [string]$RepoRoot
+    )
+
+    $resolved = Resolve-AbsolutePath -PathValue $PdfiumDllPath -RepoRoot $RepoRoot
+    if ([string]::IsNullOrWhiteSpace($resolved)) {
+        return ""
+    }
+    if (Test-Path -LiteralPath $resolved) {
+        return $resolved
+    }
+
+    $parentDir = Split-Path -Parent $resolved
+    $fileName = Split-Path -Leaf $resolved
+    if (-not [string]::IsNullOrWhiteSpace($parentDir) -and (Split-Path -Leaf $parentDir).Equals("bin", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $rootCandidate = Join-Path (Split-Path -Parent $parentDir) $fileName
+        if (Test-Path -LiteralPath $rootCandidate) {
+            return [System.IO.Path]::GetFullPath($rootCandidate)
+        }
+    }
+
+    return $resolved
+}
+
 function Test-IsUnderPath {
     param(
         [string]$PathValue,
@@ -167,6 +193,10 @@ $BuildRoot = Resolve-AbsolutePath -PathValue $BuildRoot -RepoRoot $repoRoot
 if (-not $PSBoundParameters.ContainsKey("StageCudaRuntime") -and $Backend -eq "cuda") {
     $StageCudaRuntime = $true
 }
+$enableFfmpeg = $EnableFfmpeg.IsPresent
+if (-not $PSBoundParameters.ContainsKey("EnableFfmpeg")) {
+    $enableFfmpeg = $true
+}
 
 if ([string]::IsNullOrWhiteSpace($LlamaBuildDir)) {
     $LlamaBuildDir = Join-Path $BuildRoot "llama-build"
@@ -245,7 +275,7 @@ $FfmpegBinDir = Resolve-AbsolutePath -PathValue $FfmpegBinDir -RepoRoot $repoRoo
 if ([string]::IsNullOrWhiteSpace($PdfiumDll)) {
     $PdfiumDll = Join-Path $buildsRoot "runtime-deps\\pdfium\\bin\\pdfium.dll"
 }
-$PdfiumDll = Resolve-AbsolutePath -PathValue $PdfiumDll -RepoRoot $repoRoot
+$PdfiumDll = Resolve-ExistingPdfiumDll -PdfiumDllPath $PdfiumDll -RepoRoot $repoRoot
 
 if (Test-IsUnderPath -PathValue $FfmpegRoot -BasePath $repoRoot) {
     throw "FfmpegRoot must be outside the repo. Use a path under ..\\ENGINEbuilds\\runtime-deps. Current: $FfmpegRoot"
@@ -297,7 +327,7 @@ if ($FetchRuntimeDeps) {
         throw "Failed to fetch PDFium runtime."
     }
 
-    if ($EnableFfmpeg) {
+    if ($enableFfmpeg) {
         $ffmpegFetchArgs = @{
             OutDir = $FfmpegRoot
         }
@@ -334,7 +364,7 @@ if ($EnableCpuAllVariants) {
     $bridgeArgs["EnableCpuAllVariants"] = $true
     $bridgeArgs["DisableGgmlNative"] = $true
 }
-if ($EnableFfmpeg) {
+if ($enableFfmpeg) {
     $bridgeArgs["EnableFfmpeg"] = $true
     $bridgeArgs["FfmpegRoot"] = $FfmpegRoot
 }
@@ -362,7 +392,7 @@ $engineArgs = @{
     PdfiumDll = $PdfiumDll
     FfmpegBinDir = $FfmpegBinDir
     StageCmakeRuntime = $true
-    StageFfmpegRuntime = $EnableFfmpeg.IsPresent
+    StageFfmpegRuntime = $enableFfmpeg
     StageCudaRuntime = $StageCudaRuntime
     LicenseProfile = $Backend
 }

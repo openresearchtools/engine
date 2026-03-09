@@ -360,6 +360,8 @@ unsafe extern "C" {
     pub fn llama_server_bridge_audio_session_last_error(
         session: *const llama_server_bridge_audio_session,
     ) -> *const c_char;
+
+    pub fn llama_server_bridge_realtime_model_cache_clear();
 }
 
 struct BridgeHandle {
@@ -405,6 +407,16 @@ pub struct AudioSessionEventOwned {
 
 pub struct AudioSession {
     handle: AudioSessionHandle,
+}
+
+struct RealtimeModelCacheGuard;
+
+impl Drop for RealtimeModelCacheGuard {
+    fn drop(&mut self) {
+        unsafe {
+            llama_server_bridge_realtime_model_cache_clear();
+        }
+    }
 }
 
 impl AudioSession {
@@ -1310,7 +1322,6 @@ audio advanced flags:
   --diarization-embedding-min-segment-duration-sec <float> --diarization-embedding-max-segments-per-speaker <int>
   --diarization-min-duration-off-sec <float> --speaker-seg-max-gap-sec <float> --speaker-seg-max-words <int>
   --speaker-seg-max-duration-sec <float> --speaker-seg-split-on-hard-break|--speaker-seg-no-split-on-hard-break
-  --aligner-plda-sim-threshold <float>
 audio-session specific flags:
   --no-diarization --no-transcription --staged
   --session-sample-rate <hz> --session-channels <n> --session-max-buffered-samples <n> --session-event-queue-capacity <n>
@@ -1507,7 +1518,11 @@ fn render_speaker_spans(spans: &[SpeakerSpan], sample_rate_hz: u32) -> String {
 
 #[derive(Clone, Debug)]
 enum AudioSessionCliInput {
-    AudioFile { path: String, audio_format: String },
+    AudioFile {
+        path: String,
+        audio_format: String,
+        chunk_frames: usize,
+    },
     StdinPcmS16Le { chunk_frames: usize },
     StdinPcmF32Le { chunk_frames: usize },
 }
@@ -1553,6 +1568,13 @@ impl RollingAudioSessionReporter {
             result.snapshot.latest_transcription_json.as_ref(),
         ) {
             if self.last_timeline_json.as_deref() != Some(raw_json.as_str()) {
+                if let Some(parent) = std::path::Path::new(path).parent() {
+                    if !parent.as_os_str().is_empty() {
+                        fs::create_dir_all(parent).map_err(|e| {
+                            format!("failed to create timeline JSON parent directory '{path}': {e}")
+                        })?;
+                    }
+                }
                 fs::write(path, raw_json)
                     .map_err(|e| format!("failed to write timeline JSON '{path}': {e}"))?;
                 self.last_timeline_json = Some(raw_json.clone());
@@ -1564,6 +1586,13 @@ impl RollingAudioSessionReporter {
         }
 
         if let Some(path) = self.out_path.as_ref() {
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                if !parent.as_os_str().is_empty() {
+                    fs::create_dir_all(parent).map_err(|e| {
+                        format!("failed to create output parent directory '{path}': {e}")
+                    })?;
+                }
+            }
             fs::write(path, &result.output_text)
                 .map_err(|e| format!("failed to write output file '{path}': {e}"))?;
         }
@@ -1940,15 +1969,18 @@ fn infer_audio_session_input(args: &[String], session_sample_rate_hz: u32) -> Re
         );
     }
 
-    if let Some(path) = audio_file {
-        let audio_format = infer_audio_format(&path, arg_value(args, "--audio-format"))?;
-        return Ok(AudioSessionCliInput::AudioFile { path, audio_format });
-    }
-
     let default_chunk_frames = (session_sample_rate_hz / 10).max(1) as usize;
     let chunk_frames = parse_usize_arg(args, "--stdin-chunk-frames", default_chunk_frames)?;
     if chunk_frames == 0 {
         return Err("--stdin-chunk-frames must be > 0".to_string());
+    }
+    if let Some(path) = audio_file {
+        let audio_format = infer_audio_format(&path, arg_value(args, "--audio-format"))?;
+        return Ok(AudioSessionCliInput::AudioFile {
+            path,
+            audio_format,
+            chunk_frames,
+        });
     }
     if stdin_pcm_s16le {
         Ok(AudioSessionCliInput::StdinPcmS16Le { chunk_frames })
@@ -2039,6 +2071,31 @@ fn ingest_audio_session_stdin_f32le(
     }
 
     Ok("stdin_pcm_f32le")
+}
+
+fn ingest_audio_session_s16_chunks(
+    runner: &mut AudioSessionRunner,
+    samples: &[i16],
+    sample_rate_hz: u32,
+    chunk_frames: usize,
+    on_update: &mut impl FnMut(&AudioSessionRunResult) -> Result<(), String>,
+) -> Result<&'static str, String> {
+    if chunk_frames == 0 {
+        return Err("audio-session chunk_frames must be > 0".to_string());
+    }
+
+    let mut offset = 0usize;
+    while offset < samples.len() {
+        let end = (offset + chunk_frames).min(samples.len());
+        runner.push_audio_s16_with_sample_rate_and_progress(
+            &samples[offset..end],
+            sample_rate_hz,
+            on_update,
+        )?;
+        offset = end;
+    }
+
+    Ok("wav_pcm_chunked")
 }
 
 fn read_audio_session_metadata_json(args: &[String]) -> Result<Option<String>, String> {
@@ -2561,6 +2618,7 @@ fn run_audio(args: &[String]) -> Result<(), String> {
 }
 
 fn run_audio_session(args: &[String]) -> Result<(), String> {
+    let _realtime_model_cache_guard = RealtimeModelCacheGuard;
     let out_path = arg_value(args, "--out");
     let timeline_json_out = arg_value(args, "--timeline-json-out");
     let staged = has_arg(args, "--staged");
@@ -2589,9 +2647,6 @@ fn run_audio_session(args: &[String]) -> Result<(), String> {
 
     let diarization_model = arg_value(args, "--diarization-model")
         .or_else(|| arg_value(args, "--diarization-model-path"));
-    let diarization_backend_name = arg_value(args, "--diarization-device")
-        .or_else(|| arg_value(args, "--diarization-backend-name"))
-        .or_else(|| arg_value(args, "--backend-name"));
     let diarization_ring_capacity = parse_u32_arg(
         args,
         "--diarization-ring-capacity-samples",
@@ -2599,8 +2654,6 @@ fn run_audio_session(args: &[String]) -> Result<(), String> {
     )?;
     let transcription_realtime_model = arg_value(args, "--transcription-realtime-model")
         .or_else(|| arg_value(args, "--transcription-model-path"));
-    let transcription_backend_name = arg_value(args, "--transcription-device")
-        .or_else(|| arg_value(args, "--transcription-backend-name"));
     let transcription_ring_capacity = parse_u32_arg(
         args,
         "--transcription-ring-capacity-samples",
@@ -2659,6 +2712,17 @@ fn run_audio_session(args: &[String]) -> Result<(), String> {
     let n_gpu_layers = parse_i32_arg(args, "--n-gpu-layers", -1)?;
     let main_gpu = parse_i32_arg(args, "--main-gpu", -1)?;
     let wait_ms = parse_u32_arg(args, "--wait-ms", 50)?;
+    let resolved_gpu_device_name = match gpu {
+        Some(gpu_index) => Some(resolve_device_name_by_index(gpu_index)?),
+        None => None,
+    };
+    let diarization_backend_name = arg_value(args, "--diarization-device")
+        .or_else(|| arg_value(args, "--diarization-backend-name"))
+        .or_else(|| arg_value(args, "--backend-name"))
+        .or_else(|| resolved_gpu_device_name.clone());
+    let transcription_backend_name = arg_value(args, "--transcription-device")
+        .or_else(|| arg_value(args, "--transcription-backend-name"))
+        .or_else(|| resolved_gpu_device_name.clone());
 
     let nearest_tolerance_ms =
         parse_optional_f64_arg(args, "--nearest-tolerance-ms")?.unwrap_or(100.0);
@@ -2744,7 +2808,11 @@ fn run_audio_session(args: &[String]) -> Result<(), String> {
 
     let audio_format_summary = input.summary_audio_format().to_string();
     let ingest_mode = match &input {
-        AudioSessionCliInput::AudioFile { path, audio_format } => {
+        AudioSessionCliInput::AudioFile {
+            path,
+            audio_format,
+            chunk_frames,
+        } => {
             let audio_bytes = fs::read(&path)
                 .map_err(|e| format!("failed to read audio file '{path}': {e}"))?;
             if audio_bytes.is_empty() {
@@ -2753,12 +2821,14 @@ fn run_audio_session(args: &[String]) -> Result<(), String> {
             if audio_format == "wav" {
                 match try_parse_wav_mono_s16le(&audio_bytes)? {
                     Some((samples, sample_rate_hz)) => {
-                        runner.push_audio_s16_with_sample_rate_and_progress(
+                        ingest_audio_session_s16_chunks(
+                            &mut runner,
                             &samples,
                             sample_rate_hz,
+                            *chunk_frames,
                             &mut |result| reporter.emit(result),
-                        )?;
-                        "wav_pcm_direct".to_string()
+                        )?
+                        .to_string()
                     }
                     None => {
                         runner.push_encoded_with_progress(

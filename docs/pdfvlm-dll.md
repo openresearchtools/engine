@@ -18,8 +18,8 @@ Minimal PDF run on one selected GPU:
 const char *argv[] = {
     "pdf_to_markdown",
     "--pdf", "C:/docs/file.pdf",
-    "--model", "C:/models/vision.gguf",
-    "--mmproj", "C:/models/mmproj.gguf",
+    "--model", "./models/vision.gguf",
+    "--mmproj", "./models/mmproj.gguf",
     "gpu=1"
 };
 char *err = NULL;
@@ -98,8 +98,8 @@ const char *argv[] = {
     "--pdf", "C:/docs/file.pdf",
     "--pdfium-lib", "C:/app/vendor/pdfium/pdfium.dll",
     "--pages", "1,3-5",
-    "--model", "C:/models/vision.gguf",
-    "--mmproj", "C:/models/mmproj.gguf",
+    "--model", "./models/vision.gguf",
+    "--mmproj", "./models/mmproj.gguf",
     "--out", "C:/out/file.md",
     "--n-ctx", "32768",
     "--batch-size", "2048",

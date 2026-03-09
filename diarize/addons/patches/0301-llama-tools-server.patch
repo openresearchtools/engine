@@ -1,0 +1,4622 @@
+diff --git a/tools/CMakeLists.txt b/tools/CMakeLists.txt
+index 518f8b9..1e072c4 100644
+--- a/tools/CMakeLists.txt
++++ b/tools/CMakeLists.txt
+@@ -21,6 +21,7 @@ else()
+     add_subdirectory(completion)
+     add_subdirectory(perplexity)
+     add_subdirectory(quantize)
++    add_subdirectory(realtime)
+     if (LLAMA_BUILD_SERVER)
+         add_subdirectory(cli)
+         add_subdirectory(server)
+diff --git a/tools/server/CMakeLists.txt b/tools/server/CMakeLists.txt
+index 5621a51..f004966 100644
+--- a/tools/server/CMakeLists.txt
++++ b/tools/server/CMakeLists.txt
+@@ -15,19 +15,40 @@ add_library(${TARGET} STATIC
+     server-context.h
+ )
+ 
++target_sources(${TARGET} PRIVATE
++    ../whisper/whisper-cli-entrypoint.cpp
++    ../whisper/whisper-cli-entrypoint.h
++    ../whisper/whisper-common-audio.cpp
++    ../../../whisper.cpp/examples/grammar-parser.cpp
++    ../../../whisper.cpp/src/whisper.cpp
++)
++target_compile_definitions(${TARGET} PRIVATE
++    WHISPER_VERSION=\"llama-server-inproc\"
++)
++
+ if (BUILD_SHARED_LIBS)
+     set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+ endif()
+ 
+ target_include_directories(${TARGET} PRIVATE ../mtmd)
++target_include_directories(${TARGET} PRIVATE ../realtime)
++target_include_directories(${TARGET} PRIVATE ../whisper)
++target_include_directories(${TARGET} PRIVATE ../../../whisper.cpp/examples)
++target_include_directories(${TARGET} PRIVATE ../../../whisper.cpp/include)
++target_include_directories(${TARGET} PRIVATE ../../../whisper.cpp/src)
++target_include_directories(${TARGET} PRIVATE ../../vendor ../../ggml/include)
+ target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
+-target_link_libraries(${TARGET} PUBLIC common mtmd ${CMAKE_THREAD_LIBS_INIT})
++target_link_libraries(${TARGET} PUBLIC common mtmd llama-realtime-core ${CMAKE_THREAD_LIBS_INIT})
+ 
+ 
+ # llama-server executable
+ 
+ set(TARGET llama-server)
+ 
++if (NOT LLAMA_HTTPLIB)
++    message(FATAL_ERROR "LLAMA_HTTPLIB is OFF, cannot build llama-server. Hint: to skip building server, set -DLLAMA_BUILD_SERVER=OFF")
++endif()
++
+ set(TARGET_SRCS
+     server.cpp
+     server-http.cpp
+@@ -59,4 +80,8 @@ target_include_directories(${TARGET} PRIVATE ../mtmd)
+ target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
+ target_link_libraries(${TARGET} PRIVATE server-context PUBLIC common cpp-httplib ${CMAKE_THREAD_LIBS_INIT})
+ 
++if (WIN32)
++    TARGET_LINK_LIBRARIES(${TARGET} PRIVATE ws2_32)
++endif()
++
+ target_compile_features(${TARGET} PRIVATE cxx_std_17)
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index 8aab0d4..52930dc 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -5,17 +5,34 @@
+ #include "server-queue.h"
+ 
+ #include "common.h"
++#include "download.h"
+ #include "llama.h"
+ #include "log.h"
+ #include "sampling.h"
+ #include "speculative.h"
+ #include "mtmd.h"
+ #include "mtmd-helper.h"
++#include "base64.hpp"
++#include "../realtime/backend-factory.h"
++#include "../realtime/stream-manager.h"
++#include "../whisper/whisper-cli-entrypoint.h"
+ 
+ #include <cstddef>
+ #include <cinttypes>
+ #include <memory>
+ #include <filesystem>
++#include <algorithm>
++#include <cctype>
++#include <chrono>
++#include <climits>
++#include <cmath>
++#include <cstdlib>
++#include <fstream>
++#include <iomanip>
++#include <limits>
++#include <random>
++#include <sstream>
++#include <unordered_map>
+ 
+ // fix problem with std::min and std::max
+ #if defined(_WIN32)
+@@ -28,6 +45,12 @@
+ 
+ using json = nlohmann::ordered_json;
+ 
++bool read_audio_data(
++        const std::string & fname,
++        std::vector<float> & pcmf32,
++        std::vector<std::vector<float>> & pcmf32s,
++        bool stereo);
++
+ constexpr int HTTP_POLLING_SECONDS = 1;
+ 
+ // state diagram: https://github.com/ggml-org/llama.cpp/pull/9283
+@@ -77,7 +100,6 @@ struct server_slot {
+     size_t last_nl_pos = 0;
+ 
+     std::string  generated_text;
+-    std::string  debug_generated_text;
+     llama_tokens generated_tokens;
+ 
+     // idx of draft tokens in the main batch
+@@ -426,7 +448,7 @@ struct server_slot {
+ 
+             if (!only_metrics) {
+                 res["prompt"] = ptask->tokens.detokenize(ctx, true);
+-                res["generated"] = generated_text.empty() ? debug_generated_text : generated_text;
++                res["generated"] = generated_text;
+             }
+         }
+ 
+@@ -680,9 +702,28 @@ private:
+                 mtmd_helper_log_set(common_log_default_callback, nullptr);
+             }
+ 
++            std::string mmproj_backend_device;
++            if (params_base.mmproj_use_gpu) {
++                for (auto * dev : params_base.devices) {
++                    if (dev == nullptr) {
++                        continue;
++                    }
++                    const auto dev_type = ggml_backend_dev_type(dev);
++                    if (dev_type != GGML_BACKEND_DEVICE_TYPE_GPU && dev_type != GGML_BACKEND_DEVICE_TYPE_IGPU) {
++                        continue;
++                    }
++                    const char * dev_name = ggml_backend_dev_name(dev);
++                    if (dev_name != nullptr && dev_name[0] != '\0') {
++                        mmproj_backend_device = dev_name;
++                    }
++                    break;
++                }
++            }
++
+             mtmd_context_params mparams = mtmd_context_params_default();
+ 
+             mparams.use_gpu          = params_base.mmproj_use_gpu;
++            mparams.backend_device   = mmproj_backend_device.empty() ? nullptr : mmproj_backend_device.c_str();
+             mparams.print_timings    = false;
+             mparams.n_threads        = params_base.cpuparams.n_threads;
+             mparams.flash_attn_type  = params_base.flash_attn_type;
+@@ -1443,12 +1484,6 @@ private:
+         res->id_slot = slot.id;
+ 
+         res->index           = slot.task->index;
+-
+-        // keep copy of last generated text for debugging purposes
+-        if (slots_debug) {
+-            slot.debug_generated_text = slot.generated_text;
+-        }
+-
+         // in stream mode, content and tokens are already in last partial chunk
+         if (slot.task->params.stream) {
+             res->content     = "";
+@@ -2514,8 +2549,7 @@ private:
+                         slot.n_prompt_tokens_processed++;
+ 
+                         // process the last few tokens of the prompt separately in order to allow for a checkpoint to be created.
+-                        const int n_last = std::min(n_batch, 512);
+-                        if (do_checkpoint && slot.task->n_tokens() == slot.prompt.n_tokens() + n_last) {
++                        if (do_checkpoint && slot.task->n_tokens() - slot.prompt.n_tokens() == 64) {
+                             break;
+                         }
+                     }
+@@ -2923,213 +2957,3357 @@ server_context_meta server_context::get_meta() const {
+ 
+ 
+ 
+-// generator-like API for HTTP response generation
+-// may have bypass_sleep = true if the task does not use ctx_server
+-struct server_res_generator : server_http_res {
+-    server_response_reader rd;
+-    server_res_generator(server_queue & queue_tasks, server_response & queue_results, int sleep_idle_seconds, bool bypass_sleep = false)
+-            : rd(queue_tasks, queue_results, HTTP_POLLING_SECONDS) {
+-        // fast path in case sleeping is disabled
+-        bypass_sleep |= sleep_idle_seconds < 0;
+-        if (!bypass_sleep) {
+-            queue_tasks.wait_until_no_sleep();
++static std::string srv_audio_make_run_id() {
++    const auto now = std::chrono::system_clock::now();
++    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
++    std::mt19937_64 rng(static_cast<uint64_t>(ms));
++    const uint64_t rnd = rng() & 0xffffULL;
++    std::ostringstream oss;
++    oss << ms << "_" << std::hex << rnd;
++    return oss.str();
++}
++
++struct srv_audio_temp_dir_guard {
++    std::filesystem::path path;
++    ~srv_audio_temp_dir_guard() {
++        std::error_code ec;
++        if (!path.empty()) {
++            std::filesystem::remove_all(path, ec);
+         }
+     }
+-    void ok(const json & response_data) {
+-        status = 200;
+-        data = safe_json_to_str(response_data);
++};
++
++struct srv_audio_inproc_raw_payload {
++    const raw_buffer * audio_bytes = nullptr;
++    std::string audio_format;
++};
++
++static thread_local const srv_audio_inproc_raw_payload * g_srv_audio_inproc_raw_payload = nullptr;
++
++struct srv_audio_inproc_raw_scope {
++    explicit srv_audio_inproc_raw_scope(const srv_audio_inproc_raw_payload * payload)
++        : prev(g_srv_audio_inproc_raw_payload) {
++        g_srv_audio_inproc_raw_payload = payload;
+     }
+-    void error(const json & error_data) {
+-        status = json_value(error_data, "code", 500);
+-        data = safe_json_to_str({{ "error", error_data }});
++
++    ~srv_audio_inproc_raw_scope() {
++        g_srv_audio_inproc_raw_payload = prev;
+     }
++
++    const srv_audio_inproc_raw_payload * prev = nullptr;
+ };
+ 
++static std::string srv_audio_shell_quote(const std::string & s) {
++    std::string out = "\"";
++    out.reserve(s.size() + 2);
++    for (char c : s) {
++        if (c == '"') {
++            out += "\\\"";
++        } else {
++            out.push_back(c);
++        }
++    }
++    out.push_back('"');
++    return out;
++}
+ 
++static std::string srv_audio_join_args_for_log(const std::vector<std::string> & args) {
++    std::ostringstream oss;
++    for (size_t i = 0; i < args.size(); ++i) {
++        if (i > 0) {
++            oss << " ";
++        }
++        oss << srv_audio_shell_quote(args[i]);
++    }
++    return oss.str();
++}
+ 
+-//
+-// server_routes
+-//
++static int srv_audio_run_inproc_main(
++        int (*entrypoint)(int, char **),
++        const std::vector<std::string> & args) {
++    if (entrypoint == nullptr || args.empty()) {
++        return 2;
++    }
+ 
+-std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
+-            const server_http_req & req,
+-            server_task_type type,
+-            const json & data,
+-            const std::vector<raw_buffer> & files,
+-            task_response_type res_type) {
+-    GGML_ASSERT(type == SERVER_TASK_TYPE_COMPLETION || type == SERVER_TASK_TYPE_INFILL);
++    // Use mutable C-string buffers instead of std::string storage to avoid
++    // lifetime/capacity coupling if an in-process entrypoint mutates argv text.
++    std::vector<std::vector<char>> argv_storage;
++    argv_storage.reserve(args.size());
++    for (const auto & s : args) {
++        std::vector<char> buf;
++        buf.reserve(s.size() + 1);
++        buf.insert(buf.end(), s.begin(), s.end());
++        buf.push_back('\0');
++        argv_storage.push_back(std::move(buf));
++    }
+ 
+-    auto res = create_response();
+-    auto completion_id = gen_chatcmplid();
+-    auto & rd = res->rd;
++    const int argc = static_cast<int>(argv_storage.size());
+ 
+-    try {
+-        std::vector<server_task> tasks;
++    std::vector<char *> argv;
++    argv.reserve(argv_storage.size() + 1);
++    for (auto & s : argv_storage) {
++        argv.push_back(s.data());
++    }
++    // Match C runtime argv contract: argv[argc] must be null.
++    argv.push_back(nullptr);
+ 
+-        const auto & prompt = data.at("prompt");
+-        // TODO: this log can become very long, put it behind a flag or think about a more compact format
+-        //SRV_DBG("Prompt: %s\n", prompt.is_string() ? prompt.get<std::string>().c_str() : prompt.dump(2).c_str());
++    return entrypoint(argc, argv.data());
++}
+ 
+-        // process prompt
+-        std::vector<server_tokens> inputs;
++static std::string srv_audio_norm_win_path(std::string s) {
++#if defined(_WIN32) || defined(WIN32)
++    std::replace(s.begin(), s.end(), '/', '\\');
++#endif
++    return s;
++}
+ 
+-        if (res_type != TASK_RESPONSE_TYPE_NONE && ctx_server.mctx != nullptr) {
+-            // This is the case used by OAI compatible chat path with MTMD. TODO It can be moved to the path below.
+-            inputs.push_back(process_mtmd_prompt(ctx_server.mctx, prompt.get<std::string>(), files));
+-        } else {
+-            // Everything else, including multimodal completions.
+-            inputs = tokenize_input_prompts(ctx_server.vocab, ctx_server.mctx, prompt, true, true);
+-        }
++static void srv_audio_write_binary(const std::filesystem::path & path, const raw_buffer & data) {
++    std::filesystem::create_directories(path.parent_path());
++    std::ofstream ofs(path, std::ios::binary);
++    if (!ofs.is_open()) {
++        throw std::runtime_error("failed to write file: " + path.string());
++    }
++    ofs.write(reinterpret_cast<const char *>(data.data()), static_cast<std::streamsize>(data.size()));
++}
+ 
+-        // tasks.reserve(inputs.size()); // TODO: this is inaccurate due to child tasks
++static void srv_audio_write_text(const std::filesystem::path & path, const std::string & text) {
++    std::filesystem::create_directories(path.parent_path());
++    std::ofstream ofs(path, std::ios::binary);
++    if (!ofs.is_open()) {
++        throw std::runtime_error("failed to write file: " + path.string());
++    }
++    ofs << text;
++}
+ 
+-        for (size_t i = 0; i < inputs.size(); i++) {
+-            server_task task = server_task(type);
++static std::string srv_audio_read_text(const std::filesystem::path & path) {
++    std::ifstream ifs(path, std::ios::binary);
++    if (!ifs.is_open()) {
++        throw std::runtime_error("failed to read file: " + path.string());
++    }
++    std::ostringstream oss;
++    oss << ifs.rdbuf();
++    return oss.str();
++}
+ 
+-            task.id = rd.get_new_id();
++static bool srv_audio_is_utf8_continuation(unsigned char c) {
++    return (c & 0xC0) == 0x80;
++}
+ 
+-            task.tokens = std::move(inputs[i]);
+-            task.params = server_task::params_from_json_cmpl(
+-                    ctx_server.vocab,
+-                    params,
+-                    meta->slot_n_ctx,
+-                    data);
+-            task.id_slot = json_value(data, "id_slot", -1);
++static std::string srv_audio_repair_utf8(const std::string & text, size_t * replacements) {
++    if (replacements != nullptr) {
++        *replacements = 0;
++    }
++    std::string out;
++    out.reserve(text.size());
+ 
+-            // OAI-compat
+-            task.params.res_type          = res_type;
+-            task.params.oaicompat_cmpl_id = completion_id;
+-            task.params.oaicompat_model   = meta->model_name;
++    auto append_replacement = [&](size_t * i, size_t n) {
++        out.append("\xEF\xBF\xBD");
++        if (replacements != nullptr) {
++            (*replacements)++;
++        }
++        ++(*i);
++        while (*i < n && srv_audio_is_utf8_continuation((unsigned char) text[*i])) {
++            ++(*i);
++        }
++    };
+ 
+-            // prepare child tasks
+-            if (task.params.n_cmpl > 1) {
+-                int n_children = task.params.n_cmpl - 1;
+-                for (int j = 0; j < n_children; j++) {
+-                    task.add_child(task.id, rd.get_new_id());
++    const size_t n = text.size();
++    for (size_t i = 0; i < n;) {
++        const unsigned char c0 = (unsigned char) text[i];
++        if (c0 <= 0x7F) {
++            out.push_back((char) c0);
++            ++i;
++            continue;
++        }
++
++        if (c0 >= 0xC2 && c0 <= 0xDF) {
++            if (i + 1 < n) {
++                const unsigned char c1 = (unsigned char) text[i + 1];
++                if (srv_audio_is_utf8_continuation(c1)) {
++                    out.append(text, i, 2);
++                    i += 2;
++                    continue;
+                 }
+             }
++            append_replacement(&i, n);
++            continue;
++        }
+ 
+-            tasks.push_back(std::move(task));
++        if (c0 == 0xE0) {
++            if (i + 2 < n) {
++                const unsigned char c1 = (unsigned char) text[i + 1];
++                const unsigned char c2 = (unsigned char) text[i + 2];
++                if (c1 >= 0xA0 && c1 <= 0xBF && srv_audio_is_utf8_continuation(c2)) {
++                    out.append(text, i, 3);
++                    i += 3;
++                    continue;
++                }
++            }
++            append_replacement(&i, n);
++            continue;
+         }
+ 
+-        rd.post_tasks(std::move(tasks));
+-    } catch (const std::exception & e) {
+-        res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
+-        return res;
+-    }
++        if (c0 >= 0xE1 && c0 <= 0xEC) {
++            if (i + 2 < n) {
++                const unsigned char c1 = (unsigned char) text[i + 1];
++                const unsigned char c2 = (unsigned char) text[i + 2];
++                if (srv_audio_is_utf8_continuation(c1) && srv_audio_is_utf8_continuation(c2)) {
++                    out.append(text, i, 3);
++                    i += 3;
++                    continue;
++                }
++            }
++            append_replacement(&i, n);
++            continue;
++        }
+ 
+-    bool stream = json_value(data, "stream", false);
++        if (c0 == 0xED) {
++            if (i + 2 < n) {
++                const unsigned char c1 = (unsigned char) text[i + 1];
++                const unsigned char c2 = (unsigned char) text[i + 2];
++                if (c1 >= 0x80 && c1 <= 0x9F && srv_audio_is_utf8_continuation(c2)) {
++                    out.append(text, i, 3);
++                    i += 3;
++                    continue;
++                }
++            }
++            append_replacement(&i, n);
++            continue;
++        }
+ 
+-    if (!stream) {
+-        // non-stream, wait for the results
+-        auto all_results = rd.wait_for_all(req.should_stop);
+-        if (all_results.is_terminated) {
+-            return res; // connection is closed
+-        } else if (all_results.error) {
+-            res->error(all_results.error->to_json());
+-            return res;
+-        } else {
+-            json arr = json::array();
+-            for (auto & res : all_results.results) {
+-                GGML_ASSERT(dynamic_cast<server_task_result_cmpl_final*>(res.get()) != nullptr);
+-                arr.push_back(res->to_json());
++        if (c0 >= 0xEE && c0 <= 0xEF) {
++            if (i + 2 < n) {
++                const unsigned char c1 = (unsigned char) text[i + 1];
++                const unsigned char c2 = (unsigned char) text[i + 2];
++                if (srv_audio_is_utf8_continuation(c1) && srv_audio_is_utf8_continuation(c2)) {
++                    out.append(text, i, 3);
++                    i += 3;
++                    continue;
++                }
+             }
+-            GGML_ASSERT(!arr.empty() && "empty results");
+-            if (arr.size() == 1) {
+-                // if single request, return single object instead of array
+-                res->ok(arr[0]);
+-            } else if (res_type == TASK_RESPONSE_TYPE_OAI_CHAT || res_type == TASK_RESPONSE_TYPE_OAI_CMPL) {
+-                // if multiple results in OAI format, we need to re-format them
+-                json & choices = arr[0]["choices"];
+-                for (size_t i = 1; i < arr.size(); i++) {
+-                    choices.push_back(std::move(arr[i]["choices"][0]));
++            append_replacement(&i, n);
++            continue;
++        }
++
++        if (c0 == 0xF0) {
++            if (i + 3 < n) {
++                const unsigned char c1 = (unsigned char) text[i + 1];
++                const unsigned char c2 = (unsigned char) text[i + 2];
++                const unsigned char c3 = (unsigned char) text[i + 3];
++                if (c1 >= 0x90 && c1 <= 0xBF &&
++                    srv_audio_is_utf8_continuation(c2) &&
++                    srv_audio_is_utf8_continuation(c3)) {
++                    out.append(text, i, 4);
++                    i += 4;
++                    continue;
++                }
++            }
++            append_replacement(&i, n);
++            continue;
++        }
++
++        if (c0 >= 0xF1 && c0 <= 0xF3) {
++            if (i + 3 < n) {
++                const unsigned char c1 = (unsigned char) text[i + 1];
++                const unsigned char c2 = (unsigned char) text[i + 2];
++                const unsigned char c3 = (unsigned char) text[i + 3];
++                if (srv_audio_is_utf8_continuation(c1) &&
++                    srv_audio_is_utf8_continuation(c2) &&
++                    srv_audio_is_utf8_continuation(c3)) {
++                    out.append(text, i, 4);
++                    i += 4;
++                    continue;
++                }
++            }
++            append_replacement(&i, n);
++            continue;
++        }
++
++        if (c0 == 0xF4) {
++            if (i + 3 < n) {
++                const unsigned char c1 = (unsigned char) text[i + 1];
++                const unsigned char c2 = (unsigned char) text[i + 2];
++                const unsigned char c3 = (unsigned char) text[i + 3];
++                if (c1 >= 0x80 && c1 <= 0x8F &&
++                    srv_audio_is_utf8_continuation(c2) &&
++                    srv_audio_is_utf8_continuation(c3)) {
++                    out.append(text, i, 4);
++                    i += 4;
++                    continue;
+                 }
+-                res->ok(arr[0]);
+-            } else {
+-                // multi-results, non-OAI compat
+-                res->ok(arr);
+             }
++            append_replacement(&i, n);
++            continue;
+         }
+-    } else {
+-        // in streaming mode, the first error must be treated as non-stream response
+-        // this is to match the OAI API behavior
+-        // ref: https://github.com/ggml-org/llama.cpp/pull/16486#discussion_r2419657309
+-        auto first_result = rd.next(req.should_stop);
+-        if (first_result == nullptr) {
+-            GGML_ASSERT(req.should_stop());
+-            return res; // connection is closed
++
++        append_replacement(&i, n);
++    }
++
++    return out;
++}
++
++struct srv_audio_json_parse_result {
++    json value = json::object();
++    size_t utf8_repairs = 0;
++    size_t escaped_non_ascii_bytes = 0;
++    bool byte_escaped_strings = false;
++    bool raw_parse_ok = false;
++    bool fallback_used = false;
++    std::string parse_mode = "raw";
++};
++
++static void srv_audio_append_json_u00_escape(std::string & out, unsigned char c) {
++    static const char * kHex = "0123456789ABCDEF";
++    out.push_back('\\');
++    out.push_back('u');
++    out.push_back('0');
++    out.push_back('0');
++    out.push_back(kHex[(c >> 4) & 0x0F]);
++    out.push_back(kHex[c & 0x0F]);
++}
++
++static std::string srv_audio_escape_non_ascii_json_string_bytes(const std::string & raw_json, size_t * escaped_bytes) {
++    if (escaped_bytes != nullptr) {
++        *escaped_bytes = 0;
++    }
++    std::string out;
++    out.reserve(raw_json.size() + raw_json.size() / 2);
++
++    bool in_string = false;
++    bool escape_next = false;
++    for (size_t i = 0; i < raw_json.size(); ++i) {
++        const unsigned char c = (unsigned char) raw_json[i];
++        if (!in_string) {
++            out.push_back((char) c);
++            if (c == '"') {
++                in_string = true;
++                escape_next = false;
++            }
++            continue;
+         }
+ 
+-        if (first_result->is_error()) {
+-            res->error(first_result->to_json());
+-            return res;
++        if (escape_next) {
++            out.push_back((char) c);
++            escape_next = false;
++            continue;
+         }
+ 
+-        GGML_ASSERT(
+-            dynamic_cast<server_task_result_cmpl_partial*>(first_result.get()) != nullptr ||
+-            dynamic_cast<server_task_result_cmpl_final*>  (first_result.get()) != nullptr
+-        );
++        if (c == '\\') {
++            out.push_back((char) c);
++            escape_next = true;
++            continue;
++        }
++        if (c == '"') {
++            out.push_back((char) c);
++            in_string = false;
++            continue;
++        }
+ 
+-        // next responses are streamed
+-        // to be sent immediately
+-        json first_result_json = first_result->to_json();
+-        if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
+-            res->data = format_anthropic_sse(first_result_json);
+-        } else if (res_type == TASK_RESPONSE_TYPE_OAI_RESP) {
+-            res->data = format_oai_resp_sse(first_result_json);
+-        } else {
+-            res->data = format_oai_sse(first_result_json);
++        if (c < 0x20 || c >= 0x80) {
++            srv_audio_append_json_u00_escape(out, c);
++            if (escaped_bytes != nullptr) {
++                (*escaped_bytes)++;
++            }
++            continue;
+         }
+-        res->status = 200;
+-        res->content_type = "text/event-stream";
+-        res->next = [res_this = res.get(), res_type, &req](std::string & output) -> bool {
+-            static auto format_error = [](task_response_type res_type, const json & res_json) {
+-                if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
+-                    return format_anthropic_sse({
+-                        {"event", "error"},
+-                        {"data", res_json},
+-                    });
+-                } else {
+-                    return format_oai_sse(json {{ "error", res_json }});
+-                }
+-            };
+ 
+-            try {
+-                if (req.should_stop()) {
+-                    SRV_DBG("%s", "stopping streaming due to should_stop condition\n");
+-                    return false; // should_stop condition met
+-                }
++        out.push_back((char) c);
++    }
+ 
+-                if (!res_this->data.empty()) {
+-                    // flush the first chunk
+-                    output = std::move(res_this->data);
+-                    res_this->data.clear();
+-                    return true;
+-                }
++    return out;
++}
+ 
+-                server_response_reader & rd = res_this->rd;
++static srv_audio_json_parse_result srv_audio_parse_json_utf8_safe(const std::string & raw_json) {
++    srv_audio_json_parse_result result;
+ 
+-                // check if there is more data
+-                if (!rd.has_next()) {
+-                    switch (res_type) {
+-                        case TASK_RESPONSE_TYPE_NONE:
+-                        case TASK_RESPONSE_TYPE_OAI_RESP:
+-                        case TASK_RESPONSE_TYPE_ANTHROPIC:
+-                            output = "";
+-                            break;
++    try {
++        result.raw_parse_ok = true;
++        result.parse_mode = "raw";
++        result.value = json::parse(raw_json);
++        return result;
++    } catch (const std::exception & first_error) {
++        std::string escaped_error;
++        size_t escaped_non_ascii_bytes = 0;
++        const std::string byte_escaped_json = srv_audio_escape_non_ascii_json_string_bytes(
++            raw_json,
++            &escaped_non_ascii_bytes);
++        if (escaped_non_ascii_bytes > 0) {
++            try {
++                result.value = json::parse(byte_escaped_json);
++                result.byte_escaped_strings = true;
++                result.escaped_non_ascii_bytes = escaped_non_ascii_bytes;
++                result.fallback_used = true;
++                result.parse_mode = "byte_escape";
++                return result;
++            } catch (const std::exception & e) {
++                escaped_error = e.what();
++            }
++        }
+ 
+-                        default:
+-                            output = "data: [DONE]\n\n";
+-                            break;
+-                    }
+-                    SRV_DBG("%s", "all results received, terminating stream\n");
+-                    return false; // no more data, terminate
+-                }
++        size_t repairs = 0;
++        const std::string repaired = srv_audio_repair_utf8(raw_json, &repairs);
++        if (repairs == 0) {
++            throw;
++        }
++        try {
++            result.value = json::parse(repaired);
++            result.utf8_repairs = repairs;
++            result.fallback_used = true;
++            result.parse_mode = "utf8_repair";
++            return result;
++        } catch (const std::exception & repaired_error) {
++            throw std::runtime_error(
++                "JSON parse failed after fallback(s): escaped_non_ascii=" + std::to_string(escaped_non_ascii_bytes) +
++                ", utf8_repairs=" + std::to_string(repairs) +
++                ", escaped_error=" + escaped_error +
++                ", repaired_error=" + std::string(repaired_error.what()) +
++                " | original error: " + std::string(first_error.what()));
++        }
++    }
++}
+ 
+-                // receive subsequent results
+-                auto result = rd.next(req.should_stop);
+-                if (result == nullptr) {
+-                    SRV_DBG("%s", "stopping streaming due to should_stop condition\n");
++static std::filesystem::path srv_audio_find_latest_file(
++        const std::filesystem::path & dir,
++        const std::string & prefix,
++        const std::string & suffix) {
++    std::filesystem::path best_path;
++    std::filesystem::file_time_type best_time;
++    bool found = false;
++
++    if (!std::filesystem::exists(dir) || !std::filesystem::is_directory(dir)) {
++        return {};
++    }
++
++    for (const auto & entry : std::filesystem::directory_iterator(dir)) {
++        if (!entry.is_regular_file()) {
++            continue;
++        }
++        const std::string name = entry.path().filename().string();
++        if (!prefix.empty() && name.rfind(prefix, 0) != 0) {
++            continue;
++        }
++        if (!suffix.empty()) {
++            if (name.size() < suffix.size() || name.substr(name.size() - suffix.size()) != suffix) {
++                continue;
++            }
++        }
++        const auto mtime = entry.last_write_time();
++        if (!found || mtime > best_time) {
++            best_time = mtime;
++            best_path = entry.path();
++            found = true;
++        }
++    }
++
++    return best_path;
++}
++
++static std::string srv_audio_collapse_ws(const std::string & s) {
++    std::string out;
++    out.reserve(s.size());
++    bool prev_space = false;
++    for (char c : s) {
++        const bool is_space = c == ' ' || c == '\n' || c == '\r' || c == '\t';
++        if (is_space) {
++            if (!prev_space) {
++                out.push_back(' ');
++            }
++            prev_space = true;
++        } else {
++            out.push_back(c);
++            prev_space = false;
++        }
++    }
++    while (!out.empty() && out.front() == ' ') {
++        out.erase(out.begin());
++    }
++    while (!out.empty() && out.back() == ' ') {
++        out.pop_back();
++    }
++    return out;
++}
++
++static std::vector<std::string> srv_audio_split_ws(const std::string & s) {
++    std::vector<std::string> out;
++    std::string cur;
++    for (char c : s) {
++        const bool is_space = c == ' ' || c == '\n' || c == '\r' || c == '\t';
++        if (is_space) {
++            if (!cur.empty()) {
++                out.push_back(cur);
++                cur.clear();
++            }
++        } else {
++            cur.push_back(c);
++        }
++    }
++    if (!cur.empty()) {
++        out.push_back(cur);
++    }
++    return out;
++}
++
++static void srv_audio_replace_all(std::string & s, const std::string & from, const std::string & to) {
++    if (from.empty()) {
++        return;
++    }
++    size_t pos = 0;
++    while ((pos = s.find(from, pos)) != std::string::npos) {
++        s.replace(pos, from.size(), to);
++        pos += to.size();
++    }
++}
++
++static std::string srv_audio_join_words(const std::vector<std::string> & tokens) {
++    if (tokens.empty()) {
++        return "";
++    }
++    std::string text;
++    for (size_t i = 0; i < tokens.size(); ++i) {
++        if (i > 0) {
++            text.push_back(' ');
++        }
++        text += tokens[i];
++    }
++    for (const char * punct : {".", ",", "?", "!", ";", ":", "%"}) {
++        srv_audio_replace_all(text, std::string(" ") + punct, punct);
++    }
++    srv_audio_replace_all(text, " n't", "n't");
++    srv_audio_replace_all(text, " '", "'");
++    return srv_audio_collapse_ws(text);
++}
++
++static double srv_audio_round3(double x) {
++    return std::round(x * 1000.0) / 1000.0;
++}
++
++static std::string srv_audio_format_hms(double seconds) {
++    const int64_t total = (int64_t) std::llround(std::max(0.0, seconds));
++    int64_t rem = total;
++    const int64_t h = rem / 3600;
++    rem -= h * 3600;
++    const int64_t m = rem / 60;
++    rem -= m * 60;
++    const int64_t s = rem;
++    std::ostringstream oss;
++    oss << std::setfill('0')
++        << std::setw(2) << h << ":"
++        << std::setw(2) << m << ":"
++        << std::setw(2) << s;
++    return oss.str();
++}
++
++static std::string srv_audio_sanitize_word_token(std::string token_text) {
++    token_text = srv_audio_collapse_ws(token_text);
++    if (token_text.rfind("<|", 0) == 0 && token_text.find("|>") != std::string::npos) {
++        return "";
++    }
++    if (token_text.size() >= 3 &&
++        token_text.front() == '[' &&
++        token_text[1] == '_' &&
++        token_text.back() == ']') {
++        return "";
++    }
++
++    srv_audio_replace_all(token_text, "<s>", "");
++    srv_audio_replace_all(token_text, "</s>", "");
++    srv_audio_replace_all(token_text, "[STREAMING_PAD]", "");
++    srv_audio_replace_all(token_text, "[STREAMING_WORD]", "");
++    srv_audio_replace_all(token_text, "---", "");
++    token_text = srv_audio_collapse_ws(token_text);
++    return token_text;
++}
++
++static std::string srv_audio_sanitize_transcript_text(std::string text) {
++    srv_audio_replace_all(text, "<s>", "");
++    srv_audio_replace_all(text, "</s>", "");
++    srv_audio_replace_all(text, "[STREAMING_PAD]", "");
++    srv_audio_replace_all(text, "[STREAMING_WORD]", "");
++    srv_audio_replace_all(text, "---", "");
++    auto tokens = srv_audio_split_ws(srv_audio_collapse_ws(text));
++    std::vector<std::string> kept;
++    kept.reserve(tokens.size());
++    for (const auto & t : tokens) {
++        if (t.empty()) {
++            continue;
++        }
++        kept.push_back(t);
++    }
++    return srv_audio_join_words(kept);
++}
++
++static void srv_audio_append_distributed_words(json & words, const std::string & text, double start_sec, double end_sec) {
++    auto raw = srv_audio_split_ws(text);
++    std::vector<std::string> clean;
++    clean.reserve(raw.size());
++    for (const auto & token : raw) {
++        std::string w = srv_audio_sanitize_word_token(token);
++        if (!w.empty()) {
++            clean.push_back(std::move(w));
++        }
++    }
++    if (clean.empty()) {
++        return;
++    }
++
++    start_sec = std::max(0.0, start_sec);
++    end_sec = std::max(start_sec, end_sec);
++    if (end_sec <= start_sec) {
++        end_sec = start_sec + 0.001;
++    }
++
++    const double span = std::max(1e-6, end_sec - start_sec);
++    const double step = span / (double) clean.size();
++    for (size_t i = 0; i < clean.size(); ++i) {
++        double ws = start_sec + step * (double) i;
++        double we = (i + 1 < clean.size()) ? (start_sec + step * (double) (i + 1)) : end_sec;
++        if (we <= ws) {
++            we = ws + 0.001;
++        }
++        words.push_back({
++            {"word", clean[i]},
++            {"start_sec", srv_audio_round3(ws)},
++            {"end_sec", srv_audio_round3(we)},
++        });
++    }
++}
++
++struct srv_audio_whisper_parse {
++    std::string transcript;
++    json words = json::array();
++    json pieces = json::array();
++};
++
++static std::string srv_audio_join_word_range(const json & words, size_t begin, size_t end) {
++    if (!words.is_array() || begin >= end || begin >= words.size()) {
++        return "";
++    }
++
++    end = std::min(end, words.size());
++    std::vector<std::string> toks;
++    toks.reserve(end - begin);
++    for (size_t i = begin; i < end; ++i) {
++        if (!words[i].is_object()) {
++            continue;
++        }
++        std::string tok = srv_audio_sanitize_word_token(json_value(words[i], "word", std::string()));
++        if (!tok.empty()) {
++            toks.push_back(std::move(tok));
++        }
++    }
++    return srv_audio_join_words(toks);
++}
++
++static std::string srv_audio_decode_byte_escaped_raw_bytes(const std::string & text) {
++    std::string raw;
++    raw.reserve(text.size());
++
++    auto append_decoded = [&](uint32_t cp, size_t pos, size_t len) {
++        if (cp <= 0xFF) {
++            raw.push_back((char) cp);
++        } else {
++            raw.append(text, pos, len);
++        }
++    };
++
++    const size_t n = text.size();
++    for (size_t i = 0; i < n;) {
++        const unsigned char c0 = (unsigned char) text[i];
++        if (c0 <= 0x7F) {
++            raw.push_back((char) c0);
++            ++i;
++            continue;
++        }
++
++        if (c0 >= 0xC2 && c0 <= 0xDF && i + 1 < n) {
++            const unsigned char c1 = (unsigned char) text[i + 1];
++            if (srv_audio_is_utf8_continuation(c1)) {
++                const uint32_t cp = ((uint32_t) (c0 & 0x1F) << 6) | (uint32_t) (c1 & 0x3F);
++                append_decoded(cp, i, 2);
++                i += 2;
++                continue;
++            }
++        }
++
++        if (c0 == 0xE0 && i + 2 < n) {
++            const unsigned char c1 = (unsigned char) text[i + 1];
++            const unsigned char c2 = (unsigned char) text[i + 2];
++            if (c1 >= 0xA0 && c1 <= 0xBF && srv_audio_is_utf8_continuation(c2)) {
++                const uint32_t cp = ((uint32_t) (c0 & 0x0F) << 12) |
++                                    ((uint32_t) (c1 & 0x3F) << 6) |
++                                    (uint32_t) (c2 & 0x3F);
++                append_decoded(cp, i, 3);
++                i += 3;
++                continue;
++            }
++        }
++        if (c0 >= 0xE1 && c0 <= 0xEC && i + 2 < n) {
++            const unsigned char c1 = (unsigned char) text[i + 1];
++            const unsigned char c2 = (unsigned char) text[i + 2];
++            if (srv_audio_is_utf8_continuation(c1) && srv_audio_is_utf8_continuation(c2)) {
++                const uint32_t cp = ((uint32_t) (c0 & 0x0F) << 12) |
++                                    ((uint32_t) (c1 & 0x3F) << 6) |
++                                    (uint32_t) (c2 & 0x3F);
++                append_decoded(cp, i, 3);
++                i += 3;
++                continue;
++            }
++        }
++        if (c0 == 0xED && i + 2 < n) {
++            const unsigned char c1 = (unsigned char) text[i + 1];
++            const unsigned char c2 = (unsigned char) text[i + 2];
++            if (c1 >= 0x80 && c1 <= 0x9F && srv_audio_is_utf8_continuation(c2)) {
++                const uint32_t cp = ((uint32_t) (c0 & 0x0F) << 12) |
++                                    ((uint32_t) (c1 & 0x3F) << 6) |
++                                    (uint32_t) (c2 & 0x3F);
++                append_decoded(cp, i, 3);
++                i += 3;
++                continue;
++            }
++        }
++        if (c0 >= 0xEE && c0 <= 0xEF && i + 2 < n) {
++            const unsigned char c1 = (unsigned char) text[i + 1];
++            const unsigned char c2 = (unsigned char) text[i + 2];
++            if (srv_audio_is_utf8_continuation(c1) && srv_audio_is_utf8_continuation(c2)) {
++                const uint32_t cp = ((uint32_t) (c0 & 0x0F) << 12) |
++                                    ((uint32_t) (c1 & 0x3F) << 6) |
++                                    (uint32_t) (c2 & 0x3F);
++                append_decoded(cp, i, 3);
++                i += 3;
++                continue;
++            }
++        }
++
++        if (c0 == 0xF0 && i + 3 < n) {
++            const unsigned char c1 = (unsigned char) text[i + 1];
++            const unsigned char c2 = (unsigned char) text[i + 2];
++            const unsigned char c3 = (unsigned char) text[i + 3];
++            if (c1 >= 0x90 && c1 <= 0xBF &&
++                srv_audio_is_utf8_continuation(c2) &&
++                srv_audio_is_utf8_continuation(c3)) {
++                const uint32_t cp = ((uint32_t) (c0 & 0x07) << 18) |
++                                    ((uint32_t) (c1 & 0x3F) << 12) |
++                                    ((uint32_t) (c2 & 0x3F) << 6) |
++                                    (uint32_t) (c3 & 0x3F);
++                append_decoded(cp, i, 4);
++                i += 4;
++                continue;
++            }
++        }
++        if (c0 >= 0xF1 && c0 <= 0xF3 && i + 3 < n) {
++            const unsigned char c1 = (unsigned char) text[i + 1];
++            const unsigned char c2 = (unsigned char) text[i + 2];
++            const unsigned char c3 = (unsigned char) text[i + 3];
++            if (srv_audio_is_utf8_continuation(c1) &&
++                srv_audio_is_utf8_continuation(c2) &&
++                srv_audio_is_utf8_continuation(c3)) {
++                const uint32_t cp = ((uint32_t) (c0 & 0x07) << 18) |
++                                    ((uint32_t) (c1 & 0x3F) << 12) |
++                                    ((uint32_t) (c2 & 0x3F) << 6) |
++                                    (uint32_t) (c3 & 0x3F);
++                append_decoded(cp, i, 4);
++                i += 4;
++                continue;
++            }
++        }
++        if (c0 == 0xF4 && i + 3 < n) {
++            const unsigned char c1 = (unsigned char) text[i + 1];
++            const unsigned char c2 = (unsigned char) text[i + 2];
++            const unsigned char c3 = (unsigned char) text[i + 3];
++            if (c1 >= 0x80 && c1 <= 0x8F &&
++                srv_audio_is_utf8_continuation(c2) &&
++                srv_audio_is_utf8_continuation(c3)) {
++                const uint32_t cp = ((uint32_t) (c0 & 0x07) << 18) |
++                                    ((uint32_t) (c1 & 0x3F) << 12) |
++                                    ((uint32_t) (c2 & 0x3F) << 6) |
++                                    (uint32_t) (c3 & 0x3F);
++                append_decoded(cp, i, 4);
++                i += 4;
++                continue;
++            }
++        }
++
++        raw.push_back((char) c0);
++        ++i;
++    }
++
++    return raw;
++}
++
++static std::string srv_audio_decode_byte_escaped_utf8_text(const std::string & text, size_t * utf8_repairs) {
++    std::string raw = srv_audio_decode_byte_escaped_raw_bytes(text);
++    size_t repairs = 0;
++    std::string repaired = srv_audio_repair_utf8(raw, &repairs);
++    if (utf8_repairs != nullptr) {
++        *utf8_repairs += repairs;
++    }
++    return repaired;
++}
++
++static std::string srv_audio_decode_whisper_json_text(
++    const std::string & text,
++    bool byte_escaped_strings,
++    size_t * utf8_repairs) {
++    if (!byte_escaped_strings) {
++        return text;
++    }
++    return srv_audio_decode_byte_escaped_utf8_text(text, utf8_repairs);
++}
++
++static srv_audio_whisper_parse srv_audio_parse_whisper_json(
++        const json & whisper_json,
++        bool byte_escaped_strings,
++        size_t * utf8_repairs) {
++    srv_audio_whisper_parse out;
++    if (!whisper_json.is_object()) {
++        return out;
++    }
++
++    std::vector<std::string> transcript_parts;
++    const json trans = json_value(whisper_json, "transcription", json::array());
++    if (!trans.is_array()) {
++        return out;
++    }
++
++    for (const auto & seg : trans) {
++        if (!seg.is_object()) {
++            continue;
++        }
++
++        std::string seg_text = json_value(seg, "text", std::string());
++        seg_text = srv_audio_decode_whisper_json_text(seg_text, byte_escaped_strings, utf8_repairs);
++        seg_text = srv_audio_collapse_ws(seg_text);
++        if (!seg_text.empty()) {
++            transcript_parts.push_back(seg_text);
++        }
++
++        double seg_start = 0.0;
++        double seg_end = 0.0;
++        if (seg.contains("offsets") && seg.at("offsets").is_object()) {
++            const auto & offsets = seg.at("offsets");
++            seg_start = std::max(0.0, json_value(offsets, "from", 0.0) / 1000.0);
++            seg_end = std::max(seg_start, json_value(offsets, "to", seg_start * 1000.0) / 1000.0);
++        }
++
++        const size_t piece_word_begin = out.words.size();
++        bool added_token_words = false;
++        if (seg.contains("tokens") && seg.at("tokens").is_array()) {
++            auto trim_copy = [](std::string s) {
++                size_t b = 0;
++                while (b < s.size() && std::isspace((unsigned char) s[b])) {
++                    ++b;
++                }
++                size_t e = s.size();
++                while (e > b && std::isspace((unsigned char) s[e - 1])) {
++                    --e;
++                }
++                return s.substr(b, e - b);
++            };
++            auto is_punct_only = [](const std::string & s) {
++                bool has = false;
++                for (char ch : s) {
++                    const unsigned char c = (unsigned char) ch;
++                    if (std::isspace(c)) {
++                        continue;
++                    }
++                    has = true;
++                    if (c >= 0x80) {
++                        return false;
++                    }
++                    if (std::isalnum(c)) {
++                        return false;
++                    }
++                }
++                return has;
++            };
++
++            std::string cur_word;
++            double cur_start = 0.0;
++            double cur_end = 0.0;
++            bool cur_has_leading_space = false;
++            bool has_cur = false;
++
++            auto flush_cur = [&]() {
++                std::string word_text = cur_word;
++                if (byte_escaped_strings) {
++                    size_t repairs = 0;
++                    word_text = srv_audio_repair_utf8(word_text, &repairs);
++                    if (utf8_repairs != nullptr) {
++                        *utf8_repairs += repairs;
++                    }
++                }
++                const std::string w = srv_audio_sanitize_word_token(word_text);
++                if (!w.empty()) {
++                    out.words.push_back({
++                        {"word", w},
++                        {"has_leading_space", cur_has_leading_space},
++                        {"start_sec", srv_audio_round3(cur_start)},
++                        {"end_sec", srv_audio_round3(std::max(cur_start, cur_end))},
++                    });
++                    added_token_words = true;
++                }
++                cur_word.clear();
++                cur_start = 0.0;
++                cur_end = 0.0;
++                cur_has_leading_space = false;
++                has_cur = false;
++            };
++
++            for (const auto & tok : seg.at("tokens")) {
++                if (!tok.is_object()) {
++                    continue;
++                }
++
++                std::string tok_text = json_value(tok, "text", std::string());
++                if (byte_escaped_strings) {
++                    tok_text = srv_audio_decode_byte_escaped_raw_bytes(tok_text);
++                } else {
++                    tok_text = srv_audio_decode_whisper_json_text(tok_text, false, utf8_repairs);
++                }
++                if (tok_text.empty()) {
++                    continue;
++                }
++                if (tok_text.rfind("<|", 0) == 0 && tok_text.find("|>") != std::string::npos) {
++                    continue;
++                }
++                if (tok_text.rfind("[_", 0) == 0 && tok_text.back() == ']') {
++                    continue;
++                }
++
++                double tok_start = seg_start;
++                double tok_end = seg_end;
++                if (tok.contains("offsets") && tok.at("offsets").is_object()) {
++                    const auto & offsets = tok.at("offsets");
++                    tok_start = std::max(0.0, json_value(offsets, "from", seg_start * 1000.0) / 1000.0);
++                    tok_end = std::max(tok_start, json_value(offsets, "to", tok_end * 1000.0) / 1000.0);
++                }
++
++                const bool has_leading_space = !tok_text.empty() && std::isspace((unsigned char) tok_text.front());
++                tok_text = trim_copy(tok_text);
++                if (tok_text.empty()) {
++                    continue;
++                }
++                tok_text = srv_audio_sanitize_word_token(tok_text);
++                if (tok_text.empty()) {
++                    continue;
++                }
++
++                const bool punct_only = is_punct_only(tok_text);
++
++                if (!has_cur) {
++                    cur_word = tok_text;
++                    cur_start = tok_start;
++                    cur_end = tok_end;
++                    cur_has_leading_space = has_leading_space;
++                    has_cur = true;
++                    continue;
++                }
++
++                if (has_leading_space && !punct_only) {
++                    flush_cur();
++                    cur_word = tok_text;
++                    cur_start = tok_start;
++                    cur_end = tok_end;
++                    cur_has_leading_space = has_leading_space;
++                    has_cur = true;
++                    continue;
++                }
++
++                cur_word += tok_text;
++                cur_end = std::max(cur_end, tok_end);
++            }
++
++            if (has_cur) {
++                flush_cur();
++            }
++        }
++
++        if (!added_token_words && !seg_text.empty()) {
++            srv_audio_append_distributed_words(out.words, seg_text, seg_start, seg_end);
++        }
++
++        const size_t piece_word_end = out.words.size();
++        std::string piece_text = srv_audio_sanitize_transcript_text(seg_text);
++        if (piece_text.empty() && piece_word_end > piece_word_begin) {
++            piece_text = srv_audio_join_word_range(out.words, piece_word_begin, piece_word_end);
++        }
++
++        double piece_start = std::max(0.0, seg_start);
++        double piece_end = std::max(piece_start, seg_end);
++        if (piece_word_end > piece_word_begin &&
++                out.words[piece_word_begin].is_object() &&
++                out.words[piece_word_end - 1].is_object()) {
++            piece_start = std::max(0.0, json_value(out.words[piece_word_begin], "start_sec", piece_start));
++            piece_end = std::max(piece_start, json_value(out.words[piece_word_end - 1], "end_sec", piece_end));
++        } else if (piece_end <= piece_start) {
++            piece_end = piece_start + 0.001;
++        }
++
++        if (!piece_text.empty() || piece_word_end > piece_word_begin) {
++            out.pieces.push_back(json{
++                {"text", piece_text},
++                {"start_sec", srv_audio_round3(piece_start)},
++                {"end_sec", srv_audio_round3(std::max(piece_start, piece_end))},
++                {"start_word_index", (int64_t) piece_word_begin},
++                {"end_word_index", (int64_t) piece_word_end},
++                {"num_words", (int64_t) (piece_word_end - piece_word_begin)},
++            });
++        }
++    }
++
++    out.transcript = srv_audio_sanitize_transcript_text(srv_audio_join_words(transcript_parts));
++    if (out.transcript.empty() && out.words.is_array() && !out.words.empty()) {
++        std::vector<std::string> words_for_text;
++        words_for_text.reserve(out.words.size());
++        for (const auto & w : out.words) {
++            if (!w.is_object()) {
++                continue;
++            }
++            std::string token = srv_audio_sanitize_word_token(json_value(w, "word", std::string()));
++            if (!token.empty()) {
++                words_for_text.push_back(std::move(token));
++            }
++        }
++        out.transcript = srv_audio_join_words(words_for_text);
++    }
++
++    return out;
++}
++
++static void srv_audio_add_hms_fields(json & items) {
++    if (!items.is_array()) {
++        return;
++    }
++    for (auto & item : items) {
++        if (!item.is_object()) {
++            continue;
++        }
++        const double start_sec = item.value("start_sec", 0.0);
++        const double end_sec = item.value("end_sec", start_sec);
++        item["start_hms"] = srv_audio_format_hms(start_sec);
++        item["end_hms"] = srv_audio_format_hms(end_sec);
++    }
++}
++
++static std::string srv_audio_format_srt_time(double seconds) {
++    const int64_t total_ms = (int64_t) std::llround(std::max(0.0, seconds) * 1000.0);
++    int64_t rem = total_ms;
++    const int64_t h = rem / 3600000;
++    rem -= h * 3600000;
++    const int64_t m = rem / 60000;
++    rem -= m * 60000;
++    const int64_t s = rem / 1000;
++    rem -= s * 1000;
++    const int64_t ms = rem;
++
++    std::ostringstream oss;
++    oss << std::setfill('0')
++        << std::setw(2) << h << ":"
++        << std::setw(2) << m << ":"
++        << std::setw(2) << s << ","
++        << std::setw(3) << ms;
++    return oss.str();
++}
++
++static std::string srv_audio_segments_to_srt(const json & segments) {
++    if (!segments.is_array()) {
++        return "";
++    }
++    std::ostringstream oss;
++    int idx = 1;
++    for (const auto & seg : segments) {
++        if (!seg.is_object()) {
++            continue;
++        }
++        const double start_sec = seg.value("start_sec", 0.0);
++        const double end_sec = std::max(start_sec, seg.value("end_sec", start_sec));
++        const std::string text = srv_audio_collapse_ws(seg.value("text", std::string()));
++        if (text.empty()) {
++            continue;
++        }
++        oss << idx++ << "\n";
++        oss << srv_audio_format_srt_time(start_sec) << " --> " << srv_audio_format_srt_time(end_sec) << "\n";
++        oss << text << "\n\n";
++    }
++    return oss.str();
++}
++
++static std::string srv_audio_transcript_to_md(const std::string & transcript) {
++    return srv_audio_collapse_ws(transcript) + "\n";
++}
++
++static std::string srv_audio_speaker_segments_to_md(const json & speaker_segments) {
++    std::ostringstream oss;
++    if (!speaker_segments.is_array() || speaker_segments.empty()) {
++        return "";
++    }
++    for (const auto & seg : speaker_segments) {
++        if (!seg.is_object()) {
++            continue;
++        }
++        const std::string speaker = seg.value("speaker", std::string("SPEAKER_00"));
++        const double start_sec = seg.value("start_sec", 0.0);
++        const double end_sec = std::max(start_sec, seg.value("end_sec", start_sec));
++        const std::string start_hms = seg.contains("start_hms")
++            ? seg.value("start_hms", srv_audio_format_hms(start_sec))
++            : srv_audio_format_hms(start_sec);
++        const std::string end_hms = seg.contains("end_hms")
++            ? seg.value("end_hms", srv_audio_format_hms(end_sec))
++            : srv_audio_format_hms(end_sec);
++        const std::string text = srv_audio_collapse_ws(seg.value("text", std::string()));
++        if (text.empty()) {
++            continue;
++        }
++        oss << "### " << speaker << " [" << start_hms << " - " << end_hms << "]\n";
++        oss << text << "\n\n";
++    }
++    return oss.str();
++}
++
++static bool srv_audio_word_ends_sentence(const std::string & word);
++static json srv_audio_build_fallback_whisper_pieces(const json & words);
++
++static std::string srv_audio_realtime_speaker_label(int32_t speaker_id) {
++    std::ostringstream oss;
++    oss << "SPEAKER_" << std::setfill('0') << std::setw(2) << std::max<int32_t>(0, speaker_id);
++    return oss.str();
++}
++
++static bool srv_audio_resolve_realtime_model_path(
++        const json & body,
++        std::string & out_model_path,
++        std::string & out_error) {
++    const std::string explicit_model_path = body.value("diarization_model_path", std::string());
++    const std::string models_dir = body.value(
++        "diarization_models_dir",
++        body.value("diarization_model_dir", std::string()));
++    const std::string hf_repo = body.value("diarization_hf_repo", std::string());
++
++    if (!hf_repo.empty()) {
++        out_error = "diarization_hf_repo is no longer supported for diarization. Provide diarization_model_path or diarization_models_dir.";
++        return false;
++    }
++    if (!explicit_model_path.empty() && !models_dir.empty()) {
++        out_error = "Choose one diarization model source: diarization_model_path OR diarization_models_dir.";
++        return false;
++    }
++    if (explicit_model_path.empty() && models_dir.empty()) {
++        out_error = "Missing diarization model source. Provide diarization_model_path or diarization_models_dir.";
++        return false;
++    }
++
++    std::filesystem::path resolved_path;
++    if (!explicit_model_path.empty()) {
++        resolved_path = std::filesystem::path(explicit_model_path);
++    } else {
++        const std::filesystem::path dir_path(models_dir);
++        if (!std::filesystem::exists(dir_path) || !std::filesystem::is_directory(dir_path)) {
++            out_error = "diarization_models_dir is not a directory: " + models_dir;
++            return false;
++        }
++
++        std::vector<std::filesystem::path> ggufs;
++        const std::vector<std::filesystem::path> preferred = {
++            dir_path / "model.gguf",
++            dir_path / "sortformer.gguf",
++            dir_path / "diarization.gguf",
++        };
++        for (const auto & candidate : preferred) {
++            if (std::filesystem::exists(candidate) && std::filesystem::is_regular_file(candidate)) {
++                ggufs.push_back(candidate);
++            }
++        }
++        for (const auto & entry : std::filesystem::directory_iterator(dir_path)) {
++            if (!entry.is_regular_file()) {
++                continue;
++            }
++            if (entry.path().extension() == ".gguf") {
++                ggufs.push_back(entry.path());
++            }
++        }
++        std::sort(ggufs.begin(), ggufs.end(), [](const auto & a, const auto & b) {
++            return a.filename().string() < b.filename().string();
++        });
++        ggufs.erase(std::unique(ggufs.begin(), ggufs.end()), ggufs.end());
++
++        for (const auto & candidate : ggufs) {
++            llama::realtime::backend_kind candidate_kind = llama::realtime::backend_kind::unknown;
++            std::string candidate_error;
++            if (!llama::realtime::detect_backend_kind_from_model_path(candidate.string(), candidate_kind, candidate_error)) {
++                continue;
++            }
++            if (!llama::realtime::backend_emits_speaker_spans(candidate_kind)) {
++                continue;
++            }
++            resolved_path = candidate;
++            break;
++        }
++    }
++
++    if (resolved_path.empty() || !std::filesystem::exists(resolved_path) || !std::filesystem::is_regular_file(resolved_path)) {
++        out_error = "Realtime diarization GGUF was not found (expected a speaker-span backend such as Sortformer)";
++        return false;
++    }
++
++    out_model_path = srv_audio_norm_win_path(resolved_path.string());
++    out_error.clear();
++    return true;
++}
++
++static bool srv_audio_resolve_realtime_backend_kind(
++        const std::string & requested_backend,
++        const std::string & model_path,
++        llama::realtime::backend_kind & out_kind,
++        std::string & out_error) {
++    auto trim_copy = [](std::string s) {
++        size_t b = 0;
++        while (b < s.size() && std::isspace((unsigned char) s[b])) {
++            ++b;
++        }
++        size_t e = s.size();
++        while (e > b && std::isspace((unsigned char) s[e - 1])) {
++            --e;
++        }
++        return s.substr(b, e - b);
++    };
++    const std::string requested = trim_copy(requested_backend);
++    if (requested.empty() || requested == "auto" || requested == "native_cpp" || requested == "realtime") {
++        if (!llama::realtime::detect_backend_kind_from_model_path(model_path, out_kind, out_error)) {
++            return false;
++        }
++        return true;
++    }
++
++    if (!llama::realtime::parse_backend_kind_name(requested, out_kind)) {
++        out_error = "Unsupported diarization backend: " + requested;
++        return false;
++    }
++
++    out_error.clear();
++    return true;
++}
++
++static bool srv_audio_collect_realtime_speaker_spans(
++        const std::filesystem::path & audio_path,
++        const std::string & model_path,
++        const std::string & backend_requested,
++        const std::string & runtime_backend_name,
++        double feed_ms,
++        json & out_spans,
++        double & out_elapsed_sec,
++        std::string & out_backend_name,
++        std::string & out_error) {
++    out_spans = json::array();
++    out_elapsed_sec = 0.0;
++    out_backend_name.clear();
++    out_error.clear();
++
++    if (feed_ms <= 0.0 || !std::isfinite(feed_ms)) {
++        out_error = "diarization_feed_ms must be a positive finite number";
++        return false;
++    }
++
++    llama::realtime::backend_kind kind = llama::realtime::backend_kind::unknown;
++    if (!srv_audio_resolve_realtime_backend_kind(backend_requested, model_path, kind, out_error)) {
++        return false;
++    }
++
++    std::vector<float> pcmf32;
++    std::vector<std::vector<float>> pcmf32s;
++    if (!read_audio_data(audio_path.string(), pcmf32, pcmf32s, /* stereo */ false)) {
++        out_error = "failed to decode diarization audio input";
++        return false;
++    }
++
++    llama::realtime::backend_model_params backend_params = {};
++    backend_params.kind = kind;
++    backend_params.model_path = model_path;
++    backend_params.backend_name = runtime_backend_name;
++
++    llama::realtime::backend_model_params resolved_backend_params = {};
++    llama::realtime::stream_session_config session_config = {};
++    if (!llama::realtime::backend_resolve_runtime(
++            backend_params,
++            /* requested_sample_rate_hz */ 16000,
++            /* requested_audio_ring_capacity_samples */ 0,
++            resolved_backend_params,
++            session_config,
++            out_error)) {
++        return false;
++    }
++
++    const auto t0 = std::chrono::steady_clock::now();
++    try {
++        auto loaded_model = llama::realtime::load_backend_model(resolved_backend_params);
++        if (!loaded_model) {
++            out_error = "failed to load realtime diarization backend model";
++            return false;
++        }
++
++        out_backend_name = loaded_model->backend_name();
++
++        llama::realtime::stream_manager manager;
++        const auto session_id = manager.create_session(loaded_model->create_backend(), session_config);
++        const size_t push_samples = std::max<size_t>(
++            1,
++            (size_t) std::llround((feed_ms / 1000.0) * (double) session_config.expected_sample_rate_hz));
++
++        for (size_t offset = 0; offset < pcmf32.size(); offset += push_samples) {
++            const size_t count = std::min(push_samples, pcmf32.size() - offset);
++            manager.push_audio(session_id, pcmf32.data() + static_cast<ptrdiff_t>(offset), count, session_config.expected_sample_rate_hz);
++        }
++        manager.flush_session(session_id);
++        const auto events = manager.drain_events(session_id, 0);
++        manager.close_session(session_id);
++
++        for (const auto & ev : events) {
++            if (ev.type != llama::realtime::event_type::speaker_span_commit) {
++                continue;
++            }
++            out_spans.push_back(json{
++                {"speaker_id", ev.speaker_id},
++                {"speaker", srv_audio_realtime_speaker_label(ev.speaker_id)},
++                {"start_sec", srv_audio_round3(ev.begin_sec)},
++                {"end_sec", srv_audio_round3(std::max(ev.begin_sec, ev.end_sec))},
++            });
++        }
++        std::sort(out_spans.begin(), out_spans.end(), [](const auto & a, const auto & b) {
++            const double a_start = a.value("start_sec", 0.0);
++            const double b_start = b.value("start_sec", 0.0);
++            if (a_start != b_start) {
++                return a_start < b_start;
++            }
++            const double a_end = a.value("end_sec", a_start);
++            const double b_end = b.value("end_sec", b_start);
++            if (a_end != b_end) {
++                return a_end < b_end;
++            }
++            return a.value("speaker_id", -1) < b.value("speaker_id", -1);
++        });
++    } catch (const std::exception & e) {
++        out_error = e.what();
++        return false;
++    }
++
++    const auto t1 = std::chrono::steady_clock::now();
++    out_elapsed_sec = std::chrono::duration<double>(t1 - t0).count();
++    return true;
++}
++
++static std::string srv_audio_assign_word_to_realtime_speaker(
++        const json & word,
++        const json & speaker_spans) {
++    if (!word.is_object() || !speaker_spans.is_array() || speaker_spans.empty()) {
++        return "UNASSIGNED";
++    }
++
++    const double start_sec = word.value("start_sec", 0.0);
++    const double end_sec = std::max(start_sec, word.value("end_sec", start_sec));
++    const double anchor_sec = 0.5 * (start_sec + end_sec);
++
++    const json * best_span = nullptr;
++    double best_score = -1.0;
++    for (const auto & span : speaker_spans) {
++        if (!span.is_object()) {
++            continue;
++        }
++        const double span_start = span.value("start_sec", 0.0);
++        const double span_end = std::max(span_start, span.value("end_sec", span_start));
++        if (anchor_sec >= span_start && anchor_sec <= span_end) {
++            return span.value("speaker", std::string("UNASSIGNED"));
++        }
++        const double overlap = std::max(0.0, std::min(end_sec, span_end) - std::max(start_sec, span_start));
++        if (overlap > best_score) {
++            best_score = overlap;
++            best_span = &span;
++        }
++    }
++    if (best_span != nullptr && best_score > 1e-9) {
++        return best_span->value("speaker", std::string("UNASSIGNED"));
++    }
++
++    constexpr double k_nearest_assign_tolerance_sec = 0.08;
++    const json * nearest_span = nullptr;
++    double nearest_dist = std::numeric_limits<double>::infinity();
++    for (const auto & span : speaker_spans) {
++        if (!span.is_object()) {
++            continue;
++        }
++        const double span_start = span.value("start_sec", 0.0);
++        const double span_end = std::max(span_start, span.value("end_sec", span_start));
++        double dist = 0.0;
++        if (anchor_sec < span_start) {
++            dist = span_start - anchor_sec;
++        } else if (anchor_sec > span_end) {
++            dist = anchor_sec - span_end;
++        }
++        if (dist < nearest_dist) {
++            nearest_dist = dist;
++            nearest_span = &span;
++        }
++    }
++
++    if (nearest_span != nullptr && nearest_dist <= k_nearest_assign_tolerance_sec) {
++        return nearest_span->value("speaker", std::string("UNASSIGNED"));
++    }
++
++    return "UNASSIGNED";
++}
++
++static bool srv_audio_word_starts_with_lower_or_continuation(const std::string & word) {
++    for (char ch : word) {
++        const unsigned char c = (unsigned char) ch;
++        if (std::isspace(c)) {
++            continue;
++        }
++        if (ch == '"' || ch == '\'' || ch == '(' || ch == '[' || ch == '{') {
++            continue;
++        }
++        if (ch == ',' || ch == ';' || ch == ':' || ch == ')' || ch == ']' || ch == '}' || ch == '-') {
++            return true;
++        }
++        if (std::isalpha(c)) {
++            return std::islower(c) != 0;
++        }
++        return false;
++    }
++    return false;
++}
++
++static bool srv_audio_word_starts_with_sentence_start(const std::string & word) {
++    for (char ch : word) {
++        const unsigned char c = (unsigned char) ch;
++        if (std::isspace(c)) {
++            continue;
++        }
++        if (ch == '"' || ch == '\'' || ch == '(' || ch == '[' || ch == '{') {
++            continue;
++        }
++        if (std::isalpha(c)) {
++            return std::isupper(c) != 0;
++        }
++        if (std::isdigit(c)) {
++            return true;
++        }
++        return false;
++    }
++    return false;
++}
++
++static void srv_audio_smooth_realtime_sentence_speakers(std::vector<json> & assigned_words) {
++    if (assigned_words.empty()) {
++        return;
++    }
++
++    struct speaker_run {
++        size_t begin = 0;
++        size_t end = 0;
++        std::string speaker;
++        double duration = 0.0;
++    };
++
++    auto reassign_range = [&](size_t begin, size_t end, const std::string & speaker) {
++        for (size_t i = begin; i < end; ++i) {
++            assigned_words[i]["speaker"] = speaker;
++        }
++    };
++
++    auto process_sentence = [&](size_t sentence_begin, size_t sentence_end) {
++        if (sentence_begin >= sentence_end) {
++            return;
++        }
++
++        std::vector<speaker_run> runs;
++        for (size_t i = sentence_begin; i < sentence_end;) {
++            const std::string speaker = assigned_words[i].value("speaker", std::string("UNASSIGNED"));
++            size_t j = i + 1;
++            while (j < sentence_end &&
++                   assigned_words[j].value("speaker", std::string("UNASSIGNED")) == speaker) {
++                ++j;
++            }
++
++            double duration = 0.0;
++            for (size_t k = i; k < j; ++k) {
++                const double ws = assigned_words[k].value("start_sec", 0.0);
++                const double we = std::max(ws, assigned_words[k].value("end_sec", ws));
++                duration += std::max(0.001, we - ws);
++            }
++
++            runs.push_back(speaker_run{ i, j, speaker, duration });
++            i = j;
++        }
++
++        for (size_t idx = 1; idx < runs.size(); ++idx) {
++            auto & run = runs[idx];
++            auto & prev = runs[idx - 1];
++            if (run.speaker == prev.speaker) {
++                continue;
++            }
++            const size_t run_words = run.end - run.begin;
++            if (run_words > 4 || run.duration > 1.25) {
++                continue;
++            }
++            const std::string first_word = assigned_words[run.begin].value("word", std::string());
++            if (!srv_audio_word_starts_with_lower_or_continuation(first_word)) {
++                continue;
++            }
++            reassign_range(run.begin, run.end, prev.speaker);
++            run.speaker = prev.speaker;
++        }
++
++        runs.clear();
++        for (size_t i = sentence_begin; i < sentence_end;) {
++            const std::string speaker = assigned_words[i].value("speaker", std::string("UNASSIGNED"));
++            size_t j = i + 1;
++            while (j < sentence_end &&
++                   assigned_words[j].value("speaker", std::string("UNASSIGNED")) == speaker) {
++                ++j;
++            }
++
++            double duration = 0.0;
++            for (size_t k = i; k < j; ++k) {
++                const double ws = assigned_words[k].value("start_sec", 0.0);
++                const double we = std::max(ws, assigned_words[k].value("end_sec", ws));
++                duration += std::max(0.001, we - ws);
++            }
++
++            runs.push_back(speaker_run{ i, j, speaker, duration });
++            i = j;
++        }
++
++        for (size_t idx = 0; idx + 1 < runs.size(); ++idx) {
++            auto & run = runs[idx];
++            auto & next = runs[idx + 1];
++            if (run.speaker == next.speaker) {
++                continue;
++            }
++            const size_t run_words = run.end - run.begin;
++            if (run_words > 4 || run.duration > 1.25) {
++                continue;
++            }
++            const size_t next_words = next.end - next.begin;
++            if (next_words == 0) {
++                continue;
++            }
++            const std::string first_word = assigned_words[run.begin].value("word", std::string());
++            bool sentence_start = run.begin == sentence_begin;
++            if (!sentence_start && !srv_audio_word_ends_sentence(assigned_words[run.begin - 1].value("word", std::string()))) {
++                continue;
++            }
++            if (!srv_audio_word_starts_with_sentence_start(first_word)) {
++                continue;
++            }
++            if (next_words < run_words + 2 && next.duration < run.duration + 0.4) {
++                continue;
++            }
++            reassign_range(run.begin, run.end, next.speaker);
++            run.speaker = next.speaker;
++        }
++
++        std::unordered_map<std::string, double> weights;
++        size_t assigned_words_count = 0;
++        for (size_t i = sentence_begin; i < sentence_end; ++i) {
++            const std::string speaker = assigned_words[i].value("speaker", std::string("UNASSIGNED"));
++            if (speaker == "UNASSIGNED") {
++                continue;
++            }
++            const double ws = assigned_words[i].value("start_sec", 0.0);
++            const double we = std::max(ws, assigned_words[i].value("end_sec", ws));
++            weights[speaker] += std::max(0.001, we - ws);
++            ++assigned_words_count;
++        }
++
++        if (weights.empty()) {
++            return;
++        }
++
++        std::string best_speaker = "UNASSIGNED";
++        double best_weight = -1.0;
++        double second_weight = -1.0;
++        for (const auto & it : weights) {
++            if (it.second > best_weight) {
++                second_weight = best_weight;
++                best_weight = it.second;
++                best_speaker = it.first;
++            } else if (it.second > second_weight) {
++                second_weight = it.second;
++            }
++        }
++
++        const double total_weight = std::max(1e-9, [&]() {
++            double total = 0.0;
++            for (const auto & it : weights) {
++                total += it.second;
++            }
++            return total;
++        }());
++
++        const bool single_speaker = weights.size() == 1;
++        const bool clear_majority =
++            best_weight / total_weight >= 0.60 ||
++            (best_weight >= 2.0 * std::max(0.0, second_weight)) ||
++            (assigned_words_count <= 4 && best_weight / total_weight >= 0.50);
++
++        if (single_speaker || clear_majority) {
++            reassign_range(sentence_begin, sentence_end, best_speaker);
++        }
++    };
++
++    size_t sentence_begin = 0;
++    for (size_t i = 0; i < assigned_words.size(); ++i) {
++        const std::string word = assigned_words[i].value("word", std::string());
++        if (srv_audio_word_ends_sentence(word)) {
++            process_sentence(sentence_begin, i + 1);
++            sentence_begin = i + 1;
++        }
++    }
++    process_sentence(sentence_begin, assigned_words.size());
++}
++
++static std::string srv_audio_dominant_speaker_for_word_range(
++        const std::vector<json> & assigned_words,
++        size_t begin,
++        size_t end) {
++    std::unordered_map<std::string, double> weights;
++    for (size_t i = begin; i < end; ++i) {
++        const std::string speaker = assigned_words[i].value("speaker", std::string("UNASSIGNED"));
++        if (speaker == "UNASSIGNED") {
++            continue;
++        }
++        const double ws = assigned_words[i].value("start_sec", 0.0);
++        const double we = std::max(ws, assigned_words[i].value("end_sec", ws));
++        weights[speaker] += std::max(0.001, we - ws);
++    }
++
++    std::string best_speaker = "UNASSIGNED";
++    double best_weight = -1.0;
++    for (const auto & it : weights) {
++        if (it.second > best_weight) {
++            best_weight = it.second;
++            best_speaker = it.first;
++        }
++    }
++    return best_speaker;
++}
++
++static std::string srv_audio_previous_span_speaker_near(
++        const json & speaker_spans,
++        double anchor_sec,
++        double max_gap_sec,
++        double * out_gap_sec = nullptr) {
++    std::string best_speaker;
++    double best_gap = std::numeric_limits<double>::infinity();
++    for (const auto & span : speaker_spans) {
++        if (!span.is_object()) {
++            continue;
++        }
++        const double span_start = span.value("start_sec", 0.0);
++        const double span_end = std::max(span_start, span.value("end_sec", span_start));
++        if (span_end > anchor_sec) {
++            continue;
++        }
++        const double gap = anchor_sec - span_end;
++        if (gap <= max_gap_sec && gap < best_gap) {
++            best_gap = gap;
++            best_speaker = span.value("speaker", std::string("UNASSIGNED"));
++        }
++    }
++    if (out_gap_sec != nullptr) {
++        *out_gap_sec = best_gap;
++    }
++    return best_speaker.empty() ? std::string("UNASSIGNED") : best_speaker;
++}
++
++static std::string srv_audio_next_span_speaker_near(
++        const json & speaker_spans,
++        double anchor_sec,
++        double max_gap_sec,
++        double * out_gap_sec = nullptr) {
++    std::string best_speaker;
++    double best_gap = std::numeric_limits<double>::infinity();
++    for (const auto & span : speaker_spans) {
++        if (!span.is_object()) {
++            continue;
++        }
++        const double span_start = span.value("start_sec", 0.0);
++        const double gap = span_start - anchor_sec;
++        if (gap < 0.0) {
++            continue;
++        }
++        if (gap <= max_gap_sec && gap < best_gap) {
++            best_gap = gap;
++            best_speaker = span.value("speaker", std::string("UNASSIGNED"));
++        }
++    }
++    if (out_gap_sec != nullptr) {
++        *out_gap_sec = best_gap;
++    }
++    return best_speaker.empty() ? std::string("UNASSIGNED") : best_speaker;
++}
++
++static bool srv_audio_previous_span_end_for_speaker_near(
++        const json & speaker_spans,
++        const std::string & speaker,
++        double anchor_sec,
++        double max_gap_sec,
++        double * out_end_sec = nullptr,
++        double * out_gap_sec = nullptr) {
++    if (!speaker_spans.is_array() || speaker.empty() || speaker == "UNASSIGNED") {
++        return false;
++    }
++
++    double best_end = -std::numeric_limits<double>::infinity();
++    double best_gap = std::numeric_limits<double>::infinity();
++    for (const auto & span : speaker_spans) {
++        if (!span.is_object()) {
++            continue;
++        }
++        if (span.value("speaker", std::string()) != speaker) {
++            continue;
++        }
++        const double span_start = span.value("start_sec", 0.0);
++        const double span_end = std::max(span_start, span.value("end_sec", span_start));
++        if (span_end > anchor_sec) {
++            continue;
++        }
++        const double gap = anchor_sec - span_end;
++        if (gap <= max_gap_sec && (gap < best_gap || (gap == best_gap && span_end > best_end))) {
++            best_gap = gap;
++            best_end = span_end;
++        }
++    }
++
++    if (!std::isfinite(best_end)) {
++        return false;
++    }
++    if (out_end_sec != nullptr) {
++        *out_end_sec = best_end;
++    }
++    if (out_gap_sec != nullptr) {
++        *out_gap_sec = best_gap;
++    }
++    return true;
++}
++
++static bool srv_audio_covering_or_previous_span_end_for_speaker_near(
++        const json & speaker_spans,
++        const std::string & speaker,
++        double anchor_sec,
++        double max_gap_sec,
++        double * out_end_sec = nullptr,
++        double * out_gap_sec = nullptr) {
++    if (!speaker_spans.is_array() || speaker.empty() || speaker == "UNASSIGNED") {
++        return false;
++    }
++
++    double best_end = -std::numeric_limits<double>::infinity();
++    double best_gap = std::numeric_limits<double>::infinity();
++    bool found = false;
++    for (const auto & span : speaker_spans) {
++        if (!span.is_object()) {
++            continue;
++        }
++        if (span.value("speaker", std::string()) != speaker) {
++            continue;
++        }
++        const double span_start = span.value("start_sec", 0.0);
++        const double span_end = std::max(span_start, span.value("end_sec", span_start));
++
++        double gap = std::numeric_limits<double>::infinity();
++        if (anchor_sec >= span_start && anchor_sec <= span_end) {
++            gap = 0.0;
++        } else if (span_end <= anchor_sec) {
++            gap = anchor_sec - span_end;
++        } else {
++            continue;
++        }
++
++        if (gap <= max_gap_sec && (!found || gap < best_gap || (gap == best_gap && span_end > best_end))) {
++            best_gap = gap;
++            best_end = span_end;
++            found = true;
++        }
++    }
++
++    if (!found) {
++        return false;
++    }
++    if (out_end_sec != nullptr) {
++        *out_end_sec = best_end;
++    }
++    if (out_gap_sec != nullptr) {
++        *out_gap_sec = best_gap;
++    }
++    return true;
++}
++
++static bool srv_audio_next_span_start_for_speaker_near(
++        const json & speaker_spans,
++        const std::string & speaker,
++        double anchor_sec,
++        double max_gap_sec,
++        double * out_start_sec = nullptr,
++        double * out_gap_sec = nullptr) {
++    if (!speaker_spans.is_array() || speaker.empty() || speaker == "UNASSIGNED") {
++        return false;
++    }
++
++    double best_start = std::numeric_limits<double>::infinity();
++    double best_gap = std::numeric_limits<double>::infinity();
++    for (const auto & span : speaker_spans) {
++        if (!span.is_object()) {
++            continue;
++        }
++        if (span.value("speaker", std::string()) != speaker) {
++            continue;
++        }
++        const double span_start = span.value("start_sec", 0.0);
++        if (span_start < anchor_sec) {
++            continue;
++        }
++        const double gap = span_start - anchor_sec;
++        if (gap <= max_gap_sec && (gap < best_gap || (gap == best_gap && span_start < best_start))) {
++            best_gap = gap;
++            best_start = span_start;
++        }
++    }
++
++    if (!std::isfinite(best_start)) {
++        return false;
++    }
++    if (out_start_sec != nullptr) {
++        *out_start_sec = best_start;
++    }
++    if (out_gap_sec != nullptr) {
++        *out_gap_sec = best_gap;
++    }
++    return true;
++}
++
++static void srv_audio_refine_realtime_sentence_boundaries(
++        std::vector<json> & assigned_words,
++        const json & speaker_spans) {
++    if (assigned_words.empty() || !speaker_spans.is_array() || speaker_spans.empty()) {
++        return;
++    }
++
++    struct sentence_range {
++        size_t begin = 0;
++        size_t end = 0;
++        double start_sec = 0.0;
++        double end_sec = 0.0;
++        double duration_sec = 0.0;
++        size_t num_words = 0;
++        std::string dominant_speaker = "UNASSIGNED";
++    };
++
++    auto reassign_range = [&](size_t begin, size_t end, const std::string & speaker) {
++        for (size_t i = begin; i < end; ++i) {
++            assigned_words[i]["speaker"] = speaker;
++        }
++    };
++
++    std::vector<sentence_range> ranges;
++    size_t sentence_begin = 0;
++    for (size_t i = 0; i < assigned_words.size(); ++i) {
++        const std::string word = assigned_words[i].value("word", std::string());
++        if (!srv_audio_word_ends_sentence(word) && i + 1 != assigned_words.size()) {
++            continue;
++        }
++
++        const size_t sentence_end = i + 1;
++        sentence_range range;
++        range.begin = sentence_begin;
++        range.end = sentence_end;
++        range.num_words = sentence_end - sentence_begin;
++        range.start_sec = assigned_words[sentence_begin].value("start_sec", 0.0);
++        range.end_sec = std::max(
++            range.start_sec,
++            assigned_words[sentence_end - 1].value("end_sec", range.start_sec));
++        range.duration_sec = std::max(0.0, range.end_sec - range.start_sec);
++        range.dominant_speaker = srv_audio_dominant_speaker_for_word_range(assigned_words, sentence_begin, sentence_end);
++        ranges.push_back(std::move(range));
++        sentence_begin = sentence_end;
++    }
++
++    constexpr double k_boundary_gap_sec = 0.24;
++    constexpr size_t k_short_sentence_words = 6;
++    constexpr double k_short_sentence_duration_sec = 1.75;
++    constexpr double k_prev_carry_gap_sec = 0.24;
++    constexpr double k_next_span_delay_sec = 0.20;
++    constexpr double k_next_span_search_sec = 0.80;
++
++    for (size_t i = 0; i < ranges.size(); ++i) {
++        auto & range = ranges[i];
++        if (range.begin >= range.end) {
++            continue;
++        }
++
++        const bool short_sentence =
++            range.num_words <= k_short_sentence_words ||
++            range.duration_sec <= k_short_sentence_duration_sec;
++        if (!short_sentence) {
++            continue;
++        }
++
++        const std::string first_word = assigned_words[range.begin].value("word", std::string());
++        if (!srv_audio_word_starts_with_sentence_start(first_word)) {
++            continue;
++        }
++
++        const std::string prev_sentence_speaker =
++            i > 0 ? ranges[i - 1].dominant_speaker : std::string("UNASSIGNED");
++        const std::string next_sentence_speaker =
++            (i + 1 < ranges.size()) ? ranges[i + 1].dominant_speaker : std::string("UNASSIGNED");
++
++        double prev_gap_sec = std::numeric_limits<double>::infinity();
++        double next_gap_sec = std::numeric_limits<double>::infinity();
++        const std::string prev_span_speaker =
++            srv_audio_previous_span_speaker_near(speaker_spans, range.start_sec, k_boundary_gap_sec, &prev_gap_sec);
++        const std::string next_span_speaker =
++            srv_audio_next_span_speaker_near(speaker_spans, range.end_sec, k_boundary_gap_sec, &next_gap_sec);
++
++        if (prev_sentence_speaker != "UNASSIGNED" &&
++                prev_sentence_speaker == next_sentence_speaker &&
++                range.dominant_speaker != prev_sentence_speaker) {
++            reassign_range(range.begin, range.end, prev_sentence_speaker);
++            range.dominant_speaker = prev_sentence_speaker;
++            continue;
++        }
++
++        if (prev_sentence_speaker != "UNASSIGNED" &&
++                prev_sentence_speaker == prev_span_speaker &&
++                range.dominant_speaker != prev_sentence_speaker &&
++                next_span_speaker == range.dominant_speaker &&
++                prev_gap_sec <= k_boundary_gap_sec) {
++            reassign_range(range.begin, range.end, prev_sentence_speaker);
++            range.dominant_speaker = prev_sentence_speaker;
++            continue;
++        }
++
++        if (next_sentence_speaker != "UNASSIGNED" &&
++                next_sentence_speaker == next_span_speaker &&
++                range.dominant_speaker != next_sentence_speaker &&
++                prev_span_speaker == range.dominant_speaker &&
++                next_gap_sec <= k_boundary_gap_sec) {
++            reassign_range(range.begin, range.end, next_sentence_speaker);
++            range.dominant_speaker = next_sentence_speaker;
++            continue;
++        }
++
++        // Keep very short standalone sentences with the previous speaker when the
++        // current dominant speaker only starts after the sentence has already begun.
++        if (i > 0 &&
++                prev_sentence_speaker != "UNASSIGNED" &&
++                range.dominant_speaker != "UNASSIGNED" &&
++                range.dominant_speaker != prev_sentence_speaker &&
++                (next_sentence_speaker == range.dominant_speaker || next_sentence_speaker == "UNASSIGNED")) {
++            double prev_same_end_sec = 0.0;
++            double prev_same_gap_sec = std::numeric_limits<double>::infinity();
++            double next_dom_start_sec = std::numeric_limits<double>::infinity();
++            double next_dom_gap_sec = std::numeric_limits<double>::infinity();
++            const bool has_prev_same = srv_audio_covering_or_previous_span_end_for_speaker_near(
++                speaker_spans,
++                prev_sentence_speaker,
++                range.start_sec,
++                k_prev_carry_gap_sec,
++                &prev_same_end_sec,
++                &prev_same_gap_sec);
++            const bool has_next_dom = srv_audio_next_span_start_for_speaker_near(
++                speaker_spans,
++                range.dominant_speaker,
++                range.start_sec,
++                k_next_span_search_sec,
++                &next_dom_start_sec,
++                &next_dom_gap_sec);
++            if (has_prev_same &&
++                    has_next_dom &&
++                    prev_same_gap_sec <= k_prev_carry_gap_sec &&
++                    next_dom_start_sec - range.start_sec >= k_next_span_delay_sec) {
++                reassign_range(range.begin, range.end, prev_sentence_speaker);
++                range.dominant_speaker = prev_sentence_speaker;
++                continue;
++            }
++        }
++    }
++}
++
++static std::string srv_audio_piece_first_token(const json & piece) {
++    const auto tokens = srv_audio_split_ws(srv_audio_collapse_ws(piece.value("text", std::string())));
++    for (const auto & token : tokens) {
++        const std::string clean = srv_audio_sanitize_word_token(token);
++        if (!clean.empty()) {
++            return clean;
++        }
++    }
++    return "";
++}
++
++static std::string srv_audio_piece_last_token(const json & piece) {
++    const auto tokens = srv_audio_split_ws(srv_audio_collapse_ws(piece.value("text", std::string())));
++    for (size_t i = tokens.size(); i > 0; --i) {
++        const std::string clean = srv_audio_sanitize_word_token(tokens[i - 1]);
++        if (!clean.empty()) {
++            return clean;
++        }
++    }
++    return "";
++}
++
++static int64_t srv_audio_piece_num_words(const json & piece) {
++    const int64_t num_words = piece.value("num_words", int64_t(-1));
++    if (num_words >= 0) {
++        return num_words;
++    }
++    int64_t count = 0;
++    for (const auto & token : srv_audio_split_ws(srv_audio_collapse_ws(piece.value("text", std::string())))) {
++        if (!srv_audio_sanitize_word_token(token).empty()) {
++            ++count;
++        }
++    }
++    return count;
++}
++
++static double srv_audio_piece_duration_sec(const json & piece) {
++    const double start_sec = piece.value("start_sec", 0.0);
++    const double end_sec = std::max(start_sec, piece.value("end_sec", start_sec));
++    return std::max(0.0, end_sec - start_sec);
++}
++
++static bool srv_audio_piece_is_tiny(const json & piece) {
++    const int64_t num_words = srv_audio_piece_num_words(piece);
++    const double duration_sec = srv_audio_piece_duration_sec(piece);
++    if (num_words <= 1) {
++        return duration_sec <= 2.0;
++    }
++    return num_words <= 4 && duration_sec <= 1.6;
++}
++
++static char srv_audio_last_meaningful_char(const std::string & text) {
++    for (size_t i = text.size(); i > 0; --i) {
++        const char ch = text[i - 1];
++        if (std::isspace((unsigned char) ch) ||
++                ch == '"' ||
++                ch == '\'' ||
++                ch == ')' ||
++                ch == ']' ||
++                ch == '}') {
++            continue;
++        }
++        return ch;
++    }
++    return '\0';
++}
++
++static bool srv_audio_piece_starts_with_lower_or_continuation(const json & piece) {
++    return srv_audio_word_starts_with_lower_or_continuation(srv_audio_piece_first_token(piece));
++}
++
++static bool srv_audio_piece_starts_with_sentence_start(const json & piece) {
++    return srv_audio_word_starts_with_sentence_start(srv_audio_piece_first_token(piece));
++}
++
++static bool srv_audio_piece_ends_sentence(const json & piece) {
++    return srv_audio_word_ends_sentence(srv_audio_piece_last_token(piece));
++}
++
++static bool srv_audio_piece_flows_into_next(const json & current_piece, const json & next_piece) {
++    if (srv_audio_piece_ends_sentence(current_piece)) {
++        return false;
++    }
++
++    if (srv_audio_piece_starts_with_lower_or_continuation(next_piece)) {
++        return true;
++    }
++
++    const char last = srv_audio_last_meaningful_char(current_piece.value("text", std::string()));
++    return last == ',' || last == ';' || last == ':' || last == '-';
++}
++
++static std::string srv_audio_assign_piece_to_realtime_speaker(
++        const json & piece,
++        const json & speaker_spans) {
++    if (!piece.is_object() || !speaker_spans.is_array() || speaker_spans.empty()) {
++        return "UNASSIGNED";
++    }
++
++    const double start_sec = piece.value("start_sec", 0.0);
++    const double end_sec = std::max(start_sec, piece.value("end_sec", start_sec));
++    const double anchor_sec = 0.5 * (start_sec + end_sec);
++
++    const json * best_overlap_span = nullptr;
++    double best_overlap_sec = 0.0;
++    bool best_anchor_inside = false;
++    double best_anchor_dist = std::numeric_limits<double>::infinity();
++
++    for (const auto & span : speaker_spans) {
++        if (!span.is_object()) {
++            continue;
++        }
++        const double span_start = span.value("start_sec", 0.0);
++        const double span_end = std::max(span_start, span.value("end_sec", span_start));
++        const double overlap_sec = std::max(0.0, std::min(end_sec, span_end) - std::max(start_sec, span_start));
++        if (overlap_sec <= 1e-9) {
++            continue;
++        }
++
++        const bool anchor_inside = anchor_sec >= span_start && anchor_sec <= span_end;
++        double anchor_dist = 0.0;
++        if (!anchor_inside) {
++            anchor_dist = std::min(std::abs(anchor_sec - span_start), std::abs(anchor_sec - span_end));
++        }
++
++        const bool better_overlap = overlap_sec > best_overlap_sec + 1e-9;
++        const bool same_overlap = std::abs(overlap_sec - best_overlap_sec) <= 1e-9;
++        const bool better_tie_break =
++            same_overlap && (
++                (anchor_inside && !best_anchor_inside) ||
++                (anchor_inside == best_anchor_inside && anchor_dist < best_anchor_dist));
++
++        if (best_overlap_span == nullptr || better_overlap || better_tie_break) {
++            best_overlap_span = &span;
++            best_overlap_sec = overlap_sec;
++            best_anchor_inside = anchor_inside;
++            best_anchor_dist = anchor_dist;
++        }
++    }
++
++    if (best_overlap_span != nullptr) {
++        return best_overlap_span->value("speaker", std::string("UNASSIGNED"));
++    }
++
++    constexpr double k_nearest_assign_tolerance_sec = 0.12;
++    const json * nearest_span = nullptr;
++    double nearest_dist = std::numeric_limits<double>::infinity();
++    for (const auto & span : speaker_spans) {
++        if (!span.is_object()) {
++            continue;
++        }
++        const double span_start = span.value("start_sec", 0.0);
++        const double span_end = std::max(span_start, span.value("end_sec", span_start));
++        double dist = 0.0;
++        if (anchor_sec < span_start) {
++            dist = span_start - anchor_sec;
++        } else if (anchor_sec > span_end) {
++            dist = anchor_sec - span_end;
++        }
++        if (dist < nearest_dist) {
++            nearest_dist = dist;
++            nearest_span = &span;
++        }
++    }
++
++    if (nearest_span != nullptr && nearest_dist <= k_nearest_assign_tolerance_sec) {
++        return nearest_span->value("speaker", std::string("UNASSIGNED"));
++    }
++
++    return "UNASSIGNED";
++}
++
++static void srv_audio_carry_piece_prefixes_backward(
++        std::vector<json> & assigned_pieces,
++        const json & words);
++
++static void srv_audio_refine_realtime_piece_boundaries(
++        std::vector<json> & assigned_pieces,
++        const json & words) {
++    if (assigned_pieces.size() < 2) {
++        return;
++    }
++
++    srv_audio_carry_piece_prefixes_backward(assigned_pieces, words);
++
++    for (size_t i = 1; i + 1 < assigned_pieces.size(); ++i) {
++        auto & cur = assigned_pieces[i];
++        if (cur.value("speaker", std::string("UNASSIGNED")) != "UNASSIGNED" || !srv_audio_piece_is_tiny(cur)) {
++            continue;
++        }
++        const std::string prev_speaker = assigned_pieces[i - 1].value("speaker", std::string("UNASSIGNED"));
++        const std::string next_speaker = assigned_pieces[i + 1].value("speaker", std::string("UNASSIGNED"));
++        if (prev_speaker != "UNASSIGNED" && prev_speaker == next_speaker) {
++            cur["speaker"] = prev_speaker;
++        }
++    }
++
++    for (size_t i = 1; i < assigned_pieces.size(); ++i) {
++        auto & cur = assigned_pieces[i];
++        const std::string prev_speaker = assigned_pieces[i - 1].value("speaker", std::string("UNASSIGNED"));
++        const std::string cur_speaker = cur.value("speaker", std::string("UNASSIGNED"));
++        if (prev_speaker == "UNASSIGNED" || cur_speaker == prev_speaker) {
++            continue;
++        }
++        if (!srv_audio_piece_is_tiny(cur) || !srv_audio_piece_starts_with_lower_or_continuation(cur)) {
++            continue;
++        }
++        cur["speaker"] = prev_speaker;
++    }
++
++    for (size_t i = 1; i + 1 < assigned_pieces.size(); ++i) {
++        auto & cur = assigned_pieces[i];
++        const std::string prev_speaker = assigned_pieces[i - 1].value("speaker", std::string("UNASSIGNED"));
++        const std::string cur_speaker = cur.value("speaker", std::string("UNASSIGNED"));
++        const std::string next_speaker = assigned_pieces[i + 1].value("speaker", std::string("UNASSIGNED"));
++        if (prev_speaker == "UNASSIGNED" || next_speaker == "UNASSIGNED") {
++            continue;
++        }
++        if (cur_speaker != prev_speaker || cur_speaker == next_speaker) {
++            continue;
++        }
++        if (!srv_audio_piece_is_tiny(cur) ||
++                !srv_audio_piece_starts_with_sentence_start(cur) ||
++                !srv_audio_piece_flows_into_next(cur, assigned_pieces[i + 1])) {
++            continue;
++        }
++        cur["speaker"] = next_speaker;
++    }
++}
++
++static double srv_audio_assigned_words_duration_sec(
++        const std::vector<json> & assigned_words,
++        size_t begin,
++        size_t end) {
++    double duration_sec = 0.0;
++    end = std::min(end, assigned_words.size());
++    for (size_t i = begin; i < end; ++i) {
++        const double start_sec = assigned_words[i].value("start_sec", 0.0);
++        const double end_sec = std::max(start_sec, assigned_words[i].value("end_sec", start_sec));
++        duration_sec += std::max(0.001, end_sec - start_sec);
++    }
++    return duration_sec;
++}
++
++static bool srv_audio_piece_edge_run_is_small(
++        const std::vector<json> & assigned_words,
++        size_t begin,
++        size_t end) {
++    constexpr size_t k_max_fragment_words = 8;
++    constexpr double k_max_fragment_duration_sec = 3.0;
++    return end > begin &&
++        end - begin <= k_max_fragment_words &&
++        srv_audio_assigned_words_duration_sec(assigned_words, begin, end) <= k_max_fragment_duration_sec;
++}
++
++static bool srv_audio_piece_edge_run_speaker(
++        const std::vector<json> & assigned_words,
++        size_t begin,
++        size_t end,
++        const std::string & dominant_speaker,
++        std::string & out_speaker) {
++    out_speaker.clear();
++    end = std::min(end, assigned_words.size());
++    for (size_t i = begin; i < end; ++i) {
++        const std::string speaker = assigned_words[i].value("speaker", std::string("UNASSIGNED"));
++        if (speaker.empty() || speaker == "UNASSIGNED" || speaker == dominant_speaker) {
++            return false;
++        }
++        if (out_speaker.empty()) {
++            out_speaker = speaker;
++            continue;
++        }
++        if (speaker != out_speaker) {
++            return false;
++        }
++    }
++    return !out_speaker.empty();
++}
++
++static json srv_audio_make_piece_from_assigned_words(
++        const std::vector<json> & assigned_words,
++        size_t begin,
++        size_t end,
++        const std::string & speaker) {
++    std::vector<std::string> toks;
++    toks.reserve(end - begin);
++    for (size_t i = begin; i < end; ++i) {
++        toks.push_back(assigned_words[i].value("word", std::string()));
++    }
++
++    const int64_t start_word_index = assigned_words[begin].value("_global_word_index", int64_t(-1));
++    const int64_t end_word_index = assigned_words[end - 1].value("_global_word_index", int64_t(-1)) + 1;
++    return json{
++        {"speaker", speaker},
++        {"text", srv_audio_join_words(toks)},
++        {"start_sec", srv_audio_round3(assigned_words[begin].value("start_sec", 0.0))},
++        {"end_sec", srv_audio_round3(std::max(
++            assigned_words[begin].value("start_sec", 0.0),
++            assigned_words[end - 1].value("end_sec", assigned_words[begin].value("start_sec", 0.0))))},
++        {"start_word_index", start_word_index},
++        {"end_word_index", end_word_index},
++        {"num_words", (int64_t) (end - begin)},
++    };
++}
++
++static json srv_audio_make_piece_from_word_range(
++        const json & words,
++        int64_t begin_word_index,
++        int64_t end_word_index,
++        const std::string & speaker) {
++    std::vector<std::string> toks;
++    toks.reserve((size_t) std::max<int64_t>(0, end_word_index - begin_word_index));
++    for (int64_t idx = begin_word_index; idx < end_word_index; ++idx) {
++        if (!words[(size_t) idx].is_object()) {
++            continue;
++        }
++        toks.push_back(srv_audio_sanitize_word_token(json_value(words[(size_t) idx], "word", std::string())));
++    }
++
++    const double start_sec = json_value(words[(size_t) begin_word_index], "start_sec", 0.0);
++    const double end_sec = std::max(
++        start_sec,
++        json_value(words[(size_t) end_word_index - 1], "end_sec", start_sec));
++    return json{
++        {"speaker", speaker},
++        {"text", srv_audio_join_words(toks)},
++        {"start_sec", srv_audio_round3(start_sec)},
++        {"end_sec", srv_audio_round3(end_sec)},
++        {"start_word_index", begin_word_index},
++        {"end_word_index", end_word_index},
++        {"num_words", end_word_index - begin_word_index},
++    };
++}
++
++static bool srv_audio_word_range_is_small(
++        const json & words,
++        int64_t begin_word_index,
++        int64_t end_word_index) {
++    if (!words.is_array() || begin_word_index < 0 || end_word_index <= begin_word_index || (size_t) end_word_index > words.size()) {
++        return false;
++    }
++    constexpr int64_t k_max_fragment_words = 4;
++    constexpr double k_max_fragment_duration_sec = 1.6;
++    const double start_sec = json_value(words[(size_t) begin_word_index], "start_sec", 0.0);
++    const double end_sec = std::max(
++        start_sec,
++        json_value(words[(size_t) end_word_index - 1], "end_sec", start_sec));
++    return end_word_index - begin_word_index <= k_max_fragment_words &&
++        end_sec - start_sec <= k_max_fragment_duration_sec;
++}
++
++static int64_t srv_audio_piece_prefix_sentence_end_word_index(
++        const json & piece,
++        const json & words) {
++    const int64_t start_word_index = piece.value("start_word_index", int64_t(-1));
++    const int64_t end_word_index = piece.value("end_word_index", int64_t(-1));
++    if (!words.is_array() || start_word_index < 0 || end_word_index <= start_word_index || (size_t) end_word_index > words.size()) {
++        return -1;
++    }
++
++    for (int64_t idx = start_word_index; idx < end_word_index; ++idx) {
++        if (!words[(size_t) idx].is_object()) {
++            continue;
++        }
++        if (srv_audio_word_ends_sentence(json_value(words[(size_t) idx], "word", std::string()))) {
++            return idx + 1;
++        }
++    }
++    return -1;
++}
++
++static void srv_audio_carry_piece_prefixes_backward(
++        std::vector<json> & assigned_pieces,
++        const json & words) {
++    if (assigned_pieces.size() < 2 || !words.is_array()) {
++        return;
++    }
++
++    std::vector<json> adjusted;
++    adjusted.reserve(assigned_pieces.size() + 4);
++    adjusted.push_back(assigned_pieces.front());
++
++    for (size_t i = 1; i < assigned_pieces.size(); ++i) {
++        json cur = assigned_pieces[i];
++        json & prev = adjusted.back();
++
++        const std::string prev_speaker = prev.value("speaker", std::string("UNASSIGNED"));
++        const std::string cur_speaker = cur.value("speaker", std::string("UNASSIGNED"));
++        if (prev_speaker == "UNASSIGNED" ||
++                cur_speaker == prev_speaker ||
++                srv_audio_piece_ends_sentence(prev)) {
++            adjusted.push_back(std::move(cur));
++            continue;
++        }
++
++        const int64_t prefix_end_word_index = srv_audio_piece_prefix_sentence_end_word_index(cur, words);
++        const int64_t start_word_index = cur.value("start_word_index", int64_t(-1));
++        const int64_t end_word_index = cur.value("end_word_index", int64_t(-1));
++        if (prefix_end_word_index <= start_word_index ||
++                prefix_end_word_index >= end_word_index ||
++                !srv_audio_word_range_is_small(words, start_word_index, prefix_end_word_index)) {
++            adjusted.push_back(std::move(cur));
++            continue;
++        }
++
++        adjusted.push_back(srv_audio_make_piece_from_word_range(
++            words,
++            start_word_index,
++            prefix_end_word_index,
++            prev_speaker));
++        adjusted.push_back(srv_audio_make_piece_from_word_range(
++            words,
++            prefix_end_word_index,
++            end_word_index,
++            cur_speaker));
++    }
++
++    assigned_pieces = std::move(adjusted);
++}
++
++static std::vector<json> srv_audio_split_piece_edges_by_word_speakers(
++        const json & piece,
++        const json & words,
++        const json & speaker_spans) {
++    std::vector<json> out;
++
++    const int64_t start_word_index = piece.value("start_word_index", int64_t(-1));
++    const int64_t end_word_index = piece.value("end_word_index", int64_t(-1));
++    const bool has_word_range =
++        words.is_array() &&
++        start_word_index >= 0 &&
++        end_word_index > start_word_index &&
++        (size_t) end_word_index <= words.size();
++    if (!has_word_range) {
++        out.push_back(piece);
++        return out;
++    }
++
++    std::vector<json> assigned_words;
++    assigned_words.reserve((size_t) (end_word_index - start_word_index));
++    for (int64_t idx = start_word_index; idx < end_word_index; ++idx) {
++        if (!words[(size_t) idx].is_object()) {
++            continue;
++        }
++        json assigned_word = words[(size_t) idx];
++        assigned_word["word"] = srv_audio_sanitize_word_token(json_value(assigned_word, "word", std::string()));
++        if (assigned_word.value("word", std::string()).empty()) {
++            continue;
++        }
++        assigned_word["speaker"] = srv_audio_assign_word_to_realtime_speaker(assigned_word, speaker_spans);
++        assigned_word["_global_word_index"] = idx;
++        assigned_words.push_back(std::move(assigned_word));
++    }
++
++    if (assigned_words.size() < 2) {
++        out.push_back(piece);
++        return out;
++    }
++
++    const std::string word_dominant_speaker =
++        srv_audio_dominant_speaker_for_word_range(assigned_words, 0, assigned_words.size());
++    const std::string dominant_speaker =
++        word_dominant_speaker != "UNASSIGNED" ? word_dominant_speaker : piece.value("speaker", std::string("UNASSIGNED"));
++    if (dominant_speaker == "UNASSIGNED") {
++        out.push_back(piece);
++        return out;
++    }
++
++    size_t leading_end = 0;
++    while (leading_end < assigned_words.size() &&
++            assigned_words[leading_end].value("speaker", std::string("UNASSIGNED")) != dominant_speaker) {
++        ++leading_end;
++    }
++
++    size_t trailing_begin = assigned_words.size();
++    while (trailing_begin > 0 &&
++            assigned_words[trailing_begin - 1].value("speaker", std::string("UNASSIGNED")) != dominant_speaker) {
++        --trailing_begin;
++    }
++
++    bool have_leading = false;
++    std::string leading_speaker;
++    if (leading_end > 0 &&
++            leading_end < assigned_words.size() &&
++            srv_audio_piece_edge_run_is_small(assigned_words, 0, leading_end) &&
++            srv_audio_piece_edge_run_speaker(assigned_words, 0, leading_end, dominant_speaker, leading_speaker)) {
++        have_leading = true;
++    } else {
++        leading_end = 0;
++    }
++
++    bool have_trailing = false;
++    std::string trailing_speaker;
++    if (trailing_begin < assigned_words.size() &&
++            trailing_begin > leading_end &&
++            srv_audio_piece_edge_run_is_small(assigned_words, trailing_begin, assigned_words.size()) &&
++            srv_audio_piece_edge_run_speaker(assigned_words, trailing_begin, assigned_words.size(), dominant_speaker, trailing_speaker)) {
++        have_trailing = true;
++    } else {
++        trailing_begin = assigned_words.size();
++    }
++
++    if (!have_leading && !have_trailing) {
++        json updated_piece = piece;
++        updated_piece["speaker"] = dominant_speaker;
++        out.push_back(std::move(updated_piece));
++        return out;
++    }
++
++    if (have_leading) {
++        out.push_back(srv_audio_make_piece_from_assigned_words(assigned_words, 0, leading_end, leading_speaker));
++    }
++
++    const size_t core_begin = leading_end;
++    const size_t core_end = trailing_begin;
++    if (core_begin < core_end) {
++        out.push_back(srv_audio_make_piece_from_assigned_words(assigned_words, core_begin, core_end, dominant_speaker));
++    }
++
++    if (have_trailing) {
++        out.push_back(srv_audio_make_piece_from_assigned_words(
++            assigned_words,
++            trailing_begin,
++            assigned_words.size(),
++            trailing_speaker));
++    }
++
++    if (out.empty()) {
++        out.push_back(piece);
++    }
++    return out;
++}
++
++static json srv_audio_build_realtime_speaker_segments(
++        const json & pieces,
++        const json & words,
++        const json & speaker_spans,
++        double max_gap_sec,
++        int max_words,
++        double max_duration_sec,
++        bool split_on_hard_break) {
++    json speaker_segments = json::array();
++    json effective_pieces = pieces;
++    if ((!effective_pieces.is_array() || effective_pieces.empty()) && words.is_array() && !words.empty()) {
++        effective_pieces = srv_audio_build_fallback_whisper_pieces(words);
++    }
++    if (!effective_pieces.is_array() || effective_pieces.empty()) {
++        return speaker_segments;
++    }
++
++    std::vector<json> assigned_pieces;
++    assigned_pieces.reserve(effective_pieces.size());
++    for (const auto & piece : effective_pieces) {
++        if (!piece.is_object()) {
++            continue;
++        }
++
++        json normalized_piece = piece;
++        const int64_t start_word_index = normalized_piece.value("start_word_index", int64_t(-1));
++        const int64_t end_word_index = normalized_piece.value("end_word_index", int64_t(-1));
++        const bool has_word_range =
++            words.is_array() &&
++            start_word_index >= 0 &&
++            end_word_index > start_word_index &&
++            (size_t) end_word_index <= words.size() &&
++            words[(size_t) start_word_index].is_object() &&
++            words[(size_t) end_word_index - 1].is_object();
++
++        std::string piece_text = srv_audio_sanitize_transcript_text(
++            normalized_piece.value("text", std::string()));
++        if (piece_text.empty() && has_word_range) {
++            piece_text = srv_audio_join_word_range(words, (size_t) start_word_index, (size_t) end_word_index);
++        }
++        if (piece_text.empty()) {
++            continue;
++        }
++
++        double piece_start = normalized_piece.value("start_sec", 0.0);
++        double piece_end = std::max(piece_start, normalized_piece.value("end_sec", piece_start));
++        if (has_word_range) {
++            piece_start = std::max(
++                0.0,
++                json_value(words[(size_t) start_word_index], "start_sec", piece_start));
++            piece_end = std::max(
++                piece_start,
++                json_value(words[(size_t) end_word_index - 1], "end_sec", piece_end));
++        }
++        if (piece_end <= piece_start) {
++            piece_end = piece_start + 0.001;
++        }
++
++        int64_t piece_num_words = srv_audio_piece_num_words(normalized_piece);
++        if (piece_num_words < 0 && has_word_range) {
++            piece_num_words = end_word_index - start_word_index;
++        }
++        if (piece_num_words < 0) {
++            piece_num_words = 0;
++        }
++
++        normalized_piece["text"] = piece_text;
++        normalized_piece["start_sec"] = srv_audio_round3(piece_start);
++        normalized_piece["end_sec"] = srv_audio_round3(piece_end);
++        normalized_piece["num_words"] = piece_num_words;
++        normalized_piece["speaker"] = srv_audio_assign_piece_to_realtime_speaker(normalized_piece, speaker_spans);
++        auto split_pieces = srv_audio_split_piece_edges_by_word_speakers(normalized_piece, words, speaker_spans);
++        for (auto & split_piece : split_pieces) {
++            assigned_pieces.push_back(std::move(split_piece));
++        }
++    }
++
++    if (assigned_pieces.empty()) {
++        return speaker_segments;
++    }
++
++    srv_audio_refine_realtime_piece_boundaries(assigned_pieces, words);
++
++    std::vector<json> bucket;
++    std::string current_speaker = "UNASSIGNED";
++    double current_start = 0.0;
++    int64_t current_num_words = 0;
++
++    auto flush = [&]() {
++        if (bucket.empty()) {
++            return;
++        }
++        std::vector<std::string> piece_texts;
++        piece_texts.reserve(bucket.size());
++        int64_t total_words = 0;
++        for (const auto & w : bucket) {
++            piece_texts.push_back(w.value("text", std::string()));
++            total_words += w.value("num_words", int64_t(0));
++        }
++
++        const std::string merged_text = srv_audio_sanitize_transcript_text(srv_audio_join_words(piece_texts));
++        if (merged_text.empty()) {
++            bucket.clear();
++            current_num_words = 0;
++            return;
++        }
++
++        speaker_segments.push_back(json{
++            {"speaker", current_speaker},
++            {"start_sec", srv_audio_round3(bucket.front().value("start_sec", 0.0))},
++            {"end_sec", srv_audio_round3(bucket.back().value("end_sec", bucket.front().value("start_sec", 0.0)))},
++            {"text", merged_text},
++            {"num_words", total_words},
++            {"num_pieces", (int64_t) bucket.size()},
++        });
++        bucket.clear();
++        current_num_words = 0;
++    };
++
++    for (const auto & normalized_piece : assigned_pieces) {
++        const std::string speaker = normalized_piece.value("speaker", std::string("UNASSIGNED"));
++        const int64_t piece_num_words = normalized_piece.value("num_words", int64_t(0));
++
++        if (bucket.empty()) {
++            bucket.push_back(normalized_piece);
++            current_speaker = speaker;
++            current_start = normalized_piece.value("start_sec", 0.0);
++            current_num_words = piece_num_words;
++            continue;
++        }
++
++        const double prev_end = bucket.back().value("end_sec", bucket.back().value("start_sec", 0.0));
++        const double next_start = normalized_piece.value("start_sec", prev_end);
++        const double next_end = normalized_piece.value("end_sec", next_start);
++
++        bool should_split = speaker != current_speaker;
++        if (!should_split && max_gap_sec >= 0.0 && next_start - prev_end > max_gap_sec) {
++            should_split = true;
++        }
++        if (!should_split && max_words > 0 && current_num_words + piece_num_words > max_words) {
++            should_split = true;
++        }
++        if (!should_split && max_duration_sec > 0.0 && next_end - current_start > max_duration_sec) {
++            should_split = true;
++        }
++        if (!should_split &&
++                split_on_hard_break &&
++                srv_audio_piece_ends_sentence(bucket.back()) &&
++                srv_audio_piece_starts_with_sentence_start(normalized_piece)) {
++            should_split = true;
++        }
++        if (should_split) {
++            flush();
++            current_speaker = speaker;
++            current_start = next_start;
++        }
++
++        bucket.push_back(normalized_piece);
++        current_num_words += piece_num_words;
++    }
++
++    flush();
++    return speaker_segments;
++}
++
++static void srv_audio_remove_if_exists(const std::filesystem::path & path) {
++    std::error_code ec;
++    if (!path.empty()) {
++        std::filesystem::remove(path, ec);
++    }
++}
++
++static void srv_audio_shift_word_timestamps(json & words, double offset_sec, double source_audio_seconds) {
++    if (!words.is_array() || std::abs(offset_sec) < 1e-9) {
++        return;
++    }
++
++    for (auto & w : words) {
++        if (!w.is_object()) {
++            continue;
++        }
++
++        double s = w.value("start_sec", 0.0);
++        double e = w.value("end_sec", s);
++
++        s = std::max(0.0, s + offset_sec);
++        e = std::max(s, e + offset_sec);
++
++        if (source_audio_seconds > 0.0) {
++            s = std::min(s, source_audio_seconds);
++            e = std::min(std::max(e, s), source_audio_seconds);
++        }
++
++        if (e <= s) {
++            e = s + 0.001;
++            if (source_audio_seconds > 0.0) {
++                e = std::min(e, source_audio_seconds);
++            }
++        }
++
++        w["start_sec"] = srv_audio_round3(s);
++        w["end_sec"] = srv_audio_round3(e);
++    }
++}
++
++static void srv_audio_shift_piece_timestamps(json & pieces, double offset_sec, double source_audio_seconds) {
++    if (!pieces.is_array() || std::abs(offset_sec) < 1e-9) {
++        return;
++    }
++
++    for (auto & piece : pieces) {
++        if (!piece.is_object()) {
++            continue;
++        }
++
++        double s = piece.value("start_sec", 0.0);
++        double e = piece.value("end_sec", s);
++
++        s = std::max(0.0, s + offset_sec);
++        e = std::max(s, e + offset_sec);
++
++        if (source_audio_seconds > 0.0) {
++            s = std::min(s, source_audio_seconds);
++            e = std::min(std::max(e, s), source_audio_seconds);
++        }
++
++        if (e <= s) {
++            e = s + 0.001;
++            if (source_audio_seconds > 0.0) {
++                e = std::min(e, source_audio_seconds);
++            }
++        }
++
++        piece["start_sec"] = srv_audio_round3(s);
++        piece["end_sec"] = srv_audio_round3(e);
++    }
++}
++
++static json srv_audio_fallback_words(
++        const std::string & transcript,
++        double source_audio_seconds,
++        double seconds_per_token) {
++    json words = json::array();
++    std::vector<std::string> ws = srv_audio_split_ws(transcript);
++    if (ws.empty()) {
++        return words;
++    }
++    const double duration = source_audio_seconds > 0.0
++        ? source_audio_seconds
++        : std::max(seconds_per_token * (double) ws.size(), 1e-3);
++    const double dt = duration / (double) ws.size();
++    for (size_t i = 0; i < ws.size(); ++i) {
++        std::string clean_w = srv_audio_sanitize_word_token(ws[i]);
++        if (clean_w.empty()) {
++            continue;
++        }
++        const double start = dt * (double) i;
++        const double end = dt * (double) (i + 1);
++        words.push_back(json{
++            {"word", clean_w},
++            {"start_sec", srv_audio_round3(start)},
++            {"end_sec", srv_audio_round3(end)},
++            {"start_token_index", (int64_t) i},
++            {"end_token_index", (int64_t) (i + 1)},
++        });
++    }
++    return words;
++}
++
++static json srv_audio_build_fallback_whisper_pieces(const json & words) {
++    json pieces = json::array();
++    if (!words.is_array() || words.empty()) {
++        return pieces;
++    }
++
++    constexpr size_t k_max_words = 16;
++    constexpr double k_max_duration_sec = 5.0;
++
++    size_t begin = 0;
++    while (begin < words.size()) {
++        if (!words[begin].is_object()) {
++            ++begin;
++            continue;
++        }
++
++        const double piece_start = words[begin].value("start_sec", 0.0);
++        size_t end = begin + 1;
++        for (; end < words.size(); ++end) {
++            if (!words[end].is_object()) {
++                continue;
++            }
++            const double candidate_end = words[end].value("end_sec", piece_start);
++            const size_t candidate_words = end + 1 - begin;
++            const bool sentence_end = srv_audio_word_ends_sentence(words[end].value("word", std::string()));
++            const bool too_many_words = candidate_words >= k_max_words;
++            const bool too_long = candidate_end - piece_start >= k_max_duration_sec;
++            if (sentence_end || too_many_words || too_long) {
++                ++end;
++                break;
++            }
++        }
++
++        end = std::min(end, words.size());
++        while (end > begin && !words[end - 1].is_object()) {
++            --end;
++        }
++        if (end <= begin) {
++            begin = std::min(words.size(), begin + 1);
++            continue;
++        }
++
++        const double piece_end = std::max(
++            piece_start,
++            words[end - 1].value("end_sec", piece_start));
++        pieces.push_back(json{
++            {"text", srv_audio_join_word_range(words, begin, end)},
++            {"start_sec", srv_audio_round3(piece_start)},
++            {"end_sec", srv_audio_round3(piece_end)},
++            {"start_word_index", (int64_t) begin},
++            {"end_word_index", (int64_t) end},
++            {"num_words", (int64_t) (end - begin)},
++        });
++        begin = end;
++    }
++
++    return pieces;
++}
++
++static json srv_audio_build_segments(const json & words, int max_words = 12, double max_duration_sec = 4.0) {
++    json segments = json::array();
++    if (!words.is_array() || words.empty()) {
++        return segments;
++    }
++
++    std::vector<json> bucket;
++    bucket.reserve((size_t) std::max(4, max_words));
++    double seg_start = words[0].value("start_sec", 0.0);
++
++    auto flush = [&]() {
++        if (bucket.empty()) {
++            return;
++        }
++        std::vector<std::string> toks;
++        toks.reserve(bucket.size());
++        for (const auto & w : bucket) {
++            toks.push_back(w.value("word", std::string()));
++        }
++        segments.push_back(json{
++            {"start_sec", srv_audio_round3(bucket.front().value("start_sec", 0.0))},
++            {"end_sec", srv_audio_round3(bucket.back().value("end_sec", 0.0))},
++            {"text", srv_audio_join_words(toks)},
++            {"num_words", (int64_t) bucket.size()},
++        });
++        bucket.clear();
++    };
++
++    for (const auto & word : words) {
++        if (bucket.empty()) {
++            bucket.push_back(word);
++            seg_start = word.value("start_sec", 0.0);
++            continue;
++        }
++
++        const double candidate_duration = word.value("end_sec", seg_start) - seg_start;
++        if ((int) bucket.size() >= max_words || candidate_duration > max_duration_sec) {
++            flush();
++            bucket.push_back(word);
++            seg_start = word.value("start_sec", 0.0);
++            continue;
++        }
++
++        bucket.push_back(word);
++        const std::string wtxt = word.value("word", std::string());
++        if (bucket.size() >= 4 && !wtxt.empty()) {
++            const char c = wtxt.back();
++            if (c == '.' || c == '?' || c == '!') {
++                flush();
++            }
++        }
++    }
++    flush();
++
++    return segments;
++}
++
++static bool srv_audio_word_ends_sentence(const std::string & word) {
++    for (size_t i = word.size(); i > 0; --i) {
++        const char c = word[i - 1];
++        if (std::isspace((unsigned char) c) || c == '"' || c == '\'' || c == ')' || c == ']' || c == '}') {
++            continue;
++        }
++        return c == '.' || c == '!' || c == '?';
++    }
++    return false;
++}
++
++static json srv_audio_build_sentence_segments(const json & words) {
++    json segments = json::array();
++    if (!words.is_array() || words.empty()) {
++        return segments;
++    }
++
++    std::vector<json> bucket;
++    auto flush = [&]() {
++        if (bucket.empty()) {
++            return;
++        }
++        std::vector<std::string> toks;
++        toks.reserve(bucket.size());
++        for (const auto & w : bucket) {
++            toks.push_back(w.value("word", std::string()));
++        }
++        segments.push_back(json{
++            {"start_sec", srv_audio_round3(bucket.front().value("start_sec", 0.0))},
++            {"end_sec", srv_audio_round3(bucket.back().value("end_sec", 0.0))},
++            {"text", srv_audio_join_words(toks)},
++            {"num_words", (int64_t) bucket.size()},
++        });
++        bucket.clear();
++    };
++
++    for (const auto & word : words) {
++        if (!word.is_object()) {
++            continue;
++        }
++        bucket.push_back(word);
++        if (srv_audio_word_ends_sentence(word.value("word", std::string()))) {
++            flush();
++        }
++    }
++    flush();
++
++    return segments;
++}
++
++static json srv_audio_build_subtitle_segments_window(const json & words, double max_duration_sec) {
++    if (max_duration_sec <= 0.0) {
++        return srv_audio_build_segments(words);
++    }
++
++    json segments = json::array();
++    if (!words.is_array() || words.empty()) {
++        return segments;
++    }
++
++    std::vector<json> bucket;
++    double seg_start = 0.0;
++
++    auto flush = [&]() {
++        if (bucket.empty()) {
++            return;
++        }
++        std::vector<std::string> toks;
++        toks.reserve(bucket.size());
++        for (const auto & w : bucket) {
++            toks.push_back(w.value("word", std::string()));
++        }
++        segments.push_back(json{
++            {"start_sec", srv_audio_round3(bucket.front().value("start_sec", 0.0))},
++            {"end_sec", srv_audio_round3(bucket.back().value("end_sec", 0.0))},
++            {"text", srv_audio_join_words(toks)},
++            {"num_words", (int64_t) bucket.size()},
++        });
++        bucket.clear();
++    };
++
++    for (const auto & word : words) {
++        if (!word.is_object()) {
++            continue;
++        }
++        if (bucket.empty()) {
++            bucket.push_back(word);
++            seg_start = word.value("start_sec", 0.0);
++            continue;
++        }
++
++        const double candidate_duration = word.value("end_sec", seg_start) - seg_start;
++        if (candidate_duration > max_duration_sec) {
++            flush();
++            bucket.push_back(word);
++            seg_start = word.value("start_sec", 0.0);
++            continue;
++        }
++
++        bucket.push_back(word);
++    }
++    flush();
++
++    return segments;
++}
++
++static std::string srv_audio_transcript_to_md_chunked(const json & sentence_segments, double max_chunk_sec) {
++    if (!sentence_segments.is_array() || sentence_segments.empty()) {
++        return "";
++    }
++    if (max_chunk_sec <= 0.0) {
++        std::string text;
++        for (const auto & seg : sentence_segments) {
++            if (!seg.is_object()) {
++                continue;
++            }
++            const std::string s = srv_audio_collapse_ws(seg.value("text", std::string()));
++            if (s.empty()) {
++                continue;
++            }
++            if (!text.empty()) {
++                text += " ";
++            }
++            text += s;
++        }
++        return text.empty() ? std::string() : text + "\n";
++    }
++
++    std::vector<std::string> paragraphs;
++    std::string current;
++    bool has_open_chunk = false;
++    double chunk_start = 0.0;
++
++    auto flush_chunk = [&]() {
++        const std::string c = srv_audio_collapse_ws(current);
++        if (!c.empty()) {
++            paragraphs.push_back(c);
++        }
++        current.clear();
++        has_open_chunk = false;
++        chunk_start = 0.0;
++    };
++
++    for (const auto & seg : sentence_segments) {
++        if (!seg.is_object()) {
++            continue;
++        }
++        const std::string seg_text = srv_audio_collapse_ws(seg.value("text", std::string()));
++        if (seg_text.empty()) {
++            continue;
++        }
++        const double seg_start = seg.value("start_sec", 0.0);
++        const double seg_end = std::max(seg_start, seg.value("end_sec", seg_start));
++
++        if (!has_open_chunk) {
++            chunk_start = seg_start;
++            current = seg_text;
++            has_open_chunk = true;
++            continue;
++        }
++
++        const double candidate_duration = seg_end - chunk_start;
++        if (candidate_duration > max_chunk_sec) {
++            flush_chunk();
++            chunk_start = seg_start;
++            current = seg_text;
++            has_open_chunk = true;
++            continue;
++        }
++
++        current += " ";
++        current += seg_text;
++    }
++    if (has_open_chunk) {
++        flush_chunk();
++    }
++
++    if (paragraphs.empty()) {
++        return "";
++    }
++
++    std::ostringstream oss;
++    for (size_t i = 0; i < paragraphs.size(); ++i) {
++        if (i > 0) {
++            oss << "\n\n";
++        }
++        oss << paragraphs[i];
++    }
++    oss << "\n";
++    return oss.str();
++}
++
++static std::string srv_audio_clean_cache_name(const std::string & name) {
++    std::string out;
++    out.reserve(name.size());
++    for (const unsigned char c : name) {
++        if (std::isalnum(c) || c == '.' || c == '_' || c == '-') {
++            out.push_back((char) c);
++        } else {
++            out.push_back('_');
++        }
++    }
++    return out;
++}
++
++static bool srv_audio_resolve_hf_model(
++        const std::string & hf_repo_with_tag,
++        const std::string & hf_file,
++        const std::string & bearer_token,
++        bool offline,
++        std::string & out_path,
++        std::string & out_repo_no_tag,
++        std::string & out_err) {
++    out_path.clear();
++    out_repo_no_tag.clear();
++    out_err.clear();
++
++    if (hf_repo_with_tag.empty() || hf_file.empty()) {
++        out_err = "hf_repo and hf_file must be non-empty";
++        return false;
++    }
++
++    auto [hf_repo, hf_tag] = common_download_split_repo_tag(hf_repo_with_tag);
++    if (hf_repo.empty()) {
++        out_err = "invalid hf_repo value: " + hf_repo_with_tag;
++        return false;
++    }
++
++    if (hf_tag.empty() || hf_tag == "latest") {
++        hf_tag = "main";
++    }
++
++    const std::string model_url = get_model_endpoint() + hf_repo + "/resolve/" + hf_tag + "/" + hf_file;
++    const std::string model_path = fs_get_cache_file(srv_audio_clean_cache_name(hf_repo + "_" + hf_file));
++
++    const int status = common_download_file_single(model_url, model_path, bearer_token, offline);
++    if (status < 200 || status >= 400) {
++        out_err = "failed to download model from " + model_url;
++        return false;
++    }
++
++    if (model_path.empty() || !std::filesystem::exists(model_path)) {
++        out_err = "resolved model path not found after download: " + model_path;
++        return false;
++    }
++
++    out_path = model_path;
++    out_repo_no_tag = hf_repo;
++    return true;
++}
++
++// generator-like API for HTTP response generation
++// may have bypass_sleep = true if the task does not use ctx_server
++struct server_res_generator : server_http_res {
++    server_response_reader rd;
++    server_res_generator(server_queue & queue_tasks, server_response & queue_results, int sleep_idle_seconds, bool bypass_sleep = false)
++            : rd(queue_tasks, queue_results, HTTP_POLLING_SECONDS) {
++        // fast path in case sleeping is disabled
++        bypass_sleep |= sleep_idle_seconds < 0;
++        if (!bypass_sleep) {
++            queue_tasks.wait_until_no_sleep();
++        }
++    }
++    void ok(const json & response_data) {
++        status = 200;
++        data = safe_json_to_str(response_data);
++    }
++    void error(const json & error_data) {
++        status = json_value(error_data, "code", 500);
++        data = safe_json_to_str({{ "error", error_data }});
++    }
++};
++
++
++
++//
++// server_routes
++//
++
++std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
++            const server_http_req & req,
++            server_task_type type,
++            const json & data,
++            const std::vector<raw_buffer> & files,
++            task_response_type res_type) {
++    GGML_ASSERT(type == SERVER_TASK_TYPE_COMPLETION || type == SERVER_TASK_TYPE_INFILL);
++
++    auto res = create_response();
++    auto completion_id = gen_chatcmplid();
++    auto & rd = res->rd;
++
++    try {
++        std::vector<server_task> tasks;
++
++        const auto & prompt = data.at("prompt");
++        // TODO: this log can become very long, put it behind a flag or think about a more compact format
++        //SRV_DBG("Prompt: %s\n", prompt.is_string() ? prompt.get<std::string>().c_str() : prompt.dump(2).c_str());
++
++        // process prompt
++        std::vector<server_tokens> inputs;
++
++        if (res_type != TASK_RESPONSE_TYPE_NONE && ctx_server.mctx != nullptr) {
++            // This is the case used by OAI compatible chat path with MTMD. TODO It can be moved to the path below.
++            inputs.push_back(process_mtmd_prompt(ctx_server.mctx, prompt.get<std::string>(), files));
++        } else {
++            // Everything else, including multimodal completions.
++            inputs = tokenize_input_prompts(ctx_server.vocab, ctx_server.mctx, prompt, true, true);
++        }
++
++        // tasks.reserve(inputs.size()); // TODO: this is inaccurate due to child tasks
++
++        for (size_t i = 0; i < inputs.size(); i++) {
++            server_task task = server_task(type);
++
++            task.id = rd.get_new_id();
++
++            task.tokens = std::move(inputs[i]);
++            task.params = server_task::params_from_json_cmpl(
++                    ctx_server.vocab,
++                    params,
++                    meta->slot_n_ctx,
++                    data);
++            task.id_slot = json_value(data, "id_slot", -1);
++
++            // OAI-compat
++            task.params.res_type          = res_type;
++            task.params.oaicompat_cmpl_id = completion_id;
++            task.params.oaicompat_model   = meta->model_name;
++
++            // prepare child tasks
++            if (task.params.n_cmpl > 1) {
++                int n_children = task.params.n_cmpl - 1;
++                for (int j = 0; j < n_children; j++) {
++                    task.add_child(task.id, rd.get_new_id());
++                }
++            }
++
++            tasks.push_back(std::move(task));
++        }
++
++        rd.post_tasks(std::move(tasks));
++    } catch (const std::exception & e) {
++        res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
++        return res;
++    }
++
++    bool stream = json_value(data, "stream", false);
++
++    if (!stream) {
++        // non-stream, wait for the results
++        auto all_results = rd.wait_for_all(req.should_stop);
++        if (all_results.is_terminated) {
++            return res; // connection is closed
++        } else if (all_results.error) {
++            res->error(all_results.error->to_json());
++            return res;
++        } else {
++            json arr = json::array();
++            for (auto & res : all_results.results) {
++                GGML_ASSERT(dynamic_cast<server_task_result_cmpl_final*>(res.get()) != nullptr);
++                arr.push_back(res->to_json());
++            }
++            GGML_ASSERT(!arr.empty() && "empty results");
++            if (arr.size() == 1) {
++                // if single request, return single object instead of array
++                res->ok(arr[0]);
++            } else if (res_type == TASK_RESPONSE_TYPE_OAI_CHAT || res_type == TASK_RESPONSE_TYPE_OAI_CMPL) {
++                // if multiple results in OAI format, we need to re-format them
++                json & choices = arr[0]["choices"];
++                for (size_t i = 1; i < arr.size(); i++) {
++                    choices.push_back(std::move(arr[i]["choices"][0]));
++                }
++                res->ok(arr[0]);
++            } else {
++                // multi-results, non-OAI compat
++                res->ok(arr);
++            }
++        }
++    } else {
++        // in streaming mode, the first error must be treated as non-stream response
++        // this is to match the OAI API behavior
++        // ref: https://github.com/ggml-org/llama.cpp/pull/16486#discussion_r2419657309
++        auto first_result = rd.next(req.should_stop);
++        if (first_result == nullptr) {
++            GGML_ASSERT(req.should_stop());
++            return res; // connection is closed
++        }
++
++        if (first_result->is_error()) {
++            res->error(first_result->to_json());
++            return res;
++        }
++
++        GGML_ASSERT(
++            dynamic_cast<server_task_result_cmpl_partial*>(first_result.get()) != nullptr ||
++            dynamic_cast<server_task_result_cmpl_final*>  (first_result.get()) != nullptr
++        );
++
++        // next responses are streamed
++        // to be sent immediately
++        json first_result_json = first_result->to_json();
++        if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
++            res->data = format_anthropic_sse(first_result_json);
++        } else if (res_type == TASK_RESPONSE_TYPE_OAI_RESP) {
++            res->data = format_oai_resp_sse(first_result_json);
++        } else {
++            res->data = format_oai_sse(first_result_json);
++        }
++        res->status = 200;
++        res->content_type = "text/event-stream";
++        res->next = [res_this = res.get(), res_type, &req](std::string & output) -> bool {
++            static auto format_error = [](task_response_type res_type, const json & res_json) {
++                if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
++                    return format_anthropic_sse({
++                        {"event", "error"},
++                        {"data", res_json},
++                    });
++                } else {
++                    return format_oai_sse(json {{ "error", res_json }});
++                }
++            };
++
++            try {
++                if (req.should_stop()) {
++                    SRV_DBG("%s", "stopping streaming due to should_stop condition\n");
++                    return false; // should_stop condition met
++                }
++
++                if (!res_this->data.empty()) {
++                    // flush the first chunk
++                    output = std::move(res_this->data);
++                    res_this->data.clear();
++                    return true;
++                }
++
++                server_response_reader & rd = res_this->rd;
++
++                // check if there is more data
++                if (!rd.has_next()) {
++                    switch (res_type) {
++                        case TASK_RESPONSE_TYPE_NONE:
++                        case TASK_RESPONSE_TYPE_OAI_RESP:
++                        case TASK_RESPONSE_TYPE_ANTHROPIC:
++                            output = "";
++                            break;
++
++                        default:
++                            output = "data: [DONE]\n\n";
++                            break;
++                    }
++                    SRV_DBG("%s", "all results received, terminating stream\n");
++                    return false; // no more data, terminate
++                }
++
++                // receive subsequent results
++                auto result = rd.next(req.should_stop);
++                if (result == nullptr) {
++                    SRV_DBG("%s", "stopping streaming due to should_stop condition\n");
+                     GGML_ASSERT(req.should_stop());
+                     return false; // should_stop condition met
+                 }
+@@ -3591,8 +6769,6 @@ void server_routes::init_routes() {
+         auto res = create_response();
+         std::vector<raw_buffer> files;
+         json body = convert_responses_to_chatcmpl(json::parse(req.body));
+-        SRV_DBG("%s\n", "Request converted: OpenAI Responses -> OpenAI Chat Completions");
+-        SRV_DBG("converted request: %s\n", body.dump().c_str());
+         json body_parsed = oaicompat_chat_params_parse(
+             body,
+             meta->chat_params,
+@@ -3609,8 +6785,6 @@ void server_routes::init_routes() {
+         auto res = create_response();
+         std::vector<raw_buffer> files;
+         json body = convert_anthropic_to_oai(json::parse(req.body));
+-        SRV_DBG("%s\n", "Request converted: Anthropic -> OpenAI Chat Completions");
+-        SRV_DBG("converted request: %s\n", body.dump().c_str());
+         json body_parsed = oaicompat_chat_params_parse(
+             body,
+             meta->chat_params,
+@@ -3627,8 +6801,6 @@ void server_routes::init_routes() {
+         auto res = create_response();
+         std::vector<raw_buffer> files;
+         json body = convert_anthropic_to_oai(json::parse(req.body));
+-        SRV_DBG("%s\n", "Request converted: Anthropic -> OpenAI Chat Completions");
+-        SRV_DBG("converted request: %s\n", body.dump().c_str());
+         json body_parsed = oaicompat_chat_params_parse(
+             body,
+             meta->chat_params,
+@@ -3850,6 +7022,709 @@ void server_routes::init_routes() {
+         return res;
+     };
+ 
++    this->post_audio_transcriptions = [this](const server_http_req & req) {
++        auto res = create_response();
++        const auto pipeline_t0 = std::chrono::steady_clock::now();
++
++        const json body = json::parse(req.body);
++        const json generation = json_value(body, "generation", json::object());
++
++        json audio_obj = json::object();
++        if (body.contains("audio") && body.at("audio").is_object()) {
++            audio_obj = body.at("audio");
++        } else if (body.contains("input_audio") && body.at("input_audio").is_object()) {
++            audio_obj = body.at("input_audio");
++        } else {
++            res->error(format_error_response(
++                "Request must contain 'audio' or 'input_audio' object with fields {data, format}.",
++                ERROR_TYPE_INVALID_REQUEST));
++            return res;
++        }
++
++        const srv_audio_inproc_raw_payload * inproc_raw_payload = g_srv_audio_inproc_raw_payload;
++        std::string audio_data_b64 = json_value(audio_obj, "data", std::string());
++        std::string audio_format = json_value(audio_obj, "format", std::string("wav"));
++        std::transform(audio_format.begin(), audio_format.end(), audio_format.begin(), [](unsigned char c) {
++            return (char) std::tolower(c);
++        });
++        if (inproc_raw_payload != nullptr && !inproc_raw_payload->audio_format.empty()) {
++            audio_format = inproc_raw_payload->audio_format;
++            std::transform(audio_format.begin(), audio_format.end(), audio_format.begin(), [](unsigned char c) {
++                return (char) std::tolower(c);
++            });
++        }
++        const bool has_raw_audio = inproc_raw_payload != nullptr
++            && inproc_raw_payload->audio_bytes != nullptr
++            && !inproc_raw_payload->audio_bytes->empty();
++        if (!has_raw_audio && audio_data_b64.empty()) {
++            res->error(format_error_response(
++                "'audio.data' must be non-empty when raw in-process audio bytes are not provided.",
++                ERROR_TYPE_INVALID_REQUEST));
++            return res;
++        }
++        if (audio_format != "wav" && audio_format != "mp3") {
++            res->error(format_error_response(
++                "'audio.format' must be 'wav' or 'mp3'.",
++                ERROR_TYPE_INVALID_REQUEST));
++            return res;
++        }
++
++        std::string mode = body.value("mode", std::string());
++        std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char c) {
++            return (char) std::tolower(c);
++        });
++        if (mode.empty()) {
++            const bool legacy_enable_diarization = body.value("enable_diarization", false);
++            std::string legacy_format = body.value("transcript_format", body.value("output_format", std::string("md")));
++            std::transform(legacy_format.begin(), legacy_format.end(), legacy_format.begin(), [](unsigned char c) {
++                return (char) std::tolower(c);
++            });
++            if (legacy_enable_diarization) {
++                mode = "transcript";
++            } else if (legacy_format == "srt") {
++                mode = "subtitle";
++            } else {
++                mode = "speech";
++            }
++        }
++
++        const std::string audio_source_path = body.value("audio_source_path", std::string());
++        std::filesystem::path output_dir = std::filesystem::path(body.value("output_dir", std::string()));
++        if (mode != "timeline") {
++            if (output_dir.empty() && !audio_source_path.empty()) {
++                output_dir = std::filesystem::path(audio_source_path).parent_path();
++            }
++            if (output_dir.empty()) {
++                output_dir = std::filesystem::current_path();
++            }
++            std::error_code ec_output_dir;
++            std::filesystem::create_directories(output_dir, ec_output_dir);
++            if (ec_output_dir) {
++                res->error(format_error_response(
++                    "Failed to create output_dir: " + output_dir.string(),
++                    ERROR_TYPE_SERVER));
++                return res;
++            }
++        }
++
++        std::string output_stem;
++        if (!audio_source_path.empty()) {
++            output_stem = std::filesystem::path(audio_source_path).stem().string();
++        }
++        if (output_stem.empty()) {
++            output_stem = "audio";
++        }
++
++        const std::filesystem::path temp_root = std::filesystem::temp_directory_path() / ("engine_audio_" + srv_audio_make_run_id());
++        std::error_code ec_temp_dir;
++        std::filesystem::create_directories(temp_root, ec_temp_dir);
++        if (ec_temp_dir) {
++            res->error(format_error_response(
++                "Failed to create temporary directory for audio pipeline",
++                ERROR_TYPE_SERVER));
++            return res;
++        }
++        srv_audio_temp_dir_guard temp_dir_guard{temp_root};
++
++        const std::filesystem::path diarization_out_dir = temp_root / "diarization";
++        std::filesystem::create_directories(diarization_out_dir, ec_temp_dir);
++        if (ec_temp_dir) {
++            res->error(format_error_response(
++                "Failed to create temporary diarization directory",
++                ERROR_TYPE_SERVER));
++            return res;
++        }
++
++        raw_buffer audio_bytes;
++        if (has_raw_audio) {
++            audio_bytes = *inproc_raw_payload->audio_bytes;
++        } else {
++            std::string decoded_audio;
++            try {
++                decoded_audio = base64::decode(audio_data_b64);
++            } catch (const std::exception & ex) {
++                res->error(format_error_response(
++                    std::string("invalid base64 audio payload: ") + ex.what(),
++                    ERROR_TYPE_INVALID_REQUEST));
++                return res;
++            }
++            audio_bytes.assign(decoded_audio.begin(), decoded_audio.end());
++        }
++        const std::filesystem::path audio_path = temp_root / ("input_audio." + audio_format);
++        srv_audio_write_binary(audio_path, audio_bytes);
++
++        std::string transcript;
++        json words = json::array();
++
++        const std::string requested_backend = body.value("transcription_backend", std::string("auto"));
++        std::string transcription_backend = requested_backend;
++        std::transform(
++            transcription_backend.begin(),
++            transcription_backend.end(),
++            transcription_backend.begin(),
++            [](unsigned char c) { return (char) std::tolower(c); });
++
++        if (transcription_backend.empty() || transcription_backend == "auto" ||
++            transcription_backend == "whisper" || transcription_backend == "whisper_cpp") {
++            transcription_backend = "whisper_cpp_inproc";
++        }
++        if (transcription_backend == "whisper_cpp_cli") {
++            // Backward-compatible alias.
++            transcription_backend = "whisper_cpp_inproc";
++        }
++        if (transcription_backend != "whisper_cpp_inproc") {
++            res->error(format_error_response(
++                "Unknown transcription_backend '" + transcription_backend + "'. Supported: auto, whisper_cpp_inproc.",
++                ERROR_TYPE_INVALID_REQUEST));
++            return res;
++        }
++
++        const std::string whisper_model_local = body.value(
++            "whisper_model",
++            body.value("whisper_model_path", std::string()));
++        const std::string whisper_hf_repo = body.value("whisper_hf_repo", std::string());
++        const std::string whisper_hf_file = body.value("whisper_hf_file", std::string());
++        const bool whisper_offline = generation.value("whisper_offline", body.value("whisper_offline", params.offline));
++
++        const bool whisper_has_local = !whisper_model_local.empty();
++        const bool whisper_has_hf = !whisper_hf_repo.empty() || !whisper_hf_file.empty();
++
++        if (whisper_has_local && whisper_has_hf) {
++            res->error(format_error_response(
++                "Choose one whisper source: local whisper_model/whisper_model_path OR whisper_hf_repo + whisper_hf_file.",
++                ERROR_TYPE_INVALID_REQUEST));
++            return res;
++        }
++        if (!whisper_has_local && !whisper_has_hf) {
++            res->error(format_error_response(
++                "Missing whisper model source. Provide local whisper_model/whisper_model_path OR whisper_hf_repo + whisper_hf_file.",
++                ERROR_TYPE_INVALID_REQUEST));
++            return res;
++        }
++
++        std::string whisper_model_path;
++        std::string whisper_model_source = "local";
++        if (whisper_has_local) {
++            whisper_model_path = whisper_model_local;
++            if (!std::filesystem::exists(whisper_model_path)) {
++                res->error(format_error_response(
++                    "whisper_model path not found: " + whisper_model_path,
++                    ERROR_TYPE_INVALID_REQUEST));
++                return res;
++            }
++        } else {
++            if (whisper_hf_repo.empty() || whisper_hf_file.empty()) {
++                res->error(format_error_response(
++                    "whisper_hf_repo and whisper_hf_file must both be set when using Hugging Face source.",
++                    ERROR_TYPE_INVALID_REQUEST));
++                return res;
++            }
++
++            std::string resolve_err;
++            std::string resolved_repo;
++            if (!srv_audio_resolve_hf_model(
++                    whisper_hf_repo,
++                    whisper_hf_file,
++                    params.hf_token,
++                    whisper_offline,
++                    whisper_model_path,
++                    resolved_repo,
++                    resolve_err)) {
++                res->error(format_error_response(
++                    "Failed to resolve whisper model from Hugging Face: " + resolve_err,
++                    ERROR_TYPE_SERVER));
++                return res;
++            }
++            whisper_model_source = "hf:" + resolved_repo;
++        }
++        SRV_INF("audio pipeline: whisper model source=%s path=%s\n", whisper_model_source.c_str(), whisper_model_path.c_str());
++
++        const int whisper_threads = generation.value("whisper_threads", body.value("whisper_threads", 0));
++        const int whisper_processors = generation.value("whisper_processors", body.value("whisper_processors", 0));
++        const int whisper_max_len = generation.value("whisper_max_len", body.value("whisper_max_len", 0));
++        const int whisper_audio_ctx = generation.value("whisper_audio_ctx", body.value("whisper_audio_ctx", 0));
++        const int whisper_best_of = generation.value("whisper_best_of", body.value("whisper_best_of", 0));
++        const int whisper_beam_size = generation.value("whisper_beam_size", body.value("whisper_beam_size", 0));
++        const double whisper_temperature = generation.value("whisper_temperature", body.value("whisper_temperature", -1.0));
++        const bool whisper_translate = generation.value("whisper_translate", body.value("whisper_translate", false));
++        const bool whisper_no_gpu = generation.value("whisper_no_gpu", body.value("whisper_no_gpu", false));
++        const int whisper_gpu_device = generation.value("whisper_gpu_device", body.value("whisper_gpu_device", 0));
++        const bool whisper_flash_attn = generation.value("whisper_flash_attn", body.value("whisper_flash_attn", true));
++        const bool whisper_no_fallback = generation.value("whisper_no_fallback", body.value("whisper_no_fallback", false));
++        const bool whisper_suppress_nst = generation.value("whisper_suppress_nst", body.value("whisper_suppress_nst", false));
++        const double whisper_word_time_offset_sec = generation.value(
++            "whisper_word_time_offset_sec",
++            body.value("whisper_word_time_offset_sec", 0.73));
++        std::string whisper_language = generation.value("whisper_language", body.value("whisper_language", std::string("auto")));
++        std::string whisper_prompt = generation.value("whisper_prompt", body.value("whisper_prompt", std::string()));
++        if (whisper_language.empty()) {
++            whisper_language = "auto";
++        }
++
++        const std::filesystem::path whisper_out_prefix = temp_root / "whisper_transcript";
++        const std::filesystem::path whisper_json_path = std::filesystem::path(whisper_out_prefix.string() + ".json");
++
++        std::vector<std::string> whisper_args = {
++            "whisper-cli",
++            "-m", whisper_model_path,
++            "-f", audio_path.string(),
++            "-ojf",
++            "-of", whisper_out_prefix.string(),
++            "-np",
++            "-l", whisper_language,
++        };
++
++        if (whisper_threads > 0) {
++            whisper_args.push_back("-t");
++            whisper_args.push_back(std::to_string(whisper_threads));
++        }
++        if (whisper_processors > 0) {
++            whisper_args.push_back("-p");
++            whisper_args.push_back(std::to_string(whisper_processors));
++        }
++        if (whisper_max_len > 0) {
++            whisper_args.push_back("-ml");
++            whisper_args.push_back(std::to_string(whisper_max_len));
++        }
++        if (whisper_audio_ctx > 0) {
++            whisper_args.push_back("-ac");
++            whisper_args.push_back(std::to_string(whisper_audio_ctx));
++        }
++        if (whisper_best_of > 0) {
++            whisper_args.push_back("-bo");
++            whisper_args.push_back(std::to_string(whisper_best_of));
++        }
++        if (whisper_beam_size > 0) {
++            whisper_args.push_back("-bs");
++            whisper_args.push_back(std::to_string(whisper_beam_size));
++        }
++        if (whisper_temperature >= 0.0) {
++            whisper_args.push_back("-tp");
++            whisper_args.push_back(std::to_string(whisper_temperature));
++        }
++        if (whisper_translate) {
++            whisper_args.push_back("-tr");
++        }
++        if (whisper_no_fallback) {
++            whisper_args.push_back("-nf");
++        }
++        if (whisper_suppress_nst) {
++            whisper_args.push_back("-sns");
++        }
++        if (!whisper_prompt.empty()) {
++            whisper_args.push_back("--prompt");
++            whisper_args.push_back(whisper_prompt);
++        }
++
++        if (whisper_no_gpu) {
++            whisper_args.push_back("-ng");
++        } else {
++            whisper_args.push_back("-dev");
++            whisper_args.push_back(std::to_string(whisper_gpu_device));
++            whisper_args.push_back(whisper_flash_attn ? "-fa" : "-nfa");
++        }
++
++        const auto whisper_t0 = std::chrono::steady_clock::now();
++        const int whisper_rc = srv_audio_run_inproc_main(whisper_cli_inproc_main, whisper_args);
++        const auto whisper_t1 = std::chrono::steady_clock::now();
++        const double whisper_elapsed_sec = std::chrono::duration<double>(whisper_t1 - whisper_t0).count();
++        if (whisper_rc != 0) {
++            res->error(format_error_response(
++                "whisper in-process transcription failed with exit code " + std::to_string(whisper_rc),
++                ERROR_TYPE_SERVER));
++            return res;
++        }
++        if (!std::filesystem::exists(whisper_json_path)) {
++            res->error(format_error_response(
++                "whisper JSON output not found: " + whisper_json_path.string(),
++                ERROR_TYPE_SERVER));
++            return res;
++        }
++
++        const auto whisper_json_parse = srv_audio_parse_json_utf8_safe(
++            srv_audio_read_text(whisper_json_path));
++        size_t whisper_text_utf8_repairs = 0;
++        const auto parsed_whisper = srv_audio_parse_whisper_json(
++            whisper_json_parse.value,
++            whisper_json_parse.byte_escaped_strings,
++            &whisper_text_utf8_repairs);
++        transcript = parsed_whisper.transcript;
++        words = parsed_whisper.words;
++        json whisper_pieces = parsed_whisper.pieces;
++        srv_audio_shift_word_timestamps(words, whisper_word_time_offset_sec, /* source_audio_seconds */ -1.0);
++        srv_audio_shift_piece_timestamps(whisper_pieces, whisper_word_time_offset_sec, /* source_audio_seconds */ -1.0);
++        transcript = srv_audio_sanitize_transcript_text(transcript);
++
++        srv_audio_remove_if_exists(whisper_json_path);
++
++        const double seconds_per_token = body.value("seconds_per_timeline_token", 0.08);
++        double source_audio_seconds = body.value("source_audio_seconds", -1.0);
++        if (words.empty()) {
++            words = srv_audio_fallback_words(transcript, source_audio_seconds, seconds_per_token);
++        }
++        if ((!whisper_pieces.is_array() || whisper_pieces.empty()) && words.is_array() && !words.empty()) {
++            whisper_pieces = srv_audio_build_fallback_whisper_pieces(words);
++        }
++        if (source_audio_seconds <= 0.0 && words.is_array() && !words.empty()) {
++            const auto & last = words.back();
++            if (last.is_object()) {
++                source_audio_seconds = std::max(0.0, json_value(last, "end_sec", 0.0));
++            }
++        }
++        json segments = srv_audio_build_segments(words);
++        srv_audio_add_hms_fields(words);
++        srv_audio_add_hms_fields(whisper_pieces);
++        srv_audio_add_hms_fields(segments);
++        if (mode != "subtitle" && mode != "speech" && mode != "transcript" && mode != "timeline") {
++            res->error(format_error_response(
++                "mode must be one of: subtitle, speech, transcript, timeline.",
++                ERROR_TYPE_INVALID_REQUEST));
++            return res;
++        }
++
++        if (mode == "timeline") {
++            const auto pipeline_t1 = std::chrono::steady_clock::now();
++            const double total_elapsed_sec = std::chrono::duration<double>(pipeline_t1 - pipeline_t0).count();
++            json root = {
++                {"mode", "timeline"},
++                {"diarization", {{"enabled", false}}},
++                {"timeline", {
++                    {"transcript", transcript},
++                    {"words", words},
++                    {"whisper_pieces", whisper_pieces},
++                    {"segments", segments},
++                }},
++                {"stats", {
++                    {"num_words", (int64_t) words.size()},
++                    {"num_whisper_pieces", whisper_pieces.is_array() ? (int64_t) whisper_pieces.size() : int64_t(0)},
++                    {"num_segments", (int64_t) segments.size()},
++                    {"source_audio_seconds", source_audio_seconds},
++                    {"whisper_utf8_repairs", (int64_t) whisper_text_utf8_repairs},
++                }},
++                {"timings_sec", {
++                    {"total", total_elapsed_sec},
++                    {"whisper", whisper_elapsed_sec},
++                }},
++            };
++            res->ok(root);
++            return res;
++        }
++
++        std::string custom = "default";
++        if (body.contains("custom")) {
++            const json & v = body.at("custom");
++            if (v.is_string()) {
++                custom = v.get<std::string>();
++            } else if (v.is_number_integer()) {
++                custom = std::to_string(v.get<int64_t>());
++            } else if (v.is_number_unsigned()) {
++                custom = std::to_string(v.get<uint64_t>());
++            } else if (v.is_number_float()) {
++                std::ostringstream oss;
++                oss << v.get<double>();
++                custom = oss.str();
++            } else if (v.is_null()) {
++                custom = "default";
++            } else {
++                res->error(format_error_response(
++                    "custom must be a string, number, or null.",
++                    ERROR_TYPE_INVALID_REQUEST));
++                return res;
++            }
++        }
++        custom = srv_audio_collapse_ws(custom);
++        if (custom.empty()) {
++            custom = "default";
++        }
++        std::string custom_lower = custom;
++        std::transform(custom_lower.begin(), custom_lower.end(), custom_lower.begin(), [](unsigned char c) {
++            return (char) std::tolower(c);
++        });
++        const bool custom_is_default = custom_lower == "default" || custom_lower == "auto";
++
++        auto parse_positive_double = [&](double & out_value) -> bool {
++            if (custom_is_default) {
++                return false;
++            }
++            try {
++                size_t pos = 0;
++                const double parsed = std::stod(custom, &pos);
++                if (pos != custom.size() || !std::isfinite(parsed) || parsed <= 0.0) {
++                    return false;
++                }
++                out_value = parsed;
++                return true;
++            } catch (...) {
++                return false;
++            }
++        };
++
++        auto parse_positive_int = [&](int & out_value) -> bool {
++            if (custom_is_default) {
++                return false;
++            }
++            try {
++                size_t pos = 0;
++                const long long parsed = std::stoll(custom, &pos);
++                if (pos != custom.size() || parsed <= 0 || parsed > INT_MAX) {
++                    return false;
++                }
++                out_value = (int) parsed;
++                return true;
++            } catch (...) {
++                return false;
++            }
++        };
++
++        if (mode == "subtitle") {
++            json subtitle_segments = segments;
++            double subtitle_window_sec = -1.0;
++            if (!custom_is_default) {
++                if (!parse_positive_double(subtitle_window_sec)) {
++                    res->error(format_error_response(
++                        "For mode=subtitle, custom must be 'default' or a positive number of seconds.",
++                        ERROR_TYPE_INVALID_REQUEST));
++                    return res;
++                }
++                subtitle_segments = srv_audio_build_subtitle_segments_window(words, subtitle_window_sec);
++            }
++
++            const std::filesystem::path final_output_path = output_dir / (output_stem + ".srt");
++            srv_audio_write_text(final_output_path, srv_audio_segments_to_srt(subtitle_segments));
++
++            const auto pipeline_t1 = std::chrono::steady_clock::now();
++            const double total_elapsed_sec = std::chrono::duration<double>(pipeline_t1 - pipeline_t0).count();
++            json root = {
++                {"mode", "subtitle"},
++                {"custom", custom},
++                {"diarization", {{"enabled", false}}},
++                {"output", {
++                    {"path", final_output_path.string()},
++                    {"format", "srt"},
++                    {"speaker_turns", false},
++                }},
++                {"stats", {
++                    {"num_words", (int64_t) words.size()},
++                    {"num_segments", (int64_t) subtitle_segments.size()},
++                    {"source_audio_seconds", source_audio_seconds},
++                }},
++                {"timings_sec", {
++                    {"total", total_elapsed_sec},
++                    {"whisper", whisper_elapsed_sec},
++                }},
++            };
++            res->ok(root);
++            return res;
++        }
++
++        if (mode == "speech") {
++            std::string speech_md;
++            if (custom_is_default) {
++                speech_md = srv_audio_transcript_to_md(transcript);
++            } else {
++                double speech_chunk_sec = -1.0;
++                if (!parse_positive_double(speech_chunk_sec)) {
++                    res->error(format_error_response(
++                        "For mode=speech, custom must be 'default' or a positive number of seconds.",
++                        ERROR_TYPE_INVALID_REQUEST));
++                    return res;
++                }
++                const json sentence_segments = srv_audio_build_sentence_segments(words);
++                speech_md = srv_audio_transcript_to_md_chunked(sentence_segments, speech_chunk_sec);
++                if (speech_md.empty()) {
++                    speech_md = srv_audio_transcript_to_md(transcript);
++                }
++            }
++
++            const std::filesystem::path final_output_path = output_dir / (output_stem + ".md");
++            srv_audio_write_text(final_output_path, speech_md);
++
++            const auto pipeline_t1 = std::chrono::steady_clock::now();
++            const double total_elapsed_sec = std::chrono::duration<double>(pipeline_t1 - pipeline_t0).count();
++            json root = {
++                {"mode", "speech"},
++                {"custom", custom},
++                {"diarization", {{"enabled", false}}},
++                {"output", {
++                    {"path", final_output_path.string()},
++                    {"format", "md"},
++                    {"speaker_turns", false},
++                }},
++                {"stats", {
++                    {"num_words", (int64_t) words.size()},
++                    {"num_segments", (int64_t) segments.size()},
++                    {"source_audio_seconds", source_audio_seconds},
++                }},
++                {"timings_sec", {
++                    {"total", total_elapsed_sec},
++                    {"whisper", whisper_elapsed_sec},
++                }},
++            };
++            res->ok(root);
++            return res;
++        }
++
++        const std::string diar_backend_requested = body.value("diarization_backend", std::string("native_cpp"));
++        if (!diar_backend_requested.empty() &&
++            diar_backend_requested != "native_cpp" &&
++            diar_backend_requested != "auto" &&
++            diar_backend_requested != "realtime" &&
++            diar_backend_requested != "sortformer") {
++            res->error(format_error_response(
++                "Unsupported diarization backend. Supported values: auto, native_cpp, realtime, sortformer.",
++                ERROR_TYPE_INVALID_REQUEST));
++            return res;
++        }
++
++        if (!custom_is_default) {
++            int ignored_num_speakers = -1;
++            if (!parse_positive_int(ignored_num_speakers)) {
++                res->error(format_error_response(
++                    "For mode=transcript, custom must be 'auto'/'default' or a positive integer speaker count.",
++                    ERROR_TYPE_INVALID_REQUEST));
++                return res;
++            }
++            res->error(format_error_response(
++                "Realtime diarization backend does not support overriding the speaker count.",
++                ERROR_TYPE_INVALID_REQUEST));
++            return res;
++        }
++
++        std::string diar_model_path;
++        std::string diar_model_error;
++        if (!srv_audio_resolve_realtime_model_path(body, diar_model_path, diar_model_error)) {
++            res->error(format_error_response(diar_model_error, ERROR_TYPE_INVALID_REQUEST));
++            return res;
++        }
++
++        const std::string diar_device = body.value("diarization_device", std::string("auto"));
++        const double diarization_feed_ms = body.value("diarization_feed_ms", 100.0);
++        if (!(diarization_feed_ms > 0.0) || !std::isfinite(diarization_feed_ms)) {
++            res->error(format_error_response(
++                "diarization_feed_ms must be a positive finite number.",
++                ERROR_TYPE_INVALID_REQUEST));
++            return res;
++        }
++
++        const double speaker_seg_max_gap_sec = body.value("speaker_seg_max_gap_sec", -1.0);
++        const int speaker_seg_max_words = body.value("speaker_seg_max_words", 0);
++        const double speaker_seg_max_duration_sec = body.value("speaker_seg_max_duration_sec", -1.0);
++        const bool speaker_seg_split_on_hard_break = body.value("speaker_seg_split_on_hard_break", false);
++
++        json speaker_spans = json::array();
++        double diar_elapsed_sec = 0.0;
++        std::string resolved_diar_backend_name;
++        std::string diar_error;
++        if (!srv_audio_collect_realtime_speaker_spans(
++                audio_path,
++                diar_model_path,
++                diar_backend_requested,
++                diar_device,
++                diarization_feed_ms,
++                speaker_spans,
++                diar_elapsed_sec,
++                resolved_diar_backend_name,
++                diar_error)) {
++            res->error(format_error_response(
++                "native realtime diarization failed: " + diar_error,
++                ERROR_TYPE_SERVER));
++            return res;
++        }
++
++        json speaker_segments = srv_audio_build_realtime_speaker_segments(
++            whisper_pieces,
++            words,
++            speaker_spans,
++            speaker_seg_max_gap_sec,
++            speaker_seg_max_words,
++            speaker_seg_max_duration_sec,
++            speaker_seg_split_on_hard_break);
++
++        srv_audio_add_hms_fields(speaker_spans);
++        srv_audio_add_hms_fields(speaker_segments);
++
++        const std::filesystem::path final_output_path = output_dir / (output_stem + ".md");
++        srv_audio_write_text(final_output_path, srv_audio_speaker_segments_to_md(speaker_segments));
++
++        const auto pipeline_t1 = std::chrono::steady_clock::now();
++        const double total_elapsed_sec = std::chrono::duration<double>(pipeline_t1 - pipeline_t0).count();
++        json root = {
++            {"mode", "transcript"},
++            {"custom", custom},
++            {"diarization", {
++                {"enabled", true},
++                {"backend", diar_backend_requested == "sortformer" ? "sortformer" : "realtime"},
++                {"runtime_backend", resolved_diar_backend_name.empty() ? diar_device : resolved_diar_backend_name},
++                {"model_path", diar_model_path},
++                {"feed_ms", diarization_feed_ms},
++                {"speaker_count", "model_default"},
++            }},
++            {"output", {
++                {"path", final_output_path.string()},
++                {"format", "md"},
++                {"speaker_turns", true},
++            }},
++            {"stats", {
++                {"num_words", (int64_t) words.size()},
++                {"num_whisper_pieces", whisper_pieces.is_array() ? (int64_t) whisper_pieces.size() : int64_t(0)},
++                {"num_segments", (int64_t) segments.size()},
++                {"num_speaker_spans", (int64_t) speaker_spans.size()},
++                {"num_speaker_segments", (int64_t) speaker_segments.size()},
++                {"source_audio_seconds", source_audio_seconds},
++            }},
++            {"speaker_spans", speaker_spans},
++            {"timings_sec", {
++                {"total", total_elapsed_sec},
++                {"whisper", whisper_elapsed_sec},
++                {"diarization", diar_elapsed_sec},
++            }},
++        };
++
++        res->ok(root);
++        return res;
++    };
++
++    this->post_audio_transcriptions_raw =
++        [this](const std::string & audio_format, const raw_buffer & audio_bytes, const json & body_in) {
++            if (!this->post_audio_transcriptions) {
++                return server_http_res_ptr{};
++            }
++
++            json body = body_in;
++            if (!body.is_object()) {
++                body = json::object();
++            }
++
++            json & audio_obj = body["audio"];
++            if (!audio_obj.is_object()) {
++                audio_obj = json::object();
++            }
++
++            std::string fmt = audio_format;
++            std::transform(fmt.begin(), fmt.end(), fmt.begin(), [](unsigned char c) {
++                return (char) std::tolower(c);
++            });
++            if (fmt.empty()) {
++                fmt = "wav";
++            }
++
++            audio_obj["format"] = fmt;
++
++            srv_audio_inproc_raw_payload raw_payload{&audio_bytes, fmt};
++            srv_audio_inproc_raw_scope raw_scope(&raw_payload);
++
++            const std::function<bool()> should_stop = []() -> bool { return false; };
++            const server_http_req req{
++                {},
++                {},
++                "/v1/audio/transcriptions",
++                body.dump(),
++                should_stop
++            };
++
++            return this->post_audio_transcriptions(req);
++        };
++
+     this->get_lora_adapters = [this](const server_http_req & req) {
+         auto res = create_response();
+ 
+diff --git a/tools/server/server-context.h b/tools/server/server-context.h
+index c0b5d37..15cf64e 100644
+--- a/tools/server/server-context.h
++++ b/tools/server/server-context.h
+@@ -105,6 +105,8 @@ struct server_routes {
+     server_http_context::handler_t post_embeddings;
+     server_http_context::handler_t post_embeddings_oai;
+     server_http_context::handler_t post_rerank;
++    server_http_context::handler_t post_audio_transcriptions;
++    std::function<server_http_res_ptr(const std::string &, const raw_buffer &, const json &)> post_audio_transcriptions_raw;
+     server_http_context::handler_t get_lora_adapters;
+     server_http_context::handler_t post_lora_adapters;
+ private:
+diff --git a/tools/server/server.cpp b/tools/server/server.cpp
+index d3d4316..206edac 100644
+--- a/tools/server/server.cpp
++++ b/tools/server/server.cpp
+@@ -7,9 +7,12 @@
+ #include "llama.h"
+ #include "log.h"
+ 
++#include <algorithm>
+ #include <atomic>
++#include <cctype>
+ #include <exception>
+ #include <signal.h>
++#include <string>
+ #include <thread> // for std::thread::hardware_concurrency
+ 
+ #if defined(_WIN32)
+@@ -121,7 +124,17 @@ int main(int argc, char ** argv) {
+     // register API routes
+     server_routes routes(params, ctx_server);
+ 
+-    bool is_router_server = params.model.path.empty();
++    const char * env_audio_only_raw = std::getenv("LLAMA_SERVER_AUDIO_ONLY");
++    bool is_audio_only_server = false;
++    if (env_audio_only_raw != nullptr) {
++        std::string env_audio_only(env_audio_only_raw);
++        std::transform(env_audio_only.begin(), env_audio_only.end(), env_audio_only.begin(), [](unsigned char c) {
++            return (char) std::tolower(c);
++        });
++        is_audio_only_server = !(env_audio_only.empty() || env_audio_only == "0" || env_audio_only == "false" || env_audio_only == "off" || env_audio_only == "no");
++    }
++
++    bool is_router_server = params.model.path.empty() && !is_audio_only_server;
+     std::optional<server_models_routes> models_routes{};
+     if (is_router_server) {
+         // setup server instances manager
+@@ -147,6 +160,7 @@ int main(int argc, char ** argv) {
+         routes.post_embeddings             = models_routes->proxy_post;
+         routes.post_embeddings_oai         = models_routes->proxy_post;
+         routes.post_rerank                 = models_routes->proxy_post;
++        routes.post_audio_transcriptions = models_routes->proxy_post;
+         routes.post_tokenize               = models_routes->proxy_post;
+         routes.post_detokenize             = models_routes->proxy_post;
+         routes.post_apply_template         = models_routes->proxy_post;
+@@ -164,39 +178,43 @@ int main(int argc, char ** argv) {
+ 
+     ctx_http.get ("/health",              ex_wrapper(routes.get_health)); // public endpoint (no API key check)
+     ctx_http.get ("/v1/health",           ex_wrapper(routes.get_health)); // public endpoint (no API key check)
+-    ctx_http.get ("/metrics",             ex_wrapper(routes.get_metrics));
+-    ctx_http.get ("/props",               ex_wrapper(routes.get_props));
+-    ctx_http.post("/props",               ex_wrapper(routes.post_props));
+-    ctx_http.post("/api/show",            ex_wrapper(routes.get_api_show));
+-    ctx_http.get ("/models",              ex_wrapper(routes.get_models)); // public endpoint (no API key check)
+-    ctx_http.get ("/v1/models",           ex_wrapper(routes.get_models)); // public endpoint (no API key check)
+-    ctx_http.get ("/api/tags",            ex_wrapper(routes.get_models)); // ollama specific endpoint. public endpoint (no API key check)
+-    ctx_http.post("/completion",          ex_wrapper(routes.post_completions)); // legacy
+-    ctx_http.post("/completions",         ex_wrapper(routes.post_completions));
+-    ctx_http.post("/v1/completions",      ex_wrapper(routes.post_completions_oai));
+-    ctx_http.post("/chat/completions",    ex_wrapper(routes.post_chat_completions));
+-    ctx_http.post("/v1/chat/completions", ex_wrapper(routes.post_chat_completions));
+-    ctx_http.post("/api/chat",            ex_wrapper(routes.post_chat_completions)); // ollama specific endpoint
+-    ctx_http.post("/v1/responses",        ex_wrapper(routes.post_responses_oai));
+-    ctx_http.post("/v1/messages",         ex_wrapper(routes.post_anthropic_messages)); // anthropic messages API
+-    ctx_http.post("/v1/messages/count_tokens", ex_wrapper(routes.post_anthropic_count_tokens)); // anthropic token counting
+-    ctx_http.post("/infill",              ex_wrapper(routes.post_infill));
+-    ctx_http.post("/embedding",           ex_wrapper(routes.post_embeddings)); // legacy
+-    ctx_http.post("/embeddings",          ex_wrapper(routes.post_embeddings));
+-    ctx_http.post("/v1/embeddings",       ex_wrapper(routes.post_embeddings_oai));
+-    ctx_http.post("/rerank",              ex_wrapper(routes.post_rerank));
+-    ctx_http.post("/reranking",           ex_wrapper(routes.post_rerank));
+-    ctx_http.post("/v1/rerank",           ex_wrapper(routes.post_rerank));
+-    ctx_http.post("/v1/reranking",        ex_wrapper(routes.post_rerank));
+-    ctx_http.post("/tokenize",            ex_wrapper(routes.post_tokenize));
+-    ctx_http.post("/detokenize",          ex_wrapper(routes.post_detokenize));
+-    ctx_http.post("/apply-template",      ex_wrapper(routes.post_apply_template));
+-    // LoRA adapters hotswap
+-    ctx_http.get ("/lora-adapters",       ex_wrapper(routes.get_lora_adapters));
+-    ctx_http.post("/lora-adapters",       ex_wrapper(routes.post_lora_adapters));
+-    // Save & load slots
+-    ctx_http.get ("/slots",               ex_wrapper(routes.get_slots));
+-    ctx_http.post("/slots/:id_slot",      ex_wrapper(routes.post_slots));
++    ctx_http.post("/v1/audio/transcriptions", ex_wrapper(routes.post_audio_transcriptions));
++
++    if (!is_audio_only_server) {
++        ctx_http.get ("/metrics",             ex_wrapper(routes.get_metrics));
++        ctx_http.get ("/props",               ex_wrapper(routes.get_props));
++        ctx_http.post("/props",               ex_wrapper(routes.post_props));
++        ctx_http.post("/api/show",            ex_wrapper(routes.get_api_show));
++        ctx_http.get ("/models",              ex_wrapper(routes.get_models)); // public endpoint (no API key check)
++        ctx_http.get ("/v1/models",           ex_wrapper(routes.get_models)); // public endpoint (no API key check)
++        ctx_http.get ("/api/tags",            ex_wrapper(routes.get_models)); // ollama specific endpoint. public endpoint (no API key check)
++        ctx_http.post("/completion",          ex_wrapper(routes.post_completions)); // legacy
++        ctx_http.post("/completions",         ex_wrapper(routes.post_completions));
++        ctx_http.post("/v1/completions",      ex_wrapper(routes.post_completions_oai));
++        ctx_http.post("/chat/completions",    ex_wrapper(routes.post_chat_completions));
++        ctx_http.post("/v1/chat/completions", ex_wrapper(routes.post_chat_completions));
++        ctx_http.post("/api/chat",            ex_wrapper(routes.post_chat_completions)); // ollama specific endpoint
++        ctx_http.post("/v1/responses",        ex_wrapper(routes.post_responses_oai));
++        ctx_http.post("/v1/messages",         ex_wrapper(routes.post_anthropic_messages)); // anthropic messages API
++        ctx_http.post("/v1/messages/count_tokens", ex_wrapper(routes.post_anthropic_count_tokens)); // anthropic token counting
++        ctx_http.post("/infill",              ex_wrapper(routes.post_infill));
++        ctx_http.post("/embedding",           ex_wrapper(routes.post_embeddings)); // legacy
++        ctx_http.post("/embeddings",          ex_wrapper(routes.post_embeddings));
++        ctx_http.post("/v1/embeddings",       ex_wrapper(routes.post_embeddings_oai));
++        ctx_http.post("/rerank",              ex_wrapper(routes.post_rerank));
++        ctx_http.post("/reranking",           ex_wrapper(routes.post_rerank));
++        ctx_http.post("/v1/rerank",           ex_wrapper(routes.post_rerank));
++        ctx_http.post("/v1/reranking",        ex_wrapper(routes.post_rerank));
++        ctx_http.post("/tokenize",            ex_wrapper(routes.post_tokenize));
++        ctx_http.post("/detokenize",          ex_wrapper(routes.post_detokenize));
++        ctx_http.post("/apply-template",      ex_wrapper(routes.post_apply_template));
++        // LoRA adapters hotswap
++        ctx_http.get ("/lora-adapters",       ex_wrapper(routes.get_lora_adapters));
++        ctx_http.post("/lora-adapters",       ex_wrapper(routes.post_lora_adapters));
++        // Save & load slots
++        ctx_http.get ("/slots",               ex_wrapper(routes.get_slots));
++        ctx_http.post("/slots/:id_slot",      ex_wrapper(routes.post_slots));
++    }
+ 
+     //
+     // Start the server
+@@ -226,6 +244,26 @@ int main(int argc, char ** argv) {
+             ctx_http.stop();
+         };
+ 
++    } else if (is_audio_only_server) {
++        LOG_INF("%s: starting audio-only server mode; no LLM model will be loaded in this process\n", __func__);
++
++        clean_up = [&ctx_http]() {
++            SRV_INF("%s: cleaning up before exit...\n", __func__);
++            ctx_http.stop();
++            llama_backend_free();
++        };
++
++        if (!ctx_http.start()) {
++            clean_up();
++            LOG_ERR("%s: exiting due to HTTP server error\n", __func__);
++            return 1;
++        }
++        ctx_http.is_ready.store(true);
++
++        shutdown_handler = [&](int) {
++            ctx_http.stop();
++        };
++
+     } else {
+         // setup clean up function, to be called before exit
+         clean_up = [&ctx_http, &ctx_server]() {
+@@ -289,6 +327,13 @@ int main(int argc, char ** argv) {
+         }
+ 
+         // when the HTTP server stops, clean up and exit
++        clean_up();
++    } else if (is_audio_only_server) {
++        LOG_INF("%s: audio-only server is listening on %s\n", __func__, ctx_http.listening_address.c_str());
++        if (ctx_http.thread.joinable()) {
++            ctx_http.thread.join(); // keep the main thread alive
++        }
++
+         clean_up();
+     } else {
+         LOG_INF("%s: server is listening on %s\n", __func__, ctx_http.listening_address.c_str());

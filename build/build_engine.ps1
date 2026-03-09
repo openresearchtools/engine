@@ -102,6 +102,32 @@ function Resolve-PdfiumRoot {
     return $binDir
 }
 
+function Resolve-ExistingPdfiumDll {
+    param(
+        [string]$PdfiumDllPath,
+        [string]$RepoRoot
+    )
+
+    $resolved = Resolve-AbsolutePath -PathValue $PdfiumDllPath -RepoRoot $RepoRoot
+    if ([string]::IsNullOrWhiteSpace($resolved)) {
+        return ""
+    }
+    if (Test-Path -LiteralPath $resolved) {
+        return $resolved
+    }
+
+    $parentDir = Split-Path -Parent $resolved
+    $fileName = Split-Path -Leaf $resolved
+    if (-not [string]::IsNullOrWhiteSpace($parentDir) -and (Split-Path -Leaf $parentDir).Equals("bin", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $rootCandidate = Join-Path (Split-Path -Parent $parentDir) $fileName
+        if (Test-Path -LiteralPath $rootCandidate) {
+            return [System.IO.Path]::GetFullPath($rootCandidate)
+        }
+    }
+
+    return $resolved
+}
+
 function Copy-LicenseFiles {
     param(
         [string]$SourceRoot,
@@ -299,7 +325,7 @@ if (Test-IsUnderPath -PathValue $OutDir -BasePath $repoRoot) {
 if ([string]::IsNullOrWhiteSpace($PdfiumDll)) {
     $PdfiumDll = Join-Path $buildsRoot "runtime-deps\\pdfium\\bin\\pdfium.dll"
 }
-$PdfiumDll = Resolve-AbsolutePath -PathValue $PdfiumDll -RepoRoot $repoRoot
+$PdfiumDll = Resolve-ExistingPdfiumDll -PdfiumDllPath $PdfiumDll -RepoRoot $repoRoot
 
 if ([string]::IsNullOrWhiteSpace($FfmpegBinDir)) {
     $FfmpegBinDir = Join-Path $buildsRoot "runtime-deps\\ffmpeg\\bin"

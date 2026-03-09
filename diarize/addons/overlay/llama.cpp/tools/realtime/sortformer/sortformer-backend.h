@@ -25,6 +25,7 @@ class sortformer_stream_backend final : public stream_backend {
 public:
     sortformer_stream_backend(const std::string & gguf_path, const std::string & backend_name, bool capture_debug = false);
     sortformer_stream_backend(std::shared_ptr<sortformer_loaded_model> loaded_model, bool capture_debug = false);
+    ~sortformer_stream_backend() override;
 
     std::string backend_name() const override;
     backend_limits limits() const override;

@@ -1946,8 +1946,12 @@ int32_t llama_server_bridge_realtime_model_cache_entry_count(void) {
 }
 
 void llama_server_bridge_realtime_model_cache_clear(void) {
-    std::lock_guard<std::mutex> lock(g_realtime_model_cache_mutex);
-    g_realtime_model_cache.clear();
+    decltype(g_realtime_model_cache) cleared;
+    {
+        std::lock_guard<std::mutex> lock(g_realtime_model_cache_mutex);
+        g_realtime_model_cache.swap(cleared);
+    }
+    cleared.clear();
 }
 
 void llama_server_bridge_result_free(struct llama_server_bridge_vlm_result * out) {

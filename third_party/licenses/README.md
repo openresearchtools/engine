@@ -4,6 +4,17 @@ This repository contains shipped runtime code, bundled runtime dependencies, nat
 
 Openresearchtools-Engine source code is licensed under the MIT License. Third-party dependencies and bundled components remain licensed under their respective original licenses.
 
+This file is primarily a provenance map for source code and tooling that were
+directly imported, adapted, or rewritten from named upstream projects.
+Package-managed dependencies that are consumed in their normal published form
+remain listed here at license-inventory level only; they are not broken down
+by internal source-file lineage unless this repo directly imported/adapted
+their source.
+
+Where mixed-source files are involved, the file lists below are identigying  the main ENGINE files materially informed by a given
+upstream project; they are not a claim that every listed line came verbatim
+from that upstream.
+
 ## Backend key-license bundles
 
 - CUDA bundle key licenses: `LICENSES-cuda.txt`
@@ -14,17 +25,15 @@ Openresearchtools-Engine source code is licensed under the MIT License. Third-pa
 
 These combined files are the curated top-level shipped/runtime/reference bundles. Tooling-only direct dependencies such as `torch`, `numpy`, and `PyYAML` are documented separately.
 
-## Runtime (shipped Openresearchtools-Engine)
+## Directly imported or adapted source in shipped runtime
 
 ### 1) llama.cpp
 
-- Role: core C/C++ inference/runtime framework and server base.
-- Source location in this repository layout: `third_party/llama.cpp`
-- Repo-kept integration layers:
-  - `diarize/addons/overlay/llama.cpp/tools/server/`
-  - `diarize/addons/overlay/llama.cpp/tools/whisper/`
-  - `diarize/addons/overlay/llama.cpp/tools/realtime/`
-  - `bridge/`
+- Role: primary upstream C/C++ runtime base that the core ENGINE inference/server stack is built on.
+- Upstream source snapshot kept in this repository: `third_party/llama.cpp`
+- ENGINE code heavily builds on and extends that base through prepared-build patches plus repo integration layers.
+- These ENGINE-added layers are where the native audio/session, In process bridge, Whisper.cpp, Sortformer, and Voxtral features are integrated on top of original llama cpp; they are not claims about upstream `llama.cpp` shipping those features by itself.
+- 
 - License type: MIT
 - License file: `llama.cpp-LICENSE.txt`
 
@@ -115,23 +124,50 @@ Build note: BoringSSL is fetched by CMake in build profiles that enable `LLAMA_B
 
 ### 3) voxtral-cpp
 
-- Role: primary native `ggml` implementation base adapted for the current Voxtral realtime runtime.
-- Repo-kept adaptation points:
+- Role: primary native `ggml` implementation base adapted for the current Voxtral realtime runtime, and the source origin for the repo-kept Voxtral GGUF conversion tooling.
+- ENGINE-owned runtime files adapted from or heavily informed by `voxtral-cpp`:
   - `diarize/addons/overlay/llama.cpp/tools/realtime/voxtral/voxtral-runtime.cpp`
   - `diarize/addons/overlay/llama.cpp/tools/realtime/voxtral/voxtral-runtime.h`
   - `diarize/addons/overlay/llama.cpp/tools/realtime/voxtral/voxtral-backend.cpp`
   - `diarize/addons/overlay/llama.cpp/tools/realtime/voxtral/voxtral-backend.h`
+- ENGINE-kept conversion tooling adapted from `voxtral-cpp`:
+  - `build/voxtral/convert_voxtral_to_gguf.py`
+- Upstream reference points:
+  - upstream runtime/math implementation in `voxtral-cpp/src/voxtral.cpp`
+  - upstream GGUF conversion tooling in `voxtral-cpp/tools/convert_voxtral_to_gguf.py`
 - Upstream reference: local source base mirrored from `voxtral-cpp`
 - License type: MIT
 - License file: `voxtral-cpp-LICENSE.txt`
 
 ### 4) NVIDIA NeMo / Sortformer references
 
-- Role: reference/source for Sortformer archive semantics, tensor naming, and parity validation used by the native Sortformer conversion and validation flow.
-- Repo-kept tooling:
+- Role: reference/source for Sortformer archive semantics, config/tensor naming, and parity validation used by the native Sortformer conversion and validation flow only.
+- The current Sortformer converter in `build/sortformer/convert_nemo_sortformer_to_gguf.py` is a repo-written ENGINE script, not a copied upstream converter.
+- Its source basis was:
+  - NVIDIA NeMo Sortformer archive/checkpoint structure
+  - NeMo config/tensor naming semantics from the `.nemo` archive
+  - NeMo parity/reference runs used during bring-up
+- Main ENGINE files materially informed by NVIDIA NeMo / Sortformer references:
   - `build/sortformer/convert_nemo_sortformer_to_gguf.py`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/sortformer/sortformer-gguf.cpp`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/sortformer/sortformer-schema.cpp`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/sortformer/sortformer-postprocess.cpp`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/realtime-smoke.cpp`
 - License type: Apache-2.0
 - License file: `nvidia-nemo-LICENSE.txt`
+
+### 4a) parakeet.cpp
+
+- Role: external C++ Sortformer reference studied during native Sortformer bring-up, especially for conversion/runtime structure cross-checking.
+- Main ENGINE files materially cross-checked or informed against `parakeet.cpp` Sortformer references:
+  - `build/sortformer/convert_nemo_sortformer_to_gguf.py`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/sortformer/sortformer-model.cpp`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/sortformer/sortformer-streaming.cpp`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/sortformer/sortformer-frontend.cpp`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/sortformer/sortformer-encoder.cpp`
+- Upstream: <https://github.com/frikallo/parakeet.cpp>
+- License type: MIT
+- License file: `parakeet-cpp-LICENSE.txt`
 
 ### 5) docling
 
@@ -184,6 +220,9 @@ These repositories were used as behavior, validation, or benchmarking references
 ### vLLM
 
 - Role: realtime behavior and throughput reference for Voxtral evaluation.
+- Main ENGINE files whose Voxtral behavior was materially cross-checked or informed against `vLLM` references:
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/voxtral/voxtral-runtime.cpp`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/voxtral/voxtral-runtime.h`
 - Upstream: <https://github.com/vllm-project/vllm>
 - License type: Apache-2.0
 - License file: `vllm-LICENSE.txt`
@@ -191,28 +230,47 @@ These repositories were used as behavior, validation, or benchmarking references
 ### voxtral.c
 
 - Role: streaming API/reference behavior input for Voxtral session semantics.
+- Main ENGINE files materially informed by `voxtral.c` streaming/session ideas:
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/voxtral/voxtral-backend.cpp`
+  - `bridge/llama_server_bridge.cpp`
+  - `engine/src/llama_bridge.rs`
 - Upstream: <https://github.com/antirez/voxtral.c>
 - License type: MIT
 - License file: `voxtral.c-LICENSE.txt`
 
-## Conversion / parity tooling (not required at runtime)
+### voxtral-mini-realtime-rs
 
-Current repo-kept tooling script:
+- Role: external Rust/GGUF reference for Voxtral realtime integration patterns and session wiring study.
+- Upstream: <https://github.com/TrevorS/voxtral-mini-realtime-rs>
+- License type: Apache-2.0
+- License file: `voxtral-mini-realtime-rs-LICENSE.txt`
+
+### mlx-audio
+
+- Role: external MLX-side reference for Mistral/Voxtral audio model behavior and implementation study.
+- Upstream: <https://github.com/Blaizzy/mlx-audio>
+- License type: MIT
+- License file: `mlx-audio-LICENSE.txt`
+
+## Directly imported or adapted repo-kept conversion / parity tooling (not required at runtime)
+
+This section covers the Python dependency surface used by the repo-kept conversion/parity tooling already described above:
 
 - `build/sortformer/convert_nemo_sortformer_to_gguf.py`
+- `build/voxtral/convert_voxtral_to_gguf.py`
 
-Primary direct Python dependencies used by that tooling:
+Primary direct Python dependencies used by those repo-kept converters:
 
-- PyTorch (`torch`)
-  - Role: checkpoint tensor loading during conversion/parity workflows
-  - License type: BSD-3-Clause with additional notices
-  - License files: `torch-LICENSE.txt`, `torch-NOTICE.txt`
 - NumPy
-  - Role: tensor/array handling during conversion tooling
+  - Role: tensor/array handling in both the Sortformer converter and the repo-kept Voxtral GGUF converter
   - License type: BSD-3-Clause with bundled third-party notices
   - License file: `numpy-LICENSE.txt`
+- PyTorch (`torch`)
+  - Role: checkpoint tensor loading during Sortformer conversion/parity workflows
+  - License type: BSD-3-Clause with additional notices
+  - License files: `torch-LICENSE.txt`, `torch-NOTICE.txt`
 - PyYAML
-  - Role: NeMo archive config parsing during conversion tooling
+  - Role: NeMo archive config parsing during Sortformer conversion tooling
   - License type: MIT
   - License file: `PyYAML-LICENSE.txt`
 
@@ -229,7 +287,7 @@ This folder is a repo-kept license snapshot for the current Python tooling stack
 - PDF orchestration modules are in `pdf/` and `pdfvlm/`.
 - Bridge raw-audio path supports in-memory conversion via FFmpeg when bridge is built with `LLAMA_SERVER_BRIDGE_ENABLE_FFMPEG=ON`.
 
-## Dependency mapping (Rust workspace direct deps)
+## Package-managed dependency mapping (license inventory only)
 
 ### `serde_json`
 

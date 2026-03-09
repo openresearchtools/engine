@@ -36,6 +36,14 @@ sortformer_stream_backend::sortformer_stream_backend(std::shared_ptr<sortformer_
     all_chunk_preds_.cols = model_ref().metadata().max_speakers;
 }
 
+sortformer_stream_backend::~sortformer_stream_backend() {
+    if (!loaded_model_) {
+        return;
+    }
+    std::lock_guard<std::mutex> model_lock(loaded_model_->mutex());
+    ggml_backend_synchronize(model_ref().backend());
+}
+
 std::string sortformer_stream_backend::backend_name() const {
     return std::string("sortformer/") + ggml_backend_name(model_ref().backend());
 }

@@ -128,7 +128,8 @@ def main() -> None:
     whisper_repo = repo_root / "third_party" / "whisper.cpp"
     bridge_src = repo_root / "bridge"
     overlay_root = repo_root / "diarize" / "addons" / "overlay" / "llama.cpp" / "tools"
-    patch_file = repo_root / "diarize" / "addons" / "patches" / "0300-llama-unified-audio.patch"
+    patch_dir = repo_root / "diarize" / "addons" / "patches"
+    patch_files = sorted(patch_dir.glob("*.patch"))
 
     if not llama_repo.is_dir():
         fail(f"Required repo source not found: {llama_repo}")
@@ -140,8 +141,10 @@ def main() -> None:
             fail(f"Required repo source not found: {whisper_repo}")
     if not bridge_src.is_dir():
         fail(f"Bridge source dir not found: {bridge_src}")
-    if not patch_file.is_file():
-        fail(f"Required patch not found: {patch_file}")
+    if not patch_dir.is_dir():
+        fail(f"Required patch directory not found: {patch_dir}")
+    if not patch_files:
+        fail(f"No patch files found in: {patch_dir}")
 
     llama_cmake = llama_repo / "CMakeLists.txt"
     whisper_cmake = whisper_repo / "CMakeLists.txt"
@@ -184,26 +187,27 @@ def main() -> None:
     status_count = 0
     if not args.skip_patch:
         run_git(out_dir, ["init"])
-        run_git(
-            out_dir,
-            [
-                "apply",
-                "--check",
-                "--ignore-space-change",
-                "--ignore-whitespace",
-                str(patch_file),
-            ],
-        )
-        run_git(
-            out_dir,
-            [
-                "apply",
-                "--whitespace=nowarn",
-                "--ignore-space-change",
-                "--ignore-whitespace",
-                str(patch_file),
-            ],
-        )
+        for patch_file in patch_files:
+            run_git(
+                out_dir,
+                [
+                    "apply",
+                    "--check",
+                    "--ignore-space-change",
+                    "--ignore-whitespace",
+                    str(patch_file),
+                ],
+            )
+            run_git(
+                out_dir,
+                [
+                    "apply",
+                    "--whitespace=nowarn",
+                    "--ignore-space-change",
+                    "--ignore-whitespace",
+                    str(patch_file),
+                ],
+            )
 
         status = subprocess.run(
             ["git", "-C", str(out_dir), "status", "--porcelain"],
@@ -224,7 +228,12 @@ def main() -> None:
     print(f"  OutDir: {out_dir}")
     print(f"  Whisper sibling: {whisper_sibling}")
     print(f"  Bridge source staged at: {bridge_dst}")
-    print(f"  Patch: {'<skipped>' if args.skip_patch else patch_file}")
+    if args.skip_patch:
+        print("  Patches: <skipped>")
+    else:
+        print("  Patches:")
+        for patch_file in patch_files:
+            print(f"    - {patch_file}")
     print(f"  Working tree entries after patch: {status_count}")
     print(f"  Build root hint: {builds_root}")
 

@@ -12,7 +12,7 @@ Reference header: `bridge/llama_server_bridge.h`.
 #include "llama_server_bridge.h"
 
 llama_server_bridge_params p = llama_server_bridge_default_params();
-p.model_path = "C:/models/chat.gguf";
+p.model_path = "./models/chat.gguf";
 p.gpu = 1; // optional; remove for CPU default on Windows/Linux
 
 llama_server_bridge *bridge = llama_server_bridge_create(&p);
@@ -85,7 +85,7 @@ Sentinel behavior in runtime:
 
 ```c
 llama_server_bridge_params p = llama_server_bridge_default_params();
-p.model_path = "C:/models/chat.gguf";
+p.model_path = "./models/chat.gguf";
 p.gpu = 1;
 p.n_ctx = 50000;
 p.n_batch = 1024;

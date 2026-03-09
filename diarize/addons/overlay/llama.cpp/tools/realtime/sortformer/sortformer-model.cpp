@@ -106,6 +106,9 @@ sortformer_model & sortformer_model::operator=(sortformer_model && other) noexce
 
 void sortformer_model::release() {
     tensors_.clear();
+    if (backend_ != nullptr) {
+        ggml_backend_synchronize(backend_);
+    }
     if (tensor_buf_ != nullptr) {
         ggml_backend_buffer_free(tensor_buf_);
         tensor_buf_ = nullptr;

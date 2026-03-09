@@ -62,6 +62,20 @@ TOKEN_MAP = {
     "bias": "b",
 }
 
+LEGACY_SORTFORMER_MODULE_DEFAULTS = {
+    "pred_score_threshold": 0.25,
+    "strong_boost_rate": 0.75,
+    "weak_boost_rate": 1.5,
+    "min_pos_scores_rate": 0.5,
+    "sil_threshold": 0.2,
+    "scores_boost_latest": 0.0,
+}
+
+FRONTEND_F32_TENSORS = {
+    "prep.feat.fb",
+    "prep.feat.win",
+}
+
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -140,6 +154,25 @@ def flatten_config(writer, prefix: str, value):
     add_scalar(writer, prefix, value)
 
 
+def normalize_export_config(config):
+    if not isinstance(config, dict):
+        return config, []
+
+    normalized = dict(config)
+    defaults_applied = []
+
+    sortformer_modules = normalized.get("sortformer_modules")
+    if isinstance(sortformer_modules, dict):
+        merged_modules = dict(sortformer_modules)
+        for key, value in LEGACY_SORTFORMER_MODULE_DEFAULTS.items():
+            if key not in merged_modules:
+                merged_modules[key] = value
+                defaults_applied.append(f"sortformer_modules.{key}")
+        normalized["sortformer_modules"] = merged_modules
+
+    return normalized, defaults_applied
+
+
 def compact_tensor_name(name: str, prefix: str) -> str:
     parts = name.split(".")
     compact = []
@@ -197,6 +230,7 @@ def main():
         summary_path.parent.mkdir(parents=True, exist_ok=True)
 
     config, ckpt_bytes = load_nemo_archive(model_path)
+    export_config, defaults_applied = normalize_export_config(config)
     raw_ckpt = torch.load(io.BytesIO(ckpt_bytes), map_location="cpu")
     state_dict = unwrap_state_dict(raw_ckpt)
 
@@ -217,7 +251,9 @@ def main():
     elif args.outtype == "bf16":
         out_qtype = gguf.GGMLQuantizationType.BF16
 
-    flatten_config(writer, "sortformer.config", config)
+    flatten_config(writer, "sortformer.config", export_config)
+    if defaults_applied:
+        writer.add_array("sortformer.legacy_defaults_applied", defaults_applied)
 
     groups, total_params = top_level_groups(state_dict)
     original_tensor_count = len([t for t in state_dict.values() if isinstance(t, torch.Tensor)])
@@ -242,15 +278,16 @@ def main():
         arr = tensor.detach().to(torch.float32).cpu().contiguous().numpy()
         gguf_name = compact_tensor_name(name, args.tensor_prefix)
         stored = np.asarray(arr, dtype=np.float32)
-        if out_qtype is not None:
-            stored = gguf.quants.quantize(stored, out_qtype)
-        writer.add_tensor(gguf_name, stored, raw_dtype=out_qtype)
+        tensor_out_qtype = None if gguf_name in FRONTEND_F32_TENSORS else out_qtype
+        if tensor_out_qtype is not None:
+            stored = gguf.quants.quantize(stored, tensor_out_qtype)
+        writer.add_tensor(gguf_name, stored, raw_dtype=tensor_out_qtype)
         kept.append({
             "name": name,
             "gguf_name": gguf_name,
             "shape": list(arr.shape),
             "numel": int(arr.size),
-            "dtype": args.outtype,
+            "dtype": "f32" if tensor_out_qtype is None else args.outtype,
         })
         if ".batch_norm." in name:
             base, suffix = name.rsplit(".", 1)
@@ -270,15 +307,16 @@ def main():
             derived_name = f"{base}.{suffix}"
             gguf_name = compact_tensor_name(derived_name, args.tensor_prefix)
             stored = np.asarray(arr, dtype=np.float32)
-            if out_qtype is not None:
-                stored = gguf.quants.quantize(stored, out_qtype)
-            writer.add_tensor(gguf_name, stored, raw_dtype=out_qtype)
+            tensor_out_qtype = None if gguf_name in FRONTEND_F32_TENSORS else out_qtype
+            if tensor_out_qtype is not None:
+                stored = gguf.quants.quantize(stored, tensor_out_qtype)
+            writer.add_tensor(gguf_name, stored, raw_dtype=tensor_out_qtype)
             derived.append({
                 "name": derived_name,
                 "gguf_name": gguf_name,
                 "shape": list(arr.shape),
                 "numel": int(arr.size),
-                "dtype": args.outtype,
+                "dtype": "f32" if tensor_out_qtype is None else args.outtype,
                 "derived": True,
             })
 
@@ -296,6 +334,7 @@ def main():
         "output_gguf": str(out_path),
         "name": model_name,
         "outtype": args.outtype,
+        "legacy_defaults_applied": defaults_applied,
         "tensor_prefix": args.tensor_prefix,
         "tensor_name_scheme": "compact_v1",
         "original_tensor_count": original_tensor_count,

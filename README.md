@@ -264,14 +264,74 @@ engine.exe bridge audio-session `
   --out ".\meeting_voxtral.txt"
 ```
 
-For live PCM/stdin examples and the full session ABI surface, see:
+Native Voxtral + native Sortformer on the same continuous session path:
+
+```powershell
+engine.exe bridge audio-session `
+  --audio-file ".\meeting.wav" `
+  --transcription-realtime-model ".\models\voxtral-mini-4b-realtime.gguf" `
+  --transcription-device Vulkan0 `
+  --diarization-model-path ".\models\sortformer.gguf" `
+  --diarization-device Vulkan0 `
+  --out ".\meeting_voxtral_diarized.md" `
+  --timeline-json-out ".\meeting_voxtral_timeline.json"
+```
+
+Live PCM/stdin -> native Voxtral transcription:
+
+```powershell
+Get-Content ".\meeting_mono16k_s16le.raw" -Encoding Byte | `
+engine.exe bridge audio-session `
+  --stdin-pcm-s16le `
+  --stdin-chunk-frames 7680 `
+  --session-sample-rate 16000 `
+  --session-channels 1 `
+  --transcription-realtime-model ".\models\voxtral-mini-4b-realtime.gguf" `
+  --transcription-device Vulkan0 `
+  --out ".\live_voxtral.txt"
+```
+
+Live PCM/stdin -> native Voxtral + native Sortformer:
+
+```powershell
+Get-Content ".\meeting_mono16k_s16le.raw" -Encoding Byte | `
+engine.exe bridge audio-session `
+  --stdin-pcm-s16le `
+  --stdin-chunk-frames 7680 `
+  --session-sample-rate 16000 `
+  --session-channels 1 `
+  --transcription-realtime-model ".\models\voxtral-mini-4b-realtime.gguf" `
+  --transcription-device Vulkan0 `
+  --diarization-model-path ".\models\sortformer.gguf" `
+  --diarization-device Vulkan0 `
+  --out ".\live_voxtral_diarized.md"
+```
+
+Live PCM/stdin -> Whisper + native Sortformer (staged):
+
+```powershell
+Get-Content ".\meeting_mono16k_s16le.raw" -Encoding Byte | `
+engine.exe bridge audio-session `
+  --stdin-pcm-s16le `
+  --stdin-chunk-frames 7680 `
+  --session-sample-rate 16000 `
+  --session-channels 1 `
+  --staged `
+  --diarization-model-path ".\models\sortformer.gguf" `
+  --diarization-device Vulkan0 `
+  --whisper-hf-repo ggerganov/whisper.cpp `
+  --whisper-hf-file ggml-large-v3-turbo.bin `
+  --gpu 0 `
+  --out ".\live_whisper_diarized.md"
+```
+
+For the full session ABI surface, rolling-write behavior, and more live PCM/stdin examples, see:
 
 * [`docs/bridge-audio-dll.md`](docs/bridge-audio-dll.md)
 
-Openresearchtools-Engine's audio path is designed for two common workflows:
+### Compatibility route: `engine audio`
 
-* **Transcription without diarization** (single-speaker style output) using `--mode speech` or `--mode subtitle`.
-* **Transcription with diarization** (speaker-aware transcript) using `--mode transcript` plus diarization models.
+`engine audio` remains available for compatibility and one-shot file-oriented runs, but new work should prefer `engine bridge audio-session`.
 
 ### Command shape
 
@@ -708,9 +768,10 @@ Openresearchtools-Engine is possible because of the open work done by these proj
 
 * `llama.cpp`: core model runtime, GPU offload controls, KV-cache behavior, multi-GPU split controls, and server-side inference lifecycle patterns used by the bridge and engine orchestration.
 * `whisper.cpp`: transcription pipeline foundations, including audio-to-token flow, timestamp-oriented decoding behavior, and integration patterns for speech tasks.
-* `NVIDIA NeMo` / Sortformer: model/archive semantics and parity baselines used for the native Sortformer conversion and validation flow.
-* `voxtral-cpp`: primary native `ggml` implementation base adapted for the current Voxtral realtime runtime.
-* `vLLM` and `voxtral.c`: reference behavior and throughput baselines used to validate Voxtral realtime semantics and performance targets.
+* `NVIDIA NeMo` / Sortformer: model/archive semantics and parity baselines used as the source basis for the repo-written native Sortformer conversion and validation flow.
+* `parakeet.cpp`: additional external C++ Sortformer reference studied during native Sortformer bring-up and converter/runtime cross-checking.
+* `voxtral-cpp`: primary native `ggml` implementation base for the current Voxtral realtime runtime, and the source origin for the repo-kept Voxtral GGUF conversion tool.
+* `vLLM`, `voxtral.c`, `voxtral-mini-realtime-rs`, and `mlx-audio`: external reference implementations and throughput/behavior baselines used during Voxtral bring-up and validation.
 * `Docling`: practical references for VLM document-conversion behavior, including page rendering/scaling heuristics and Markdown-oriented extraction expectations for PDF-to-Markdown workflows.
 * `PDFium` and `pdfium-render`: PDF rasterization and page access primitives used for native page rendering/extraction in the PDF modules.
 * `FFmpeg` (LGPL shared builds): audio normalization and format conversion path used when input media needs conversion to inference-friendly audio format.

@@ -2236,7 +2236,11 @@ static void log_row_major_sample(
     int32_t cols,
     int32_t stats_rows) {
 
-    if (ctx == nullptr || data == nullptr || rows <= 0 || cols <= 0) {
+    if (ctx == nullptr ||
+        static_cast<int>(ctx->log_level) < static_cast<int>(voxtral_log_level::debug) ||
+        data == nullptr ||
+        rows <= 0 ||
+        cols <= 0) {
         return;
     }
 
@@ -2259,7 +2263,7 @@ static void log_row_major_sample(
     const double variance = n > 0.0 ? std::max(0.0, (sq_sum / n) - (mean * mean)) : 0.0;
     const double stddev = std::sqrt(variance);
 
-    LOG_INFO(
+    LOG_DBG(
         ctx,
         "%s: rows=%d cols=%d row0_first%d=%s row%d_first%d=%s mean=%.6f std=%.6f",
         label,
@@ -5744,7 +5748,11 @@ static bool stream_run_encoder_bounded(
 
     const int32_t mel_start = stream.mel_cursor - stream.mel.mel_frame_offset;
     const float * mel_ptr = stream.mel.mel.data() + (size_t) mel_start * VOXTRAL_NUM_MEL_BINS;
-    const bool use_device_conv_stem = ctx->gpu_type != voxtral_gpu_backend::none;
+    // CUDA still has a correctness issue in the device conv-stem path.
+    // Keep the encoder/decoder on GPU, but use the known-good CPU conv stem there for now.
+    const bool use_device_conv_stem =
+        ctx->gpu_type != voxtral_gpu_backend::none &&
+        ctx->gpu_type != voxtral_gpu_backend::cuda;
     const bool run_conv_debug =
         static_cast<int>(ctx->log_level) >= static_cast<int>(voxtral_log_level::debug);
     const voxtral_stream_conv_debug_state conv_debug_state =
@@ -5854,6 +5862,13 @@ static bool stream_run_encoder(
     return stream_run_encoder_bounded(stream, 0, error);
 }
 
+static int32_t stream_default_encoder_step_mel(const voxtral_stream & stream) {
+    const int32_t delay_tokens = delay_ms_to_tokens(stream.params.delay_ms);
+    const int32_t prompt_len = 1 + VOXTRAL_N_LEFT_PAD_TOKENS + delay_tokens;
+    const int32_t first_chunk_min_mel = prompt_len * 8;
+    return stream.conv_stem_initialized ? stream.min_new_mel_frames : first_chunk_min_mel;
+}
+
 static bool stream_run_decoder(
     voxtral_stream & stream,
     std::vector<voxtral_stream_event> & out_events,
@@ -5929,6 +5944,41 @@ static bool stream_run_decoder(
         stream.eos_seen = (stream.prev_token == VOXTRAL_TOKEN_EOS);
         stream.gen_pos += 1;
         steps += 1;
+    }
+
+    return true;
+}
+
+static bool stream_run_realtime_cycle(
+    voxtral_stream & stream,
+    std::vector<voxtral_stream_event> & out_events,
+    std::string * error,
+    bool bounded_encoder_steps) {
+
+    for (;;) {
+        const int32_t prev_cursor = stream.mel_cursor;
+        const int32_t prev_audio_tokens = stream.total_audio_tokens;
+        const int32_t prev_generated = stream.generated_token_index;
+        const bool prev_started = stream.decoder_started;
+
+        const bool encoder_ok = bounded_encoder_steps
+            ? stream_run_encoder_bounded(stream, stream_default_encoder_step_mel(stream), error)
+            : stream_run_encoder(stream, error);
+        if (!encoder_ok) {
+            return false;
+        }
+        if (!stream_run_decoder(stream, out_events, error)) {
+            return false;
+        }
+
+        const bool made_progress =
+            stream.mel_cursor != prev_cursor ||
+            stream.total_audio_tokens != prev_audio_tokens ||
+            stream.generated_token_index != prev_generated ||
+            stream.decoder_started != prev_started;
+        if (!made_progress || !bounded_encoder_steps) {
+            break;
+        }
     }
 
     return true;
@@ -6056,10 +6106,8 @@ bool voxtral_stream_push_audio(
     stream.real_samples_fed += n_samples;
     LOG_DBG(stream.ctx, "stream_push_audio: n_samples=%d total_samples=%lld",
         n_samples, (long long) stream.real_samples_fed);
-    if (!stream_run_encoder(stream, error)) {
-        return false;
-    }
-    if (!stream_run_decoder(stream, out_events, error)) {
+    const bool bounded_encoder_steps = stream.ctx->gpu_type == voxtral_gpu_backend::cuda;
+    if (!stream_run_realtime_cycle(stream, out_events, error, bounded_encoder_steps)) {
         return false;
     }
     return true;
@@ -6079,7 +6127,8 @@ bool voxtral_stream_flush(
         stream.mel,
         stream.params.right_pad_tokens * VOXTRAL_RAW_AUDIO_LENGTH_PER_TOK);
 
-    if (!stream_run_encoder(stream, error)) {
+    const bool bounded_encoder_steps = stream.ctx->gpu_type == voxtral_gpu_backend::cuda;
+    if (!stream_run_realtime_cycle(stream, out_events, error, bounded_encoder_steps)) {
         return false;
     }
     while (!stream.eos_seen && stream.gen_pos < stream.total_audio_tokens) {
