@@ -1,3 +1,4 @@
+# This is a legacy branch that partly supports native C++ implementation of Python pyannote.audio Diarization which works pretty well on up tp 2 speakers. This implemntation is not continued at the moment, but kept for archiving reasons if someone else wishes to continue.
 # Openresearchtools-Engine
 
 > **Early-stage repository:** this repo is still evolving quickly. The goal is to deliver a *single, embeddable, local AI runtime* that covers the common building blocks you usually end up wiring together from multiple projects.
