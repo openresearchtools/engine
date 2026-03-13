@@ -163,6 +163,7 @@ jobs:
             CmakeConfig        = "Release"
             Backend            = $env:BACKEND
             CargoProfile       = "Release"
+            CmakeGenerator     = $env:CMAKE_GENERATOR
             BuildRoot          = $env:BUILD_ROOT
             PrepareLlamaSource = $true
             BuildWhisperCli    = $false

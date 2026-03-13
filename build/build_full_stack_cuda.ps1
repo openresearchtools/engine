@@ -6,6 +6,8 @@ param(
     [ValidateSet("Debug", "Release")]
     [string]$CargoProfile = "Release",
     [string]$CmakeExe = "cmake",
+    [string]$CmakeGenerator = "",
+    [string]$CmakeArch = "",
     [string]$CargoExe = "cargo",
     [string]$LlamaCppDir = "",
     [string]$WhisperCppDir = "third_party/whisper.cpp",
@@ -35,6 +37,27 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+function Test-CmakeGeneratorSupportsPlatform {
+    param(
+        [string]$Generator
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Generator)) {
+        return $true
+    }
+
+    $platformlessGenerators = @(
+        "Ninja",
+        "Ninja Multi-Config",
+        "NMake Makefiles",
+        "NMake Makefiles JOM",
+        "Unix Makefiles",
+        "MinGW Makefiles"
+    )
+
+    return -not ($platformlessGenerators -contains $Generator)
+}
 
 function Resolve-AbsolutePath {
     param(
@@ -132,6 +155,8 @@ function Invoke-WhisperBuild {
         [string]$SourceDir,
         [string]$BuildDir,
         [string]$ConfigName,
+        [string]$Generator,
+        [string]$Arch,
         [int]$ParallelJobs
     )
 
@@ -147,10 +172,30 @@ function Invoke-WhisperBuild {
 
     New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 
+    $configureArgs = @(
+        "-S", $SourceDir,
+        "-B", $BuildDir,
+        "-DCMAKE_BUILD_TYPE=$ConfigName",
+        "-DGGML_CUDA=ON",
+        "-DWHISPER_FFMPEG=OFF"
+    )
+    if (-not [string]::IsNullOrWhiteSpace($Generator)) {
+        $configureArgs += @("-G", $Generator)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Arch) -and (Test-CmakeGeneratorSupportsPlatform -Generator $Generator)) {
+        $configureArgs += @("-A", $Arch)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:CUDACXX)) {
+        $configureArgs += "-DCMAKE_CUDA_COMPILER=$env:CUDACXX"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:CUDA_PATH)) {
+        $configureArgs += "-DCUDAToolkit_ROOT=$env:CUDA_PATH"
+    }
+
     $oldErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        & $Cmake -S $SourceDir -B $BuildDir "-DCMAKE_BUILD_TYPE=$ConfigName" "-DGGML_CUDA=ON" "-DWHISPER_FFMPEG=OFF" 2>&1 | ForEach-Object { Write-Host $_ }
+        & $Cmake @configureArgs 2>&1 | ForEach-Object { Write-Host $_ }
         $whisperConfigureExitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $oldErrorActionPreference
@@ -179,6 +224,16 @@ function Invoke-WhisperBuild {
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $buildsRoot = Join-Path (Split-Path -Parent $repoRoot) "ENGINEbuilds"
 $CmakeExe = Resolve-CmakeExecutable -ToolValue $CmakeExe
+if ([string]::IsNullOrWhiteSpace($CmakeGenerator) -and -not [string]::IsNullOrWhiteSpace($env:CMAKE_GENERATOR)) {
+    $CmakeGenerator = $env:CMAKE_GENERATOR
+}
+if ([string]::IsNullOrWhiteSpace($CmakeArch) -and -not [string]::IsNullOrWhiteSpace($env:CMAKE_GENERATOR_PLATFORM)) {
+    $CmakeArch = $env:CMAKE_GENERATOR_PLATFORM
+}
+if (-not (Test-CmakeGeneratorSupportsPlatform -Generator $CmakeGenerator) -and -not [string]::IsNullOrWhiteSpace($CmakeArch)) {
+    Write-Host "Skipping CMake platform selection '-A $CmakeArch' for generator '$CmakeGenerator'."
+    $CmakeArch = ""
+}
 $repoDefaultLlamaPatch = Join-Path $repoRoot "diarize\\addons\\patches\\0300-llama-unified-audio.patch"
 if (-not (Test-Path -LiteralPath $repoDefaultLlamaPatch)) {
     throw "Required llama patch is missing: $repoDefaultLlamaPatch"
@@ -359,6 +414,12 @@ $bridgeArgs = @{
     BuildLlamaServerCli = $BuildLlamaServerCli.IsPresent
     Jobs = $Jobs
 }
+if (-not [string]::IsNullOrWhiteSpace($CmakeGenerator)) {
+    $bridgeArgs["CmakeGenerator"] = $CmakeGenerator
+}
+if (-not [string]::IsNullOrWhiteSpace($CmakeArch)) {
+    $bridgeArgs["CmakeArch"] = $CmakeArch
+}
 if ($EnableCpuAllVariants) {
     $bridgeArgs["EnableBackendDl"] = $true
     $bridgeArgs["EnableCpuAllVariants"] = $true
@@ -378,7 +439,7 @@ if ($BuildWhisperCli) {
     if ($Backend -ne "cuda") {
         throw "BuildWhisperCli currently supports only Backend=cuda."
     }
-    Invoke-WhisperBuild -Cmake $CmakeExe -SourceDir $WhisperCppDir -BuildDir $WhisperBuildDir -ConfigName $CmakeConfig -ParallelJobs $Jobs
+    Invoke-WhisperBuild -Cmake $CmakeExe -SourceDir $WhisperCppDir -BuildDir $WhisperBuildDir -ConfigName $CmakeConfig -Generator $CmakeGenerator -Arch $CmakeArch -ParallelJobs $Jobs
 }
 
 $bridgeBinDir = Join-Path $LlamaBuildDir "bin"

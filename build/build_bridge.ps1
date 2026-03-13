@@ -29,6 +29,52 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Resolve-CmakeGenerator {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ConfiguredGenerator,
+        [Parameter(Mandatory = $true)]
+        [bool]$GeneratorExplicit
+    )
+
+    if (-not $GeneratorExplicit -and -not [string]::IsNullOrWhiteSpace($env:CMAKE_GENERATOR)) {
+        return $env:CMAKE_GENERATOR
+    }
+    return $ConfiguredGenerator
+}
+
+function Resolve-CmakeArch {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ConfiguredArch,
+        [Parameter(Mandatory = $true)]
+        [bool]$ArchExplicit
+    )
+
+    if (-not $ArchExplicit -and -not [string]::IsNullOrWhiteSpace($env:CMAKE_GENERATOR_PLATFORM)) {
+        return $env:CMAKE_GENERATOR_PLATFORM
+    }
+    return $ConfiguredArch
+}
+
+function Test-CmakeGeneratorSupportsPlatform {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Generator
+    )
+
+    $platformlessGenerators = @(
+        "Ninja",
+        "Ninja Multi-Config",
+        "NMake Makefiles",
+        "NMake Makefiles JOM",
+        "Unix Makefiles",
+        "MinGW Makefiles"
+    )
+
+    return -not ($platformlessGenerators -contains $Generator)
+}
+
 function Resolve-AbsolutePath {
     param(
         [Parameter(Mandatory = $true)]
@@ -255,6 +301,8 @@ function Ensure-BridgeCmakeHooks {
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $buildsRoot = Join-Path (Split-Path -Parent $repoRoot) "ENGINEbuilds"
 $CmakeExe = Resolve-CmakeExecutable -ToolValue $CmakeExe
+$CmakeGenerator = Resolve-CmakeGenerator -ConfiguredGenerator $CmakeGenerator -GeneratorExplicit $PSBoundParameters.ContainsKey("CmakeGenerator")
+$CmakeArch = Resolve-CmakeArch -ConfiguredArch $CmakeArch -ArchExplicit $PSBoundParameters.ContainsKey("CmakeArch")
 $repoLlamaCppDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "third_party\\llama.cpp"))
 $repoWhisperCppDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "third_party\\whisper.cpp"))
 $autoPreparedSource = $false
@@ -404,6 +452,11 @@ if ($StageWhisperSource) {
 
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 
+if (-not (Test-CmakeGeneratorSupportsPlatform -Generator $CmakeGenerator) -and -not [string]::IsNullOrWhiteSpace($CmakeArch)) {
+    Write-Host "Skipping CMake platform selection '-A $CmakeArch' for generator '$CmakeGenerator'."
+    $CmakeArch = ""
+}
+
 $cmakeArgs = @(
     "-S", $LlamaCppDir,
     "-B", $BuildDir,
@@ -445,6 +498,12 @@ switch ($Backend) {
     "cuda" {
         $cmakeArgs += "-DGGML_CUDA=ON"
         $cmakeArgs += "-DGGML_CUDA_CUB_3DOT2=ON"
+        if (-not [string]::IsNullOrWhiteSpace($env:CUDACXX)) {
+            $cmakeArgs += "-DCMAKE_CUDA_COMPILER=$env:CUDACXX"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($env:CUDA_PATH)) {
+            $cmakeArgs += "-DCUDAToolkit_ROOT=$env:CUDA_PATH"
+        }
     }
     "vulkan" {
         $cmakeArgs += "-DGGML_VULKAN=ON"
