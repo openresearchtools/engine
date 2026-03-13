@@ -1,4 +1,10 @@
-# This is a legacy branch that partly supports native C++ implementation of Python pyannote.audio Diarization which works pretty well on up tp 2 speakers. This implemntation is not continued at the moment, but kept for archiving reasons if someone else wishes to continue.
+#This is a legacy branch containing a native C++ implementation based on Python pyannote.audio speaker diarization. At present, it supports only a limited subset of the original diarization functionality, but it works reasonably well for up to two speakers.
+
+This implementation is no longer actively maintained, but the branch is preserved for archival purposes in case others wish to continue development.
+
+The main branch does not include this code. 
+
+This branch does not support real-time transcription or real-time diarization that's now implemented in the main branch.
 # Openresearchtools-Engine
 
 > **Early-stage repository:** this repo is still evolving quickly. The goal is to deliver a *single, embeddable, local AI runtime* that covers the common building blocks you usually end up wiring together from multiple projects.
