@@ -40,6 +40,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Generate License Bundles
+        shell: pwsh
+        run: |
+          pwsh -File "$env:GITHUB_WORKSPACE/build/generate_license_bundles.ps1" -RepoRoot "$env:GITHUB_WORKSPACE"
+
       - name: Preflight Required License Files
         shell: bash
         run: |
@@ -307,7 +312,7 @@ jobs:
             [[ -f "$f" ]] || continue
             base="$(basename "$f")"
             case "$base" in
-              torch-LICENSE.txt|torch-NOTICE.txt|torchaudio-LICENSE.txt|numpy-LICENSE.txt|ffmpeg-SOURCE*.txt|nvidia-cuda-EULA.txt|nvidia-cuda-runtime-NOTICE.txt)
+              torch-LICENSE.txt|torch-NOTICE.txt|numpy-LICENSE.txt|PyYAML-LICENSE.txt|ffmpeg-SOURCE*.txt|nvidia-cuda-EULA.txt|nvidia-cuda-runtime-NOTICE.txt)
                 continue
                 ;;
             esac

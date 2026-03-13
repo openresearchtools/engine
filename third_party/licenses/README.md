@@ -1,8 +1,19 @@
-# Third Party Notices
+# Third-Party Notices
 
-This repository contains runtime integration code and conversion/parity tooling that reference third-party projects.
+This repository contains shipped runtime code, bundled runtime dependencies, native adaptations, and a small amount of repo-kept conversion/parity tooling.
 
-Openresearchtools-engine source code is licensed under the MIT License; third-party dependencies and bundled components remain licensed under their respective original licenses.
+Openresearchtools-Engine source code is licensed under the MIT License. Third-party dependencies and bundled components remain licensed under their respective original licenses.
+
+This file is primarily a provenance map for source code and tooling that were
+directly imported, adapted, or rewritten from named upstream projects.
+Package-managed dependencies that are consumed in their normal published form
+remain listed here at license-inventory level only; they are not broken down
+by internal source-file lineage unless this repo directly imported/adapted
+their source.
+
+Where mixed-source files are involved, the file lists below are identigying  the main ENGINE files materially informed by a given
+upstream project; they are not a claim that every listed line came verbatim
+from that upstream.
 
 ## Backend key-license bundles
 
@@ -10,171 +21,162 @@ Openresearchtools-engine source code is licensed under the MIT License; third-pa
 - Metal bundle key licenses: `LICENSES-metal.txt`
 - Vulkan bundle key licenses: `LICENSES-vulkan.txt`
 - Ubuntu x64 Vulkan bundle key licenses: `LICENSES-ubuntu-vulkan.txt`
-- Legacy/default key bundle (full): `LICENSES.txt`
+- Legacy/default key bundle: `LICENSES.txt`
 
-## Runtime (shipped Openresearchtools-Engine)
+These combined files are the curated top-level shipped/runtime/reference bundles. Tooling-only direct dependencies such as `torch`, `numpy`, and `PyYAML` are documented separately.
+
+## Directly imported or adapted source in shipped runtime
 
 ### 1) llama.cpp
 
-- Role: Core C/C++ inference/runtime framework and server base.
-- Source location in this repository layout: [`third_party/llama.cpp`](https://github.com/openresearchtools/engine/tree/main/third_party/llama.cpp)
-- Add-on integration files in this repository:
-  - [`diarize/addons/overlay/llama.cpp/tools/CMakeLists.txt`](https://github.com/openresearchtools/engine/blob/main/diarize/addons/overlay/llama.cpp/tools/CMakeLists.txt)
-  - [`diarize/addons/overlay/llama.cpp/tools/server/`](https://github.com/openresearchtools/engine/tree/main/diarize/addons/overlay/llama.cpp/tools/server/)
-  - [`diarize/addons/overlay/llama.cpp/tools/pyannote/`](https://github.com/openresearchtools/engine/tree/main/diarize/addons/overlay/llama.cpp/tools/pyannote/)
-  - [`diarize/addons/overlay/llama.cpp/tools/whisper/`](https://github.com/openresearchtools/engine/tree/main/diarize/addons/overlay/llama.cpp/tools/whisper/)
-- License: MIT
+- Role: primary upstream C/C++ runtime base that the core ENGINE inference/server stack is built on.
+- Upstream source snapshot kept in this repository: `third_party/llama.cpp`
+- ENGINE code heavily builds on and extends that base through prepared-build patches plus repo integration layers.
+- These ENGINE-added layers are where the native audio/session, In process bridge, Whisper.cpp, Sortformer, and Voxtral features are integrated on top of original llama cpp; they are not claims about upstream `llama.cpp` shipping those features by itself.
+- 
 - License type: MIT
 - License file: `llama.cpp-LICENSE.txt`
 
-### 1a) Additional licenses pulled into this app through llama.cpp build
+### 1a) Additional licenses pulled into this app through the llama.cpp build
 
 The `llama.cpp` CMake build used by this app aggregates extra third-party licenses into its generated `license.cpp`.
-For the current Openresearchtools-Engine Windows CUDA build, those additional upstream projects are:
 
-- Repository: `yhirose/cpp-httplib`
-  - Upstream: `https://github.com/yhirose/cpp-httplib`
+- `yhirose/cpp-httplib`
+  - Upstream: <https://github.com/yhirose/cpp-httplib>
   - License type: MIT
-  - License file in this folder: `cpp-httplib-LICENSE.txt`
-- Repository: `nlohmann/json`
-  - Upstream: `https://github.com/nlohmann/json`
+  - License file: `cpp-httplib-LICENSE.txt`
+- `nlohmann/json`
+  - Upstream: <https://github.com/nlohmann/json>
   - License type: MIT
-  - License file in this folder: `jsonhpp-LICENSE.txt`
-- Repository: `google/boringssl`
-  - Upstream: `https://github.com/google/boringssl`
-  - License type: ISC-style (BoringSSL license)
-  - License file in this folder: `boringssl-LICENSE.txt`
+  - License file: `jsonhpp-LICENSE.txt`
+- `google/boringssl`
+  - Upstream: <https://github.com/google/boringssl>
+  - License type: ISC-style / BoringSSL license
+  - License file: `boringssl-LICENSE.txt`
 
-Build-note: BoringSSL is fetched by CMake in this build profile (`LLAMA_BUILD_BORINGSSL=ON`) and linked into the shipped bridge/runtime binaries.
+Build note: BoringSSL is fetched by CMake in build profiles that enable `LLAMA_BUILD_BORINGSSL`.
 
 ### 1b) ggml
 
-- Role: low-level tensor/runtime framework used by `llama.cpp` and `whisper.cpp`.
+- Role: low-level tensor/runtime framework used by `llama.cpp`, `whisper.cpp`, and the native realtime subsystems.
 - Upstream repository: `ggml-org/ggml`
-- Upstream URL: `https://github.com/ggml-org/ggml`
+- Upstream URL: <https://github.com/ggml-org/ggml>
 - Source locations in this repository layout:
-  - [`third_party/llama.cpp/ggml`](https://github.com/openresearchtools/engine/tree/main/third_party/llama.cpp/ggml)
-  - [`third_party/whisper.cpp/ggml`](https://github.com/openresearchtools/engine/tree/main/third_party/whisper.cpp/ggml)
-- License: MIT
+  - `third_party/llama.cpp/ggml`
+  - `third_party/whisper.cpp/ggml`
 - License type: MIT
 - License file: `ggml-LICENSE.txt`
 
 ### 1c) miniaudio
 
-- Role: embedded audio decode/capture helper used by the in-process whisper transcription path.
+- Role: embedded audio decode/capture helper used by the native whisper audio path.
 - Upstream repository: `mackron/miniaudio`
-- Upstream URL: `https://github.com/mackron/miniaudio`
+- Upstream URL: <https://github.com/mackron/miniaudio>
 - Source location in this repository layout:
-  - [`third_party/llama.cpp/vendor/miniaudio/miniaudio.h`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/vendor/miniaudio/miniaudio.h)
-- Build-use locations in this repository layout:
-  - [`third_party/llama.cpp/tools/whisper/whisper-common-audio.cpp`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/tools/whisper/whisper-common-audio.cpp)
-  - [`third_party/llama.cpp/tools/pyannote/pyannote-diarize.cpp`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/tools/pyannote/pyannote-diarize.cpp)
-- License: dual option (Public Domain / MIT No Attribution)
-- License type: Public Domain (Unlicense-style) OR MIT-0
+  - `third_party/llama.cpp/vendor/miniaudio/miniaudio.h`
+- Build-use location in this repository layout:
+  - `diarize/addons/overlay/llama.cpp/tools/whisper/whisper-common-audio.cpp`
+- License type: Public Domain OR MIT-0
 - License file: `miniaudio-LICENSE.txt`
 
-### 1d) Additional ggml CPU-component attributions used by CPU backend variants
+### 1d) Additional ggml CPU-component attributions
 
-- YaRN reference implementation attribution inside ggml CPU rope path:
-  - Source location: [`third_party/llama.cpp/ggml/src/ggml-cpu/ops.cpp`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/ggml/src/ggml-cpu/ops.cpp)
-  - Upstream reference: `https://github.com/jquesnelle/yarn`
+- YaRN reference implementation attribution inside ggml CPU rope path
+  - Upstream: <https://github.com/jquesnelle/yarn>
   - License type: MIT
   - License file: `yarn-LICENSE.txt`
-- llamafile SGEMM component used by ggml CPU backend:
-  - Source location: [`third_party/llama.cpp/ggml/src/ggml-cpu/llamafile/sgemm.cpp`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/ggml/src/ggml-cpu/llamafile/sgemm.cpp)
-  - Upstream reference: `https://github.com/Mozilla-Ocho/llamafile`
+- llamafile SGEMM component used by ggml CPU backend
+  - Upstream: <https://github.com/Mozilla-Ocho/llamafile>
   - License type: MIT
   - License file: `llamafile-sgemm-LICENSE.txt`
-- KleidiAI source attribution (used by ggml CPU backend when enabled):
-  - Source locations:
-    - [`third_party/llama.cpp/ggml/src/ggml-cpu/kleidiai/kleidiai.cpp`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/ggml/src/ggml-cpu/kleidiai/kleidiai.cpp)
-    - [`third_party/llama.cpp/ggml/src/ggml-cpu/kleidiai/kernels.cpp`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/ggml/src/ggml-cpu/kleidiai/kernels.cpp)
-  - Upstream reference: `https://github.com/ARM-software/kleidiai`
+- KleidiAI source attribution used by ggml CPU backend when enabled
+  - Upstream: <https://github.com/ARM-software/kleidiai>
   - License type: MIT
   - License file: `kleidiai-LICENSE.txt`
 
-### 1e) Additional C/C++ source-attribution licenses (upstream originals)
+### 1e) Additional C/C++ source-attribution licenses
 
-- Repository: `openvinotoolkit/openvino`
-  - Upstream: `https://github.com/openvinotoolkit/openvino`
-  - Source-attribution locations:
-    - [`third_party/llama.cpp/ggml/src/ggml-cpu/vec.h`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/ggml/src/ggml-cpu/vec.h)
-    - [`third_party/whisper.cpp/ggml/src/ggml-cpu/vec.h`](https://github.com/openresearchtools/engine/blob/main/third_party/whisper.cpp/ggml/src/ggml-cpu/vec.h)
+- `openvinotoolkit/openvino`
   - License type: Apache-2.0
-  - License file in this folder: `openvino-LICENSE.txt`
-- Repository: `ARM-software/optimized-routines`
-  - Upstream: `https://github.com/ARM-software/optimized-routines`
-  - Source-attribution locations:
-    - [`third_party/llama.cpp/ggml/src/ggml-cpu/vec.h`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/ggml/src/ggml-cpu/vec.h)
-    - [`third_party/whisper.cpp/ggml/src/ggml-cpu/vec.h`](https://github.com/openresearchtools/engine/blob/main/third_party/whisper.cpp/ggml/src/ggml-cpu/vec.h)
+  - License file: `openvino-LICENSE.txt`
+- `ARM-software/optimized-routines`
   - License type: MIT OR Apache-2.0 WITH LLVM-exception
-  - License file in this folder: `arm-optimized-routines-LICENSE.txt`
-- Repository: `cmp-nct/ggllm.cpp`
-  - Upstream: `https://github.com/cmp-nct/ggllm.cpp`
-  - Source-attribution location:
-    - [`third_party/llama.cpp/src/llama-vocab.cpp`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/src/llama-vocab.cpp)
+  - License file: `arm-optimized-routines-LICENSE.txt`
+- `cmp-nct/ggllm.cpp`
   - License type: MIT
-  - License file in this folder: `ggllm.cpp-LICENSE.txt`
-- Repository: `ivanyu/string-algorithms`
-  - Upstream: `https://github.com/ivanyu/string-algorithms`
-  - Source-attribution location:
-    - [`third_party/llama.cpp/src/llama-sampler.cpp`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/src/llama-sampler.cpp)
-  - License type: Public Domain (Unlicense text)
-  - License file in this folder: `string-algorithms-LICENSE.txt`
-- Repository: `LostRuins/koboldcpp`
-  - Upstream: `https://github.com/LostRuins/koboldcpp`
-  - Source-attribution location:
-    - [`third_party/llama.cpp/src/llama-sampler.cpp`](https://github.com/openresearchtools/engine/blob/main/third_party/llama.cpp/src/llama-sampler.cpp)
-  - License type: MIT (current upstream repository license)
-  - License file in this folder: `koboldcpp-LICENSE.txt`
-- Repository: `llvm/llvm-project`
-  - Upstream: `https://github.com/llvm/llvm-project`
-  - Source-attribution locations:
-    - [`third_party/llama.cpp/ggml/src/ggml-sycl/`](https://github.com/openresearchtools/engine/tree/main/third_party/llama.cpp/ggml/src/ggml-sycl)
-    - [`third_party/whisper.cpp/ggml/src/ggml-sycl/`](https://github.com/openresearchtools/engine/tree/main/third_party/whisper.cpp/ggml/src/ggml-sycl)
+  - License file: `ggllm.cpp-LICENSE.txt`
+- `ivanyu/string-algorithms`
+  - License type: Public Domain / Unlicense text
+  - License file: `string-algorithms-LICENSE.txt`
+- `LostRuins/koboldcpp`
+  - License type: MIT
+  - License file: `koboldcpp-LICENSE.txt`
+- `llvm/llvm-project`
   - License type: Apache-2.0 WITH LLVM-exception
-  - License file in this folder: `llvm-project-LICENSE.TXT`
-  - Build note: SYCL backend sources are present in tree, but are not used in the current Windows CUDA release profile.
+  - License file: `llvm-project-LICENSE.TXT`
 
 ### 2) whisper.cpp
 
-- Role: Native whisper transcription implementation integrated into `llama-server` in-process for audio flow.
-- Source location in this repository layout: [`third_party/whisper.cpp`](https://github.com/openresearchtools/engine/tree/main/third_party/whisper.cpp)
-- License: MIT
+- Role: native Whisper transcription implementation integrated into the in-process audio flow.
+- Source location in this repository layout: `third_party/whisper.cpp`
 - License type: MIT
 - License file: `whisper.cpp-LICENSE.txt`
 
-### 3) pyannote.audio
+### 3) voxtral-cpp
 
-- Role: reference/source for diarization pipeline structure and tensor naming/metadata semantics used by native C++ reimplementation.
-- Native C++ runtime implementation is provided through overlayed pyannote integration under:
-  - [`diarize/addons/overlay/llama.cpp/tools/pyannote/`](https://github.com/openresearchtools/engine/tree/main/diarize/addons/overlay/llama.cpp/tools/pyannote/)
-- Runtime endpoint path does not invoke Python.
-- License: MIT
+- Role: primary native `ggml` implementation base adapted for the current Voxtral realtime runtime, and the source origin for the repo-kept Voxtral GGUF conversion tooling.
+- ENGINE-owned runtime files adapted from or heavily informed by `voxtral-cpp`:
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/voxtral/voxtral-runtime.cpp`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/voxtral/voxtral-runtime.h`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/voxtral/voxtral-backend.cpp`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/voxtral/voxtral-backend.h`
+- ENGINE-kept conversion tooling adapted from `voxtral-cpp`:
+  - `build/voxtral/convert_voxtral_to_gguf.py`
+- Upstream reference points:
+  - upstream runtime/math implementation in `voxtral-cpp/src/voxtral.cpp`
+  - upstream GGUF conversion tooling in `voxtral-cpp/tools/convert_voxtral_to_gguf.py`
+- Upstream reference: local source base mirrored from `voxtral-cpp`
 - License type: MIT
-- License file: `pyannote.audio-LICENSE.txt`
+- License file: `voxtral-cpp-LICENSE.txt`
 
-### 4) WeSpeaker (transitive provenance via pyannote embedding stack)
+### 4) NVIDIA NeMo / Sortformer references
 
-- Role: upstream provenance for parts of embedding-model lineage referenced by pyannote embedding components.
-- License: Apache-2.0
+- Role: reference/source for Sortformer archive semantics, config/tensor naming, and parity validation used by the native Sortformer conversion and validation flow only.
+- The current Sortformer converter in `build/sortformer/convert_nemo_sortformer_to_gguf.py` is a repo-written ENGINE script, not a copied upstream converter.
+- Its source basis was:
+  - NVIDIA NeMo Sortformer archive/checkpoint structure
+  - NeMo config/tensor naming semantics from the `.nemo` archive
+  - NeMo parity/reference runs used during bring-up
+- Main ENGINE files materially informed by NVIDIA NeMo / Sortformer references:
+  - `build/sortformer/convert_nemo_sortformer_to_gguf.py`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/sortformer/sortformer-gguf.cpp`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/sortformer/sortformer-schema.cpp`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/sortformer/sortformer-postprocess.cpp`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/realtime-smoke.cpp`
 - License type: Apache-2.0
-- License file: `WeSpeaker-LICENSE.txt`
+- License file: `nvidia-nemo-LICENSE.txt`
 
-### 5) docling (reference logic)
+### 4a) parakeet.cpp
 
-- Role: reference for VLM document-conversion behavior used by Openresearchtools-Engine `pdfvlm`.
-- Source: `https://github.com/docling-project/docling`
+- Role: external C++ Sortformer reference studied during native Sortformer bring-up, especially for conversion/runtime structure cross-checking.
+- Main ENGINE files materially cross-checked or informed against `parakeet.cpp` Sortformer references:
+  - `build/sortformer/convert_nemo_sortformer_to_gguf.py`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/sortformer/sortformer-model.cpp`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/sortformer/sortformer-streaming.cpp`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/sortformer/sortformer-frontend.cpp`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/sortformer/sortformer-encoder.cpp`
+- Upstream: <https://github.com/frikallo/parakeet.cpp>
+- License type: MIT
+- License file: `parakeet-cpp-LICENSE.txt`
+
+### 5) docling
+
+- Role: reference logic for VLM document-conversion behavior used by `pdfvlm`.
+- Upstream source: <https://github.com/docling-project/docling>
 - License type: MIT
 - License file: `docling-LICENSE.txt`
-- Attribution note: parts of VLM preprocessing logic were borrowed/adapted, including prompting, page-wise image rendering, scale/oversample flow, and Catmull-Rom (bicubic-style) downscale before inference.
-- Borrowed/adapted scaling behavior used in [`engine/pdfvlm/src/pdf_to_markdown.rs`](https://github.com/openresearchtools/engine/blob/main/engine/pdfvlm/src/pdf_to_markdown.rs) includes:
-  - page-wise rasterization before VLM inference
-  - target page scaling (`--scale`, default `2.0`)
-  - temporary oversample (`--oversample`, default `1.5`)
-  - Catmull-Rom (bicubic-style) resampling/downscale from temporary render to final target size
 
-### 6) pdfium-render (Rust crate)
+### 6) pdfium-render
 
 - Role: PDF rasterization binding used by `pdf` and `pdfvlm`.
 - License type: MIT OR Apache-2.0
@@ -182,146 +184,110 @@ Build-note: BoringSSL is fetched by CMake in this build profile (`LLAMA_BUILD_BO
 
 ### 7) PDFium runtime binaries
 
-- Runtime location: [`third_party/pdfium`](https://github.com/openresearchtools/engine/tree/main/third_party/pdfium)
+- Runtime location: `third_party/pdfium`
+- Binary source used in this project: <https://github.com/bblanchon/pdfium-binaries>
 - License type: BSD-3-Clause + Apache-2.0 + additional third-party notices
 - License file: `pdfium-LICENSE.txt`
-- Binary source used in this project: `https://github.com/bblanchon/pdfium-binaries`
-- Binary source license type: MIT
-- Binary source license file: `pdfium-binaries-LICENSE.txt`
-- Include corresponding PDFium/Chromium third-party notices in your final app distribution when required by your selected PDFium build.
+- Binary-source license type: MIT
+- Binary-source license file: `pdfium-binaries-LICENSE.txt`
 
-### 8) FFmpeg runtime conversion (raw audio path)
+### 8) FFmpeg runtime conversion
 
-- Role: in-memory audio normalization for bridge raw-audio transcription requests (convert to WAV 16-bit mono 16 kHz before endpoint call).
-
-Windows x64 runtime path in this project:
-
-- Binary fetch source: `https://github.com/BtbN/FFmpeg-Builds`
-- Binary fetch source license type: MIT
-- Binary fetch source license file: `ffmpeg-builds-LICENSE.txt`
-- Fetch script: [`build/download-ffmpeg-lgpl-win-x64.ps1`](https://github.com/openresearchtools/engine/blob/main/build/download-ffmpeg-lgpl-win-x64.ps1)
-- Windows workflow reference: [`.github/workflows/windows-x64.yml`](https://github.com/openresearchtools/engine/blob/main/.github/workflows/windows-x64.yml)
-- Windows workflow release API: `https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest`
-- Windows workflow asset pattern: `*win64-lgpl-shared*.zip`
-
-Ubuntu x64 runtime path in this project:
-
-- Ubuntu workflow release API: `https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest`
-- Ubuntu workflow asset name: `ffmpeg-master-latest-linux64-lgpl-shared.tar.xz`
-- Ubuntu workflow reference: [`.github/workflows/ubuntu-x64.yml`](https://github.com/openresearchtools/engine/blob/main/.github/workflows/ubuntu-x64.yml)
-
-macOS arm64 source-build pinning (LGPL shared) used for workflow documentation:
-
-- Workflow reference (contains pinned command block): [`.github/workflows/macos-arm64.yml`](https://github.com/openresearchtools/engine/blob/main/.github/workflows/macos-arm64.yml)
-- Upstream source repository: `https://github.com/FFmpeg/FFmpeg`
-- Pinned source tag: `n8.0.1`
-- Pinned source commit: `894da5ca7d742e4429ffb2af534fcda0103ef593`
-- Upstream tag URL: `https://github.com/FFmpeg/FFmpeg/tree/n8.0.1`
-- Upstream commit URL: `https://github.com/FFmpeg/FFmpeg/commit/894da5ca7d742e4429ffb2af534fcda0103ef593`
-- Reference build command (macOS arm64):
-
-```bash
-set -euo pipefail
-ffmpeg_src="$BUILD_ROOT/sources/ffmpeg"
-ffmpeg_out="$BUILD_ROOT/runtime-deps/ffmpeg"
-rm -rf "$ffmpeg_src" "$ffmpeg_out"
-mkdir -p "$(dirname "$ffmpeg_src")" "$ffmpeg_out"
-
-git clone --depth 1 --branch "$FFMPEG_TAG" https://github.com/FFmpeg/FFmpeg "$ffmpeg_src"
-actual_sha="$(git -C "$ffmpeg_src" rev-parse "HEAD^{commit}")"
-if [[ "$actual_sha" != "$FFMPEG_SHA" ]]; then
-  echo "Pinned SHA mismatch. Expected $FFMPEG_SHA, got $actual_sha"
-  exit 1
-fi
-
-pushd "$ffmpeg_src"
-./configure \
-  --prefix="$ffmpeg_out" \
-  --enable-shared \
-  --disable-static \
-  --disable-gpl \
-  --disable-version3 \
-  --disable-nonfree \
-  --disable-autodetect \
-  --disable-xlib \
-  --disable-libxcb \
-  --disable-libxcb-shm \
-  --disable-libxcb-xfixes \
-  --disable-libxcb-shape \
-  --disable-vulkan \
-  --disable-libplacebo \
-  --enable-pic \
-  --disable-programs \
-  --disable-doc \
-  --cc=clang \
-  --arch=arm64 \
-  --target-os=darwin
-make -j"$(sysctl -n hw.ncpu)"
-make install
-popd
-```
-
-Common notes:
-
-- License type (intended build): LGPL (LGPL-only shared build)
-- License file: `ffmpeg-LGPL-2.1.txt`
-- Source/provenance note in final bundles: `vendor/ffmpeg/ffmpeg-SOURCE.txt`
-- Backend source files in this repo:
+- Role: in-memory audio normalization and decode/resample path for raw/file audio ingress.
+- Windows/Linux binary fetch source: <https://github.com/BtbN/FFmpeg-Builds>
+- Source-build reference for macOS arm64: <https://github.com/FFmpeg/FFmpeg>
+- License type: LGPL 2.1-or-later intent for the shared-runtime builds staged by this repo
+- License files:
+  - `ffmpeg-builds-LICENSE.txt`
+  - `ffmpeg-LGPL-2.1.txt`
+  - `ffmpeg-SOURCE.txt`
   - `ffmpeg-SOURCE-windows-x64.txt`
   - `ffmpeg-SOURCE-ubuntu-x64.txt`
   - `ffmpeg-SOURCE-macos-arm64.txt`
 
-### 9) NVIDIA CUDA runtime libraries (Windows bundle)
+### 9) NVIDIA CUDA runtime libraries
 
-- Role: GPU acceleration runtime libraries used by the CUDA backend in shipped Openresearchtools-Engine binaries.
-- Typical shipped files in this project bundle:
-  - `cublas64_13.dll`
-  - `cublasLt64_13.dll`
-  - `cudart64_13.dll`
-- License/EULA type: NVIDIA CUDA EULA
-- License files in this folder:
+- Role: GPU acceleration runtime libraries used by CUDA backend bundles.
+- License type: NVIDIA CUDA EULA
+- License files:
   - `nvidia-cuda-EULA.txt`
   - `nvidia-cuda-runtime-NOTICE.txt`
-- Runtime bundle note: CUDA builds also stage `NVIDIA-CUDA-RUNTIME-NOTICE.txt` into bundle root next to CUDA DLLs, with pointers to full licensing files under `licenses/third_party/`.
-- Official EULA page: `https://docs.nvidia.com/cuda/eula/index.html`
 
-## Conversion / parity tooling (not required at runtime)
+## External reference and validation repositories (not linked into shipped runtime)
 
-These packages/scripts are used by local conversion or parity scripts and are not required by the shipped native runtime inference path.
+These repositories were used as behavior, validation, or benchmarking references during native bring-up. They are not bundled as runtime code by this repository.
 
-Tooling scripts:
+### vLLM
 
-- [`extras/convert_pyannote_checkpoint_to_gguf.py`](https://github.com/openresearchtools/engine/blob/main/extras/convert_pyannote_checkpoint_to_gguf.py)
-- [`extras/convert_pyannote_npz_to_gguf.py`](https://github.com/openresearchtools/engine/blob/main/extras/convert_pyannote_npz_to_gguf.py)
-- [`extras/convert_pyannote_to_gguf.ps1`](https://github.com/openresearchtools/engine/blob/main/extras/convert_pyannote_to_gguf.ps1)
+- Role: realtime behavior and throughput reference for Voxtral evaluation.
+- Main ENGINE files whose Voxtral behavior was materially cross-checked or informed against `vLLM` references:
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/voxtral/voxtral-runtime.cpp`
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/voxtral/voxtral-runtime.h`
+- Upstream: <https://github.com/vllm-project/vllm>
+- License type: Apache-2.0
+- License file: `vllm-LICENSE.txt`
 
-Primary tooling dependencies with dedicated top-level license files:
+### voxtral.c
 
-- PyTorch (`torch`)
-  - Role: read checkpoint tensors during conversion/parity workflows.
-  - License type: BSD-3-Clause (with additional bundled third-party notices)
-  - License files: `torch-LICENSE.txt`, `torch-NOTICE.txt`
-- torchaudio
-  - Role: audio/parity tooling dependency.
-  - License type: BSD-2-Clause
-  - License file: `torchaudio-LICENSE.txt`
+- Role: streaming API/reference behavior input for Voxtral session semantics.
+- Main ENGINE files materially informed by `voxtral.c` streaming/session ideas:
+  - `diarize/addons/overlay/llama.cpp/tools/realtime/voxtral/voxtral-backend.cpp`
+  - `bridge/llama_server_bridge.cpp`
+  - `engine/src/llama_bridge.rs`
+- Upstream: <https://github.com/antirez/voxtral.c>
+- License type: MIT
+- License file: `voxtral.c-LICENSE.txt`
+
+### voxtral-mini-realtime-rs
+
+- Role: external Rust/GGUF reference for Voxtral realtime integration patterns and session wiring study.
+- Upstream: <https://github.com/TrevorS/voxtral-mini-realtime-rs>
+- License type: Apache-2.0
+- License file: `voxtral-mini-realtime-rs-LICENSE.txt`
+
+### mlx-audio
+
+- Role: external MLX-side reference for Mistral/Voxtral audio model behavior and implementation study.
+- Upstream: <https://github.com/Blaizzy/mlx-audio>
+- License type: MIT
+- License file: `mlx-audio-LICENSE.txt`
+
+## Directly imported or adapted repo-kept conversion / parity tooling (not required at runtime)
+
+This section covers the Python dependency surface used by the repo-kept conversion/parity tooling already described above:
+
+- `build/sortformer/convert_nemo_sortformer_to_gguf.py`
+- `build/voxtral/convert_voxtral_to_gguf.py`
+
+Primary direct Python dependencies used by those repo-kept converters:
+
 - NumPy
-  - Role: tensor and NPZ handling in conversion tooling.
-  - License type: BSD-3-Clause (with bundled third-party license texts)
+  - Role: tensor/array handling in both the Sortformer converter and the repo-kept Voxtral GGUF converter
+  - License type: BSD-3-Clause with bundled third-party notices
   - License file: `numpy-LICENSE.txt`
+- PyTorch (`torch`)
+  - Role: checkpoint tensor loading during Sortformer conversion/parity workflows
+  - License type: BSD-3-Clause with additional notices
+  - License files: `torch-LICENSE.txt`, `torch-NOTICE.txt`
+- PyYAML
+  - Role: NeMo archive config parsing during Sortformer conversion tooling
+  - License type: MIT
+  - License file: `PyYAML-LICENSE.txt`
 
-Full transitive tooling export:
+Checked-in tooling license snapshot:
 
-- [`tooling-full/`](https://github.com/openresearchtools/engine/tree/main/third_party/licenses/tooling-full/)
+- `tooling-full/`
+
+This folder is a repo-kept license snapshot for the current Python tooling stack. It is not part of the shipped runtime bundle.
 
 ## Runtime integration notes
 
-- Audio patch/overlay mechanism for upstream sync is maintained in [`diarize/addons/overlay/llama.cpp/`](https://github.com/openresearchtools/engine/tree/main/diarize/addons/overlay/llama.cpp/).
-- Bridge runtime integration code is maintained in [`bridge/`](https://github.com/openresearchtools/engine/tree/main/bridge/).
-- PDF orchestration modules are in [`pdf/`](https://github.com/openresearchtools/engine/tree/main/pdf/) and [`pdfvlm/`](https://github.com/openresearchtools/engine/tree/main/pdfvlm/).
+- Audio patch/overlay mechanism for upstream sync is maintained in `diarize/addons/overlay/llama.cpp/`.
+- Bridge runtime integration code is maintained in `bridge/`.
+- PDF orchestration modules are in `pdf/` and `pdfvlm/`.
 - Bridge raw-audio path supports in-memory conversion via FFmpeg when bridge is built with `LLAMA_SERVER_BRIDGE_ENABLE_FFMPEG=ON`.
 
-## Dependency mapping (Rust workspace direct deps)
+## Package-managed dependency mapping (license inventory only)
 
 ### `serde_json`
 
@@ -341,7 +307,7 @@ Full transitive tooling export:
 
 ### `clap`
 
-- Role: command-line argument parsing for Openresearchtools-Engine CLI binaries.
+- Role: command-line argument parsing for CLI binaries.
 - License type: MIT OR Apache-2.0
 - License files:
   - `clap-LICENSE-MIT.txt`
@@ -365,7 +331,7 @@ Full transitive tooling export:
 
 ### `walkdir`
 
-- Role: filesystem directory traversal in runtime file-processing paths.
+- Role: filesystem traversal in runtime file-processing paths.
 - License type: Unlicense OR MIT
 - License files:
   - `walkdir-UNLICENSE.txt`
@@ -383,7 +349,7 @@ Full transitive tooling export:
 ### `encoding_rs`
 
 - Role: encoding conversion for text handling in runtime paths.
-- License type: Apache-2.0 OR MIT (plus WHATWG text)
+- License type: Apache-2.0 OR MIT plus WHATWG text
 - License files:
   - `encoding_rs-LICENSE-MIT.txt`
   - `encoding_rs-LICENSE-APACHE.txt`
@@ -393,9 +359,8 @@ Full transitive tooling export:
 
 - Role: Rust binding layer to PDFium used by `pdf` and `pdfvlm`.
 - License type: MIT OR Apache-2.0
-- License file:
-  - `pdfium-render-LICENSE.md`
+- License file: `pdfium-render-LICENSE.md`
 
-## Rust transitive license export (workspace)
+## Rust transitive license export
 
-- Full transitive Rust crate export (Windows target, non-dev graph): [`rust-full/`](https://github.com/openresearchtools/engine/tree/main/third_party/licenses/rust-full/)
+- Full transitive Rust crate export (Windows target, non-dev graph): `rust-full/`

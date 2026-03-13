@@ -3,6 +3,7 @@
 /pdfvlm/target/
 /pdf/target/
 /out/
+/%OUT%/
 /build/out/
 /third_party/llama.cpp/build/
 /third_party/llama.cpp/out/

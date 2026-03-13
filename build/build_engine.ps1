@@ -102,6 +102,32 @@ function Resolve-PdfiumRoot {
     return $binDir
 }
 
+function Resolve-ExistingPdfiumDll {
+    param(
+        [string]$PdfiumDllPath,
+        [string]$RepoRoot
+    )
+
+    $resolved = Resolve-AbsolutePath -PathValue $PdfiumDllPath -RepoRoot $RepoRoot
+    if ([string]::IsNullOrWhiteSpace($resolved)) {
+        return ""
+    }
+    if (Test-Path -LiteralPath $resolved) {
+        return $resolved
+    }
+
+    $parentDir = Split-Path -Parent $resolved
+    $fileName = Split-Path -Leaf $resolved
+    if (-not [string]::IsNullOrWhiteSpace($parentDir) -and (Split-Path -Leaf $parentDir).Equals("bin", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $rootCandidate = Join-Path (Split-Path -Parent $parentDir) $fileName
+        if (Test-Path -LiteralPath $rootCandidate) {
+            return [System.IO.Path]::GetFullPath($rootCandidate)
+        }
+    }
+
+    return $resolved
+}
+
 function Copy-LicenseFiles {
     param(
         [string]$SourceRoot,
@@ -170,14 +196,21 @@ function Stage-RepoLicenseFiles {
 
     New-Item -ItemType Directory -Force -Path $BundleLicenseRoot | Out-Null
 
+    $licenseGenerator = Join-Path $RepoRoot "build\generate_license_bundles.ps1"
+    if (Test-Path -LiteralPath $licenseGenerator) {
+        & $licenseGenerator -RepoRoot $RepoRoot -OutputRoot $BundleLicenseRoot
+    } else {
+        Write-Warning "License bundle generator not found at '$licenseGenerator' (using checked-in LICENSES*.txt only)"
+    }
+
     $destDir = Join-Path $BundleLicenseRoot "third_party"
     New-Item -ItemType Directory -Force -Path $destDir | Out-Null
 
     $excludedTopLevelFiles = @(
         "torch-LICENSE.txt",
         "torch-NOTICE.txt",
-        "torchaudio-LICENSE.txt",
         "numpy-LICENSE.txt",
+        "PyYAML-LICENSE.txt",
         "ffmpeg-SOURCE.txt",
         "ffmpeg-SOURCE-windows-x64.txt",
         "ffmpeg-SOURCE-ubuntu-x64.txt",
@@ -292,7 +325,7 @@ if (Test-IsUnderPath -PathValue $OutDir -BasePath $repoRoot) {
 if ([string]::IsNullOrWhiteSpace($PdfiumDll)) {
     $PdfiumDll = Join-Path $buildsRoot "runtime-deps\\pdfium\\bin\\pdfium.dll"
 }
-$PdfiumDll = Resolve-AbsolutePath -PathValue $PdfiumDll -RepoRoot $repoRoot
+$PdfiumDll = Resolve-ExistingPdfiumDll -PdfiumDllPath $PdfiumDll -RepoRoot $repoRoot
 
 if ([string]::IsNullOrWhiteSpace($FfmpegBinDir)) {
     $FfmpegBinDir = Join-Path $buildsRoot "runtime-deps\\ffmpeg\\bin"

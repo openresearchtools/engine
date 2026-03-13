@@ -12,7 +12,7 @@ Reference header: `bridge/llama_server_bridge.h`.
 #include "llama_server_bridge.h"
 
 llama_server_bridge_params p = llama_server_bridge_default_params();
-p.model_path = "C:/models/embedding.gguf";
+p.model_path = "./models/embedding.gguf";
 p.embedding = 1;
 p.gpu = 1;
 
@@ -78,7 +78,7 @@ Typical JSON body:
 
 ```c
 llama_server_bridge_params p = llama_server_bridge_default_params();
-p.model_path = "C:/models/embedding.gguf";
+p.model_path = "./models/embedding.gguf";
 p.embedding = 1;
 p.gpu = 1;
 p.n_ctx = 8192;

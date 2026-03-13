@@ -18,8 +18,8 @@ Minimal PDF run on one selected GPU:
 const char *argv[] = {
     "pdf_to_markdown",
     "--pdf", "C:/docs/file.pdf",
-    "--model", "C:/models/vision.gguf",
-    "--mmproj", "C:/models/mmproj.gguf",
+    "--model", "./models/vision.gguf",
+    "--mmproj", "./models/mmproj.gguf",
     "gpu=1"
 };
 char *err = NULL;
@@ -79,6 +79,9 @@ Generation/runtime:
 - `--batch-size <int>`
 - `--parallel <int>` (used in PDF mode; image mode runs single slot)
 - `--max-retries <int>`
+- `--reasoning <on|off|auto>`
+- `--reasoning-budget <-1|0|N>`
+- `--reasoning-format <none|deepseek|deepseek-legacy>`
 
 Device/offload/split:
 - `--gpu <index>`
@@ -90,6 +93,13 @@ Device/offload/split:
 - `--split-mode <none|layer|row>`
 - `--tensor-split <csv>`
 
+Reasoning behavior:
+- If `--reasoning` is omitted, `pdfvlm.dll` does not send any reasoning flags to the bridge.
+- `--reasoning off` automatically sends `reasoning_budget 0`.
+- `--reasoning on` and `--reasoning auto` automatically send `reasoning_budget -1` unless overridden.
+- If `--reasoning` is set and `--reasoning-format` is omitted, `deepseek` is sent.
+- `--reasoning-format none` keeps visible thinking in the main markdown/text output.
+
 ## Full example (explicit split/offload control)
 
 ```c
@@ -98,8 +108,8 @@ const char *argv[] = {
     "--pdf", "C:/docs/file.pdf",
     "--pdfium-lib", "C:/app/vendor/pdfium/pdfium.dll",
     "--pages", "1,3-5",
-    "--model", "C:/models/vision.gguf",
-    "--mmproj", "C:/models/mmproj.gguf",
+    "--model", "./models/vision.gguf",
+    "--mmproj", "./models/mmproj.gguf",
     "--out", "C:/out/file.md",
     "--n-ctx", "32768",
     "--batch-size", "2048",
@@ -119,4 +129,33 @@ if (rc != 0) {
 if (err) {
     pdfvlm_free_c_string(err);
 }
+```
+
+## Reasoning example
+
+```c
+const char *argv[] = {
+    "pdf_to_markdown",
+    "--pdf", "C:/docs/file.pdf",
+    "--model", "./models/vision.gguf",
+    "--mmproj", "./models/mmproj.gguf",
+    "--gpu", "0",
+    "--reasoning", "off",
+    "--out", "C:/out/file.md"
+};
+char *err = NULL;
+int rc = pdfvlm_run_from_argv((int32_t)(sizeof(argv) / sizeof(argv[0])), argv, &err);
+if (rc != 0) {
+    // handle err
+}
+if (err) {
+    pdfvlm_free_c_string(err);
+}
+```
+
+Visible reasoning example:
+
+```c
+"--reasoning", "on",
+"--reasoning-format", "none",
 ```

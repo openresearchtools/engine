@@ -49,6 +49,7 @@ struct Args {
     n_gpu_layers: i32,
     main_gpu: i32,
     mmproj_use_gpu: i32,
+    reasoning: ReasoningCliOptions,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +74,31 @@ struct ImageArgs {
     n_gpu_layers: i32,
     main_gpu: i32,
     mmproj_use_gpu: i32,
+    reasoning: ReasoningCliOptions,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ReasoningCliOptions {
+    mode: Option<String>,
+    budget: Option<i32>,
+    format: Option<String>,
+}
+
+impl ReasoningCliOptions {
+    fn effective_budget(&self) -> Option<i32> {
+        match self.mode.as_deref() {
+            Some("off") => Some(0),
+            Some(_) => Some(self.budget.unwrap_or(-1)),
+            None => None,
+        }
+    }
+
+    fn effective_format(&self) -> Option<&str> {
+        match self.mode.as_deref() {
+            Some(_) => Some(self.format.as_deref().unwrap_or("deepseek")),
+            None => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -181,6 +207,7 @@ impl SharedBridge {
         image_bytes: &[u8],
         n_predict: i32,
         use_retry_penalties: bool,
+        reasoning: &ReasoningCliOptions,
     ) -> Result<VlmResponse, Box<dyn std::error::Error>> {
         if self.ptr.is_null() {
             return Err("Bridge is null".into());
@@ -190,6 +217,15 @@ impl SharedBridge {
         }
 
         let c_prompt = CString::new(prompt)?;
+        let c_reasoning = reasoning
+            .mode
+            .as_ref()
+            .map(|value| CString::new(value.as_str()))
+            .transpose()?;
+        let c_reasoning_format = reasoning
+            .effective_format()
+            .map(CString::new)
+            .transpose()?;
         let mut req: llama_server_bridge_vlm_request =
             unsafe { llama_server_bridge_default_vlm_request() };
         req.prompt = c_prompt.as_ptr();
@@ -202,6 +238,15 @@ impl SharedBridge {
         req.top_k = -1;
         req.min_p = -1.0;
         req.seed = -1;
+        if let Some(value) = c_reasoning.as_ref() {
+            req.reasoning = value.as_ptr();
+        }
+        if let Some(value) = reasoning.effective_budget() {
+            req.reasoning_budget = value;
+        }
+        if let Some(value) = c_reasoning_format.as_ref() {
+            req.reasoning_format = value.as_ptr();
+        }
         if use_retry_penalties {
             req.repeat_last_n = 256;
             req.repeat_penalty = 1.08;
@@ -307,6 +352,9 @@ Options:
   --n-gpu-layers    GPU layers to offload (default: -1).
   --main-gpu        Primary GPU index inside selected devices (default: -1).
   --mmproj-use-gpu  MMProj device selection: -1=auto (default), 1=GPU, 0=CPU.
+  --reasoning       Reasoning mode: on|off|auto.
+  --reasoning-budget  Hard reasoning token budget: -1|0|N.
+  --reasoning-format  Reasoning response format: none|deepseek|deepseek-legacy.
   --split-mode      Tensor split mode: none|layer|row.
   --tensor-split    Tensor split ratios CSV (e.g. 0.6,0.4).
   -h, --help        Show this help.
@@ -350,9 +398,63 @@ const PROMPT_STOP_KEYS: &[&str] = &[
     "--n-gpu-layers",
     "--main-gpu",
     "--mmproj-use-gpu",
+    "--reasoning",
+    "--reasoning-budget",
+    "--reasoning-format",
     "-h",
     "--help",
 ];
+
+fn parse_reasoning_cli_options(
+    reasoning: Option<String>,
+    reasoning_budget: Option<i32>,
+    reasoning_format: Option<String>,
+) -> Result<ReasoningCliOptions, String> {
+    let Some(mode) = reasoning else {
+        if reasoning_budget.is_some() {
+            return Err("--reasoning-budget requires --reasoning".to_string());
+        }
+        if reasoning_format.is_some() {
+            return Err("--reasoning-format requires --reasoning".to_string());
+        }
+        return Ok(ReasoningCliOptions::default());
+    };
+
+    let normalized_mode = match mode.trim().to_ascii_lowercase().as_str() {
+        "on" => "on",
+        "off" => "off",
+        "auto" => "auto",
+        _ => return Err("invalid --reasoning, expected on/off/auto".to_string()),
+    };
+
+    if let Some(budget) = reasoning_budget {
+        if budget < -1 {
+            return Err("--reasoning-budget must be >= -1".to_string());
+        }
+    }
+
+    let normalized_format = if let Some(format) = reasoning_format {
+        match format.trim().to_ascii_lowercase().as_str() {
+            "none" => "none".to_string(),
+            "deepseek" => "deepseek".to_string(),
+            "deepseek-legacy" => "deepseek-legacy".to_string(),
+            _ => {
+                return Err(
+                    "invalid --reasoning-format, expected none/deepseek/deepseek-legacy"
+                        .to_string(),
+                )
+            }
+        }
+    } else {
+        "deepseek".to_string()
+    };
+
+    Ok(ReasoningCliOptions {
+        mode: Some(normalized_mode.to_string()),
+        budget: reasoning_budget,
+        format: Some(normalized_format),
+    })
+}
 
 fn parse_spanned_arg_value(
     argv: &[String],
@@ -530,6 +632,9 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
     let mut n_gpu_layers: i32 = -1;
     let mut main_gpu: i32 = -1;
     let mut mmproj_use_gpu: i32 = -1;
+    let mut reasoning: Option<String> = None;
+    let mut reasoning_budget: Option<i32> = None;
+    let mut reasoning_format: Option<String> = None;
 
     let mut i = 1usize;
     while i < argv.len() {
@@ -708,6 +813,31 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
                     .parse::<i32>()
                     .map_err(|_| format!("Invalid --mmproj-use-gpu value: {}", argv[i]))?;
             }
+            "--reasoning" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--reasoning requires a value".to_string());
+                }
+                reasoning = Some(argv[i].clone());
+            }
+            "--reasoning-budget" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--reasoning-budget requires a value".to_string());
+                }
+                reasoning_budget = Some(
+                    argv[i]
+                        .parse::<i32>()
+                        .map_err(|_| format!("Invalid --reasoning-budget value: {}", argv[i]))?,
+                );
+            }
+            "--reasoning-format" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--reasoning-format requires a value".to_string());
+                }
+                reasoning_format = Some(argv[i].clone());
+            }
             "--parallel" => {
                 i += 1;
                 if i >= argv.len() {
@@ -788,6 +918,8 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
         image_path.with_extension("md")
     };
 
+    let reasoning = parse_reasoning_cli_options(reasoning, reasoning_budget, reasoning_format)?;
+
     Ok(ImageArgs {
         image_path,
         model_path,
@@ -809,6 +941,7 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
         n_gpu_layers,
         main_gpu,
         mmproj_use_gpu,
+        reasoning,
     })
 }
 
@@ -911,6 +1044,9 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut n_gpu_layers: i32 = -1;
     let mut main_gpu: i32 = -1;
     let mut mmproj_use_gpu: i32 = -1;
+    let mut reasoning: Option<String> = None;
+    let mut reasoning_budget: Option<i32> = None;
+    let mut reasoning_format: Option<String> = None;
 
     let mut i = 1usize;
     while i < argv.len() {
@@ -1112,6 +1248,31 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                     .parse::<i32>()
                     .map_err(|_| format!("Invalid --mmproj-use-gpu value: {}", argv[i]))?;
             }
+            "--reasoning" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--reasoning requires a value".to_string());
+                }
+                reasoning = Some(argv[i].clone());
+            }
+            "--reasoning-budget" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--reasoning-budget requires a value".to_string());
+                }
+                reasoning_budget = Some(
+                    argv[i]
+                        .parse::<i32>()
+                        .map_err(|_| format!("Invalid --reasoning-budget value: {}", argv[i]))?,
+                );
+            }
+            "--reasoning-format" => {
+                i += 1;
+                if i >= argv.len() {
+                    return Err("--reasoning-format requires a value".to_string());
+                }
+                reasoning_format = Some(argv[i].clone());
+            }
             "-h" | "--help" => return Err(usage().to_string()),
             other => {
                 if let Some(value) = other.strip_prefix("gpu=").or_else(|| other.strip_prefix("--gpu=")) {
@@ -1205,6 +1366,8 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         pdf_path.with_extension("md")
     };
 
+    let reasoning = parse_reasoning_cli_options(reasoning, reasoning_budget, reasoning_format)?;
+
     Ok(Args {
         pdf_path,
         pdfium_dll,
@@ -1229,6 +1392,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         n_gpu_layers,
         main_gpu,
         mmproj_use_gpu,
+        reasoning,
     })
 }
 
@@ -1485,7 +1649,13 @@ fn run_image_to_markdown_cli_from_args(
     let mut attempts = 0usize;
     let response = loop {
         let retry_attempt = attempts > 0;
-        let result = bridge.run_vlm(&args.prompt, &png_bytes, args.n_predict, retry_attempt);
+        let result = bridge.run_vlm(
+            &args.prompt,
+            &png_bytes,
+            args.n_predict,
+            retry_attempt,
+            &args.reasoning,
+        );
         attempts += 1;
         match result {
             Ok(r) => {
@@ -1633,6 +1803,7 @@ pub fn run_pdf_to_markdown_cli_from_args(argv: &[String]) -> Result<(), Box<dyn 
             let prompt = args.prompt.clone();
             let n_predict = args.n_predict;
             let max_retries = args.max_retries;
+            let reasoning = args.reasoning.clone();
 
             scope.spawn(move || loop {
                 let maybe_page = {
@@ -1656,6 +1827,7 @@ pub fn run_pdf_to_markdown_cli_from_args(argv: &[String]) -> Result<(), Box<dyn 
                         &page_item.png_bytes,
                         n_predict,
                         retry_attempt,
+                        &reasoning,
                     );
                     seconds += started.elapsed().as_secs_f64();
                     attempts += 1;

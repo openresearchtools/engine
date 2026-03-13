@@ -31,7 +31,7 @@ As long as these signatures remain stable, Rust call sites do not change.
 
 ## Upstream patch footprint
 
-Upstream touch points are intentionally small:
+Upstream touch points are:
 
 - `llama.cpp/CMakeLists.txt`: add `LLAMA_BUILD_MARKDOWN_BRIDGE` option + `add_subdirectory(MARKDOWN/bridge)`.
 - `llama.cpp/MARKDOWN/bridge/*`: bridge source and CMake target.

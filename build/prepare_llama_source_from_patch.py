@@ -16,19 +16,6 @@ from pathlib import Path
 import re
 
 
-EXTRA_TOOL_FILES = (
-    "pyannote/CMakeLists.txt",
-    "pyannote/pyannote-align.cpp",
-    "pyannote/pyannote-diarize.cpp",
-    "pyannote/pyannote-entrypoints.h",
-    "pyannote/pyannote-inspect.cpp",
-    "server/inproc-pipeline-repro.cpp",
-    "whisper/whisper-cli-entrypoint.cpp",
-    "whisper/whisper-cli-entrypoint.h",
-    "whisper/whisper-common-audio.cpp",
-)
-
-
 def parse_args() -> argparse.Namespace:
     script_dir = Path(__file__).resolve().parent
     repo_root = script_dir.parent
@@ -38,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo-root", type=Path, default=repo_root)
     parser.add_argument("--out-dir", type=Path, default=default_out)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--skip-patch", action="store_true")
     return parser.parse_args()
 
 
@@ -61,9 +49,24 @@ def read_text(path: Path) -> str:
 def copy_tree_replace(src: Path, dst: Path) -> None:
     if not src.is_dir():
         fail(f"Source directory not found: {src}")
+    if src.resolve() == dst.resolve():
+        fail(f"Refusing to copy a directory onto itself: {src}")
     if dst.exists():
         shutil.rmtree(dst)
     shutil.copytree(src, dst)
+
+
+def overlay_tree(src_root: Path, dst_root: Path) -> None:
+    if not src_root.is_dir():
+        fail(f"Overlay directory not found: {src_root}")
+    for src in sorted(src_root.rglob("*")):
+        rel = src.relative_to(src_root)
+        dst = dst_root / rel
+        if src.is_dir():
+            dst.mkdir(parents=True, exist_ok=True)
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
 
 
 def ensure_bridge_hooks(cmake_path: Path) -> None:
@@ -118,21 +121,30 @@ def main() -> None:
 
     if is_subpath(out_dir, repo_root):
         fail(f"OutDir must be outside the repo. Current: {out_dir}")
+    if is_subpath(out_dir, repo_root / "third_party"):
+        fail(f"OutDir must not target repo third_party. Current: {out_dir}")
 
     llama_repo = repo_root / "third_party" / "llama.cpp"
     whisper_repo = repo_root / "third_party" / "whisper.cpp"
     bridge_src = repo_root / "bridge"
     overlay_root = repo_root / "diarize" / "addons" / "overlay" / "llama.cpp" / "tools"
-    patch_file = repo_root / "diarize" / "addons" / "patches" / "0300-llama-unified-audio.patch"
+    patch_dir = repo_root / "diarize" / "addons" / "patches"
+    patch_files = sorted(patch_dir.glob("*.patch"))
 
     if not llama_repo.is_dir():
         fail(f"Required repo source not found: {llama_repo}")
-    if not whisper_repo.is_dir():
-        fail(f"Required repo source not found: {whisper_repo}")
+    if not whisper_repo.is_dir() or not (whisper_repo / "CMakeLists.txt").is_file():
+        fallback_whisper_repo = llama_repo / "whisper.cpp"
+        if fallback_whisper_repo.is_dir() and (fallback_whisper_repo / "CMakeLists.txt").is_file():
+            whisper_repo = fallback_whisper_repo
+        else:
+            fail(f"Required repo source not found: {whisper_repo}")
     if not bridge_src.is_dir():
         fail(f"Bridge source dir not found: {bridge_src}")
-    if not patch_file.is_file():
-        fail(f"Required patch not found: {patch_file}")
+    if not patch_dir.is_dir():
+        fail(f"Required patch directory not found: {patch_dir}")
+    if not patch_files:
+        fail(f"No patch files found in: {patch_dir}")
 
     llama_cmake = llama_repo / "CMakeLists.txt"
     whisper_cmake = whisper_repo / "CMakeLists.txt"
@@ -163,60 +175,65 @@ def main() -> None:
     copy_tree_replace(whisper_repo, whisper_in_tree)
 
     whisper_sibling = out_dir.parent / "whisper.cpp"
+    if whisper_sibling.resolve() == whisper_repo.resolve():
+        fail(f"Refusing to stage whisper sibling onto repo source tree: {whisper_sibling}")
     copy_tree_replace(whisper_repo, whisper_sibling)
 
     bridge_dst = out_dir / "MARKDOWN" / "bridge"
     copy_tree_replace(bridge_src, bridge_dst)
 
-    for rel in EXTRA_TOOL_FILES:
-        src = overlay_root / rel
-        if not src.is_file():
-            fail(f"Missing required add-on source file: {src}")
-        dst = out_dir / "tools" / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if dst.exists():
-            fail(f"Refusing to overwrite existing llama.cpp file: {dst}")
-        shutil.copy2(src, dst)
-
     ensure_bridge_hooks(out_dir / "CMakeLists.txt")
 
-    run_git(out_dir, ["init"])
-    run_git(
-        out_dir,
-        [
-            "apply",
-            "--check",
-            "--ignore-space-change",
-            "--ignore-whitespace",
-            str(patch_file),
-        ],
-    )
-    run_git(
-        out_dir,
-        [
-            "apply",
-            "--whitespace=nowarn",
-            "--ignore-space-change",
-            "--ignore-whitespace",
-            str(patch_file),
-        ],
-    )
+    status_count = 0
+    if not args.skip_patch:
+        run_git(out_dir, ["init"])
+        for patch_file in patch_files:
+            run_git(
+                out_dir,
+                [
+                    "apply",
+                    "--check",
+                    "--ignore-space-change",
+                    "--ignore-whitespace",
+                    str(patch_file),
+                ],
+            )
+            run_git(
+                out_dir,
+                [
+                    "apply",
+                    "--whitespace=nowarn",
+                    "--ignore-space-change",
+                    "--ignore-whitespace",
+                    str(patch_file),
+                ],
+            )
 
-    status = subprocess.run(
-        ["git", "-C", str(out_dir), "status", "--porcelain"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
-    status_count = len([line for line in status.stdout.splitlines() if line.strip()])
+        status = subprocess.run(
+            ["git", "-C", str(out_dir), "status", "--porcelain"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        status_count = len([line for line in status.stdout.splitlines() if line.strip()])
+        git_dir = out_dir / ".git"
+        if git_dir.exists():
+            shutil.rmtree(git_dir)
+
+    overlay_tree(overlay_root, out_dir / "tools")
 
     print("Prepared llama source from repo snapshot:")
     print(f"  Source: {llama_repo}")
     print(f"  OutDir: {out_dir}")
     print(f"  Whisper sibling: {whisper_sibling}")
     print(f"  Bridge source staged at: {bridge_dst}")
-    print(f"  Patch: {patch_file}")
+    if args.skip_patch:
+        print("  Patches: <skipped>")
+    else:
+        print("  Patches:")
+        for patch_file in patch_files:
+            print(f"    - {patch_file}")
     print(f"  Working tree entries after patch: {status_count}")
     print(f"  Build root hint: {builds_root}")
 

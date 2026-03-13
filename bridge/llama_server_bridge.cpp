@@ -3,22 +3,31 @@
 #include "common.h"
 #include "server-common.h"
 #include "server-context.h"
+#include "tools/realtime/backend-factory.h"
+#include "tools/realtime/stream-manager.h"
 
 #include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cctype>
 #include <climits>
+#include <chrono>
+#include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <functional>
+#include <iomanip>
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -59,8 +68,273 @@ struct llama_server_bridge {
     bool backend_acquired = false;
 };
 
+struct llama_server_bridge_realtime {
+    common_params params = common_params();
+    llama::realtime::stream_manager manager;
+    int64_t session_id = 0;
+    bool backend_acquired = false;
+    std::shared_ptr<llama::realtime::loaded_backend_model> loaded_model;
+
+    mutable std::mutex error_mutex;
+    std::string last_error;
+};
+
+struct llama_server_bridge_realtime_model_impl {
+    common_params params = common_params();
+    bool backend_acquired = false;
+    int32_t backend_kind = LLAMA_SERVER_BRIDGE_REALTIME_BACKEND_AUTO;
+    std::string model_path;
+    std::string resolved_runtime_backend_name;
+    llama::realtime::stream_session_config default_session_cfg = {};
+
+    mutable std::mutex error_mutex;
+    std::string last_error;
+};
+
+struct audio_session_event_record {
+    uint64_t seq_no = 0;
+    int32_t kind = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_NOTICE;
+    uint32_t flags = 0;
+    uint64_t start_sample = 0;
+    uint64_t end_sample = 0;
+    int32_t speaker_id = -1;
+    uint32_t item_id = 0;
+    std::string text;
+    std::string detail;
+};
+
+struct owned_bridge_params {
+    llama_server_bridge_params raw = {};
+    std::string model_path;
+    std::string mmproj_path;
+    std::string devices;
+    std::string tensor_split;
+
+    void assign_defaults(void) {
+        raw = llama_server_bridge_default_params();
+    }
+
+    void assign(const llama_server_bridge_params * params) {
+        assign_defaults();
+        if (params == nullptr) {
+            return;
+        }
+        raw = *params;
+        model_path = params->model_path != nullptr ? params->model_path : "";
+        mmproj_path = params->mmproj_path != nullptr ? params->mmproj_path : "";
+        devices = params->devices != nullptr ? params->devices : "";
+        tensor_split = params->tensor_split != nullptr ? params->tensor_split : "";
+    }
+
+    llama_server_bridge_params borrow(void) const {
+        auto out = raw;
+        out.model_path = model_path.empty() ? nullptr : model_path.c_str();
+        out.mmproj_path = mmproj_path.empty() ? nullptr : mmproj_path.c_str();
+        out.devices = devices.empty() ? nullptr : devices.c_str();
+        out.tensor_split = tensor_split.empty() ? nullptr : tensor_split.c_str();
+        return out;
+    }
+};
+
+struct owned_realtime_params {
+    llama_server_bridge_realtime_params raw = {};
+    std::string model_path;
+    std::string backend_name;
+
+    void assign_defaults(void) {
+        raw = llama_server_bridge_default_realtime_params();
+    }
+
+    void assign(const llama_server_bridge_realtime_params * params) {
+        assign_defaults();
+        if (params == nullptr) {
+            return;
+        }
+        raw = *params;
+        model_path = params->model_path != nullptr ? params->model_path : "";
+        backend_name = params->backend_name != nullptr ? params->backend_name : "";
+    }
+
+    llama_server_bridge_realtime_params borrow(void) const {
+        auto out = raw;
+        out.model_path = model_path.empty() ? nullptr : model_path.c_str();
+        out.backend_name = backend_name.empty() ? nullptr : backend_name.c_str();
+        return out;
+    }
+};
+
+struct owned_audio_transcription_params {
+    owned_bridge_params bridge_params;
+    std::string metadata_json;
+    int32_t mode = LLAMA_SERVER_BRIDGE_AUDIO_TRANSCRIPTION_MODE_OFFLINE_ROUTE;
+    owned_realtime_params realtime_params;
+
+    void assign(const llama_server_bridge_audio_transcription_params * params) {
+        bridge_params.assign(params != nullptr ? &params->bridge_params : nullptr);
+        metadata_json = (params != nullptr && params->metadata_json != nullptr) ? params->metadata_json : "";
+        mode = params != nullptr
+            ? params->mode
+            : LLAMA_SERVER_BRIDGE_AUDIO_TRANSCRIPTION_MODE_OFFLINE_ROUTE;
+        realtime_params.assign(params != nullptr ? &params->realtime_params : nullptr);
+    }
+};
+
+struct llama_server_bridge_audio_session {
+    llama_server_bridge_audio_session_params params = {};
+    std::vector<float> audio_samples;
+    std::vector<size_t> chunk_sizes;
+    bool audio_flushed = false;
+
+    uint64_t next_seq_no = 1;
+    uint32_t next_item_id = 1;
+
+    std::deque<audio_session_event_record> event_queue;
+    mutable std::mutex mutex;
+    std::condition_variable cv;
+
+    mutable std::mutex error_mutex;
+    std::string last_error;
+
+    llama_server_bridge_realtime * diarization_bridge = nullptr;
+    bool diarization_started = false;
+    bool diarization_stopped = false;
+
+    llama_server_bridge_realtime * transcription_bridge = nullptr;
+    owned_audio_transcription_params transcription_params = {};
+    bool transcription_requested = false;
+    bool transcription_started = false;
+    bool transcription_running = false;
+    bool transcription_completed = false;
+    bool transcription_stop_requested = false;
+    bool transcription_native_realtime = false;
+    std::thread transcription_thread;
+};
+
 static std::mutex g_backend_mutex;
 static int g_backend_refcount = 0;
+static std::mutex g_realtime_model_cache_mutex;
+struct cached_realtime_model_entry {
+    std::shared_ptr<llama::realtime::loaded_backend_model> model;
+    std::shared_ptr<void> backend_hold;
+};
+static std::unordered_map<std::string, std::shared_ptr<cached_realtime_model_entry>> g_realtime_model_cache;
+
+static void acquire_backend(const common_params & params);
+static void release_backend();
+
+static bool realtime_trace_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char * env = std::getenv("LLAMA_BRIDGE_RT_TRACE");
+        enabled = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+    }
+    return enabled != 0;
+}
+
+#define RT_TRACE(...)                                                      \
+    do {                                                                   \
+        if (realtime_trace_enabled()) {                                    \
+            std::fprintf(stderr, __VA_ARGS__);                             \
+            std::fprintf(stderr, "\n");                                    \
+            std::fflush(stderr);                                           \
+        }                                                                  \
+    } while (0)
+
+static std::string make_realtime_model_cache_key(const llama::realtime::backend_model_params & params) {
+    std::ostringstream out;
+    out << static_cast<int>(params.kind) << '\n';
+    out << params.backend_name << '\n';
+    out << params.model_path;
+    return out.str();
+}
+
+static void prune_realtime_model_cache_locked(void) {
+    (void) g_realtime_model_cache;
+}
+
+static std::shared_ptr<llama::realtime::loaded_backend_model> load_backend_model_maybe_cached(
+    const llama::realtime::backend_model_params & params,
+    bool * out_cache_hit = nullptr) {
+
+    if (out_cache_hit != nullptr) {
+        *out_cache_hit = false;
+    }
+
+    if (!llama::realtime::backend_supports_model_preload(params.kind)) {
+        RT_TRACE("rt_load_model: preload unsupported kind=%d", static_cast<int>(params.kind));
+        return llama::realtime::load_backend_model(params);
+    }
+
+    const std::string cache_key = make_realtime_model_cache_key(params);
+    {
+        std::lock_guard<std::mutex> lock(g_realtime_model_cache_mutex);
+        auto it = g_realtime_model_cache.find(cache_key);
+        if (it != g_realtime_model_cache.end()) {
+            RT_TRACE("rt_load_model: cache hit kind=%d model=%s backend=%s",
+                static_cast<int>(params.kind),
+                params.model_path.c_str(),
+                params.backend_name.c_str());
+            if (out_cache_hit != nullptr) {
+                *out_cache_hit = true;
+            }
+            return it->second->model;
+        }
+    }
+
+    common_params init_params = common_params();
+    RT_TRACE("rt_load_model: cache miss kind=%d model=%s backend=%s",
+        static_cast<int>(params.kind),
+        params.model_path.c_str(),
+        params.backend_name.c_str());
+    acquire_backend(init_params);
+    try {
+        RT_TRACE("rt_load_model: backend acquired");
+        auto loaded = llama::realtime::load_backend_model(params);
+        RT_TRACE("rt_load_model: model loaded");
+        auto entry = std::make_shared<cached_realtime_model_entry>();
+        entry->model = std::move(loaded);
+        entry->backend_hold = std::shared_ptr<void>(
+            reinterpret_cast<void *>(static_cast<uintptr_t>(1)),
+            [](void *) {
+                release_backend();
+            });
+
+        std::lock_guard<std::mutex> lock(g_realtime_model_cache_mutex);
+        auto it = g_realtime_model_cache.find(cache_key);
+        if (it != g_realtime_model_cache.end()) {
+            RT_TRACE("rt_load_model: duplicate cache fill kind=%d", static_cast<int>(params.kind));
+            entry.reset();
+            if (out_cache_hit != nullptr) {
+                *out_cache_hit = true;
+            }
+            return it->second->model;
+        }
+        g_realtime_model_cache[cache_key] = entry;
+        prune_realtime_model_cache_locked();
+        RT_TRACE("rt_load_model: cache store complete size=%zu", g_realtime_model_cache.size());
+        return entry->model;
+    } catch (...) {
+        RT_TRACE("rt_load_model: exception path, releasing backend");
+        release_backend();
+        throw;
+    }
+}
+
+static void set_realtime_error(llama_server_bridge_realtime * bridge, const std::string & message) {
+    if (bridge == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(bridge->error_mutex);
+    bridge->last_error = message;
+}
+
+static void set_realtime_model_error(llama_server_bridge_realtime_model_impl * model, const std::string & message) {
+    if (model == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(model->error_mutex);
+    model->last_error = message;
+}
 
 template <typename T, typename = void>
 struct has_post_audio_transcriptions : std::false_type {};
@@ -569,6 +843,257 @@ static std::string normalize_error(const std::string & msg) {
         return "unknown bridge error";
     }
     return msg;
+}
+
+static void set_audio_session_error(
+    llama_server_bridge_audio_session * session,
+    const std::string & message) {
+
+    if (session == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(session->error_mutex);
+    session->last_error = message;
+}
+
+static uint64_t seconds_to_samples(double sec, uint32_t sample_rate_hz) {
+    if (!(sec > 0.0) || !std::isfinite(sec) || sample_rate_hz == 0) {
+        return 0;
+    }
+    const double scaled = sec * static_cast<double>(sample_rate_hz);
+    if (scaled <= 0.0) {
+        return 0;
+    }
+    if (scaled >= static_cast<double>(UINT64_MAX)) {
+        return UINT64_MAX;
+    }
+    return static_cast<uint64_t>(std::llround(scaled));
+}
+
+static void push_audio_session_event_locked(
+    llama_server_bridge_audio_session * session,
+    audio_session_event_record event) {
+
+    if (session == nullptr) {
+        return;
+    }
+    event.seq_no = session->next_seq_no++;
+    if (session->params.event_queue_capacity > 0) {
+        while (session->event_queue.size() >= session->params.event_queue_capacity) {
+            session->event_queue.pop_front();
+        }
+    }
+    session->event_queue.push_back(std::move(event));
+    session->cv.notify_all();
+}
+
+static void push_audio_session_event(
+    llama_server_bridge_audio_session * session,
+    int32_t kind,
+    uint32_t flags,
+    uint64_t start_sample,
+    uint64_t end_sample,
+    int32_t speaker_id,
+    uint32_t item_id,
+    const std::string & text,
+    const std::string & detail) {
+
+    if (session == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(session->mutex);
+    audio_session_event_record event = {};
+    event.kind = kind;
+    event.flags = flags;
+    event.start_sample = start_sample;
+    event.end_sample = end_sample;
+    event.speaker_id = speaker_id;
+    event.item_id = item_id;
+    event.text = text;
+    event.detail = detail;
+    push_audio_session_event_locked(session, std::move(event));
+}
+
+static int32_t fail_audio_session(
+    llama_server_bridge_audio_session * session,
+    const std::string & message,
+    bool emit_event = true) {
+
+    const std::string normalized = normalize_error(message);
+    set_audio_session_error(session, normalized);
+    if (emit_event) {
+        push_audio_session_event(
+            session,
+            LLAMA_SERVER_BRIDGE_AUDIO_EVENT_ERROR,
+            LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FINAL,
+            0,
+            0,
+            -1,
+            0,
+            "",
+            normalized);
+    }
+    return -1;
+}
+
+static std::vector<uint8_t> f32_mono_to_pcm16le_bytes(const std::vector<float> & samples) {
+    std::vector<uint8_t> out;
+    out.resize(samples.size() * sizeof(int16_t));
+    auto * dst = reinterpret_cast<int16_t *>(out.data());
+    for (size_t i = 0; i < samples.size(); ++i) {
+        const float clamped = std::clamp(samples[i], -1.0f, 1.0f);
+        const float scaled = clamped >= 0.0f ? clamped * 32767.0f : clamped * 32768.0f;
+        dst[i] = static_cast<int16_t>(std::lrint(scaled));
+    }
+    return out;
+}
+
+static std::vector<float> pcm16le_bytes_to_f32_mono(const uint8_t * bytes, size_t byte_count) {
+    std::vector<float> out;
+    if (bytes == nullptr || byte_count < sizeof(int16_t)) {
+        return out;
+    }
+    const size_t n = byte_count / sizeof(int16_t);
+    out.resize(n);
+    const auto * src = reinterpret_cast<const int16_t *>(bytes);
+    for (size_t i = 0; i < n; ++i) {
+        out[i] = static_cast<float>(src[i]) / 32768.0f;
+    }
+    return out;
+}
+
+static bool wav_payload_to_pcm16le(
+    const std::vector<uint8_t> & wav_bytes,
+    std::vector<uint8_t> & pcm16le,
+    std::string & error) {
+
+    pcm16le.clear();
+    error.clear();
+    if (wav_bytes.size() < 44) {
+        error = "decoded WAV payload is too small";
+        return false;
+    }
+    pcm16le.assign(wav_bytes.begin() + 44, wav_bytes.end());
+    if (pcm16le.empty()) {
+        error = "decoded WAV payload contains no PCM data";
+        return false;
+    }
+    return true;
+}
+
+static uint32_t next_audio_session_item_id_locked(llama_server_bridge_audio_session * session) {
+    if (session == nullptr) {
+        return 0;
+    }
+    return session->next_item_id++;
+}
+
+static void join_audio_session_transcription_thread(llama_server_bridge_audio_session * session) {
+    if (session == nullptr) {
+        return;
+    }
+    if (session->transcription_thread.joinable()) {
+        session->transcription_thread.join();
+    }
+}
+
+static void destroy_realtime_bridge(llama_server_bridge_realtime * bridge) {
+    if (bridge != nullptr) {
+        llama_server_bridge_realtime_destroy(bridge);
+    }
+}
+
+static std::string audio_session_speaker_label(int32_t speaker_id) {
+    if (speaker_id < 0) {
+        return "UNASSIGNED";
+    }
+    std::ostringstream oss;
+    oss << "SPEAKER_" << std::setw(2) << std::setfill('0') << speaker_id;
+    return oss.str();
+}
+
+static bool build_audio_session_timeline_metadata(
+    const std::string & input_metadata_json,
+    std::string & out_metadata_json,
+    std::string & error) {
+
+    error.clear();
+    json metadata = json::object();
+    if (!input_metadata_json.empty()) {
+        try {
+            metadata = json::parse(input_metadata_json);
+        } catch (const std::exception & e) {
+            error = std::string("invalid audio session transcription metadata_json: ") + e.what();
+            return false;
+        }
+        if (!metadata.is_object()) {
+            error = "audio session transcription metadata_json must be a JSON object";
+            return false;
+        }
+    }
+
+    metadata["mode"] = "timeline";
+    if (metadata.find("custom") == metadata.end()) {
+        metadata["custom"] = "default";
+    }
+    out_metadata_json = metadata.dump();
+    return true;
+}
+
+static void emit_transcription_timeline_events(
+    llama_server_bridge_audio_session * session,
+    const json & root_json,
+    uint32_t base_flags) {
+
+    if (session == nullptr || !root_json.is_object()) {
+        return;
+    }
+
+    const json timeline = json_value(root_json, "timeline", json::object());
+    const json pieces = json_value(timeline, "whisper_pieces", json::array());
+    const json words = json_value(timeline, "words", json::array());
+
+    auto emit_items = [&](const json & items, int32_t kind, const char * text_key) {
+        if (!items.is_array()) {
+            return;
+        }
+        for (const auto & item : items) {
+            if (!item.is_object()) {
+                continue;
+            }
+            const double start_sec = std::max(0.0, json_value(item, "start_sec", 0.0));
+            const double end_sec = std::max(start_sec, json_value(item, "end_sec", start_sec));
+            const std::string text = json_value(item, text_key, std::string());
+            json detail_json = json::object();
+            if (item.contains("start_word_index")) {
+                detail_json["start_word_index"] = json_value(item, "start_word_index", int64_t(0));
+            }
+            if (item.contains("end_word_index")) {
+                detail_json["end_word_index"] = json_value(item, "end_word_index", int64_t(0));
+            }
+            if (item.contains("num_words")) {
+                detail_json["num_words"] = json_value(item, "num_words", int64_t(0));
+            }
+            uint32_t item_id = 0;
+            {
+                std::lock_guard<std::mutex> lock(session->mutex);
+                item_id = next_audio_session_item_id_locked(session);
+            }
+            push_audio_session_event(
+                session,
+                kind,
+                base_flags | LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FINAL,
+                seconds_to_samples(start_sec, session->params.expected_input_sample_rate_hz),
+                seconds_to_samples(end_sec, session->params.expected_input_sample_rate_hz),
+                -1,
+                item_id,
+                text,
+                detail_json.empty() ? std::string() : detail_json.dump());
+        }
+    };
+
+    emit_items(words, LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_WORD_COMMIT, "word");
+    emit_items(pieces, LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT, "text");
 }
 
 static std::string base64_encode_bytes(const uint8_t * data, size_t len) {
@@ -1101,6 +1626,83 @@ static std::string build_audio_body_with_base64(
     return metadata.dump();
 }
 
+static constexpr int32_t LLAMA_SERVER_BRIDGE_REASONING_BUDGET_UNSET = INT32_MIN;
+
+enum class bridge_reasoning_mode {
+    unset,
+    on,
+    off,
+    auto_mode,
+};
+
+static bridge_reasoning_mode parse_bridge_reasoning_mode(const char * value) {
+    if (value == nullptr || value[0] == '\0') {
+        return bridge_reasoning_mode::unset;
+    }
+
+    const std::string mode(value);
+    if (mode == "on") {
+        return bridge_reasoning_mode::on;
+    }
+    if (mode == "off") {
+        return bridge_reasoning_mode::off;
+    }
+    if (mode == "auto") {
+        return bridge_reasoning_mode::auto_mode;
+    }
+
+    throw std::invalid_argument("reasoning must be one of: on, off, auto");
+}
+
+static std::string normalize_bridge_reasoning_format(const char * value) {
+    if (value == nullptr || value[0] == '\0') {
+        return "deepseek";
+    }
+
+    const std::string format(value);
+    if (format == "none" || format == "deepseek" || format == "deepseek-legacy") {
+        return format;
+    }
+
+    throw std::invalid_argument(
+        "reasoning_format must be one of: none, deepseek, deepseek-legacy");
+}
+
+template <typename RequestT>
+static void apply_bridge_reasoning_options(const RequestT * req, json & body) {
+    const bridge_reasoning_mode mode = parse_bridge_reasoning_mode(req->reasoning);
+    const bool has_reasoning = mode != bridge_reasoning_mode::unset;
+    const bool has_budget = req->reasoning_budget != LLAMA_SERVER_BRIDGE_REASONING_BUDGET_UNSET;
+    const bool has_format = req->reasoning_format != nullptr && req->reasoning_format[0] != '\0';
+
+    if (!has_reasoning) {
+        if (has_budget || has_format) {
+            throw std::invalid_argument(
+                "reasoning_budget and reasoning_format require reasoning to be set");
+        }
+        return;
+    }
+
+    int32_t reasoning_budget = has_budget ? req->reasoning_budget : -1;
+    if (mode == bridge_reasoning_mode::off) {
+        reasoning_budget = 0;
+    }
+    if (reasoning_budget < -1) {
+        throw std::invalid_argument("reasoning_budget must be -1, 0, or a positive integer");
+    }
+
+    body["reasoning_budget"] = reasoning_budget;
+    body["reasoning_format"] = normalize_bridge_reasoning_format(req->reasoning_format);
+
+    if (mode != bridge_reasoning_mode::auto_mode) {
+        json kwargs = body.contains("chat_template_kwargs") && body["chat_template_kwargs"].is_object()
+            ? body["chat_template_kwargs"]
+            : json::object();
+        kwargs["enable_thinking"] = (mode == bridge_reasoning_mode::on);
+        body["chat_template_kwargs"] = std::move(kwargs);
+    }
+}
+
 struct llama_server_bridge_params llama_server_bridge_default_params(void) {
     llama_server_bridge_params p = {};
     p.model_path = nullptr;
@@ -1152,6 +1754,9 @@ struct llama_server_bridge_chat_request llama_server_bridge_default_chat_request
     req.dry_multiplier = -1.0f;
     req.dry_allowed_length = -1;
     req.dry_penalty_last_n = -1;
+    req.reasoning = nullptr;
+    req.reasoning_budget = LLAMA_SERVER_BRIDGE_REASONING_BUDGET_UNSET;
+    req.reasoning_format = nullptr;
     return req;
 }
 
@@ -1174,6 +1779,9 @@ struct llama_server_bridge_vlm_request llama_server_bridge_default_vlm_request(v
     req.dry_multiplier = -1.0f;
     req.dry_allowed_length = -1;
     req.dry_penalty_last_n = -1;
+    req.reasoning = nullptr;
+    req.reasoning_budget = LLAMA_SERVER_BRIDGE_REASONING_BUDGET_UNSET;
+    req.reasoning_format = nullptr;
     return req;
 }
 
@@ -1222,6 +1830,24 @@ struct llama_server_bridge_audio_raw_request llama_server_bridge_default_audio_r
     return req;
 }
 
+struct llama_server_bridge_audio_session_params llama_server_bridge_default_audio_session_params(void) {
+    llama_server_bridge_audio_session_params out = {};
+    out.expected_input_sample_rate_hz = 16000;
+    out.expected_input_channels = 1;
+    out.max_buffered_audio_samples = 0;
+    out.event_queue_capacity = 1024;
+    return out;
+}
+
+struct llama_server_bridge_audio_transcription_params llama_server_bridge_default_audio_transcription_params(void) {
+    llama_server_bridge_audio_transcription_params out = {};
+    out.bridge_params = llama_server_bridge_default_params();
+    out.metadata_json = nullptr;
+    out.mode = LLAMA_SERVER_BRIDGE_AUDIO_TRANSCRIPTION_MODE_OFFLINE_ROUTE;
+    out.realtime_params = llama_server_bridge_default_realtime_params();
+    return out;
+}
+
 struct llama_server_bridge_json_result llama_server_bridge_empty_json_result(void) {
     llama_server_bridge_json_result out = {};
     out.ok = 0;
@@ -1229,6 +1855,187 @@ struct llama_server_bridge_json_result llama_server_bridge_empty_json_result(voi
     out.json = nullptr;
     out.error_json = nullptr;
     return out;
+}
+
+struct llama_server_bridge_realtime_backend_info llama_server_bridge_empty_realtime_backend_info(void) {
+    llama_server_bridge_realtime_backend_info out = {};
+    out.backend_kind = 0;
+    out.name = "";
+    out.default_runtime_backend_name = "";
+    out.supports_model_preload = 0;
+    out.emits_transcript = 0;
+    out.emits_speaker_spans = 0;
+    out.default_sample_rate_hz = 0;
+    out.default_audio_ring_capacity_samples = 0;
+    out.required_input_channels = 0;
+    return out;
+}
+
+static llama_server_bridge_realtime_backend_info make_realtime_backend_info(int32_t backend_kind) {
+    llama_server_bridge_realtime_backend_info out = llama_server_bridge_empty_realtime_backend_info();
+    const auto kind = static_cast<llama::realtime::backend_kind>(backend_kind);
+    llama::realtime::backend_descriptor descriptor = {};
+    if (!llama::realtime::backend_info(kind, descriptor)) {
+        return out;
+    }
+
+    out.backend_kind = static_cast<int32_t>(descriptor.kind);
+    out.name = descriptor.name != nullptr ? descriptor.name : "";
+    out.default_runtime_backend_name =
+        descriptor.default_runtime_backend_name != nullptr ? descriptor.default_runtime_backend_name : "";
+    out.supports_model_preload = descriptor.supports_model_preload ? 1 : 0;
+    out.emits_transcript = descriptor.emits_transcript ? 1 : 0;
+    out.emits_speaker_spans = descriptor.emits_speaker_spans ? 1 : 0;
+    out.default_sample_rate_hz = descriptor.default_sample_rate_hz;
+    out.default_audio_ring_capacity_samples = descriptor.default_audio_ring_capacity_samples;
+    out.required_input_channels = descriptor.required_input_channels;
+    return out;
+}
+
+static llama_server_bridge_realtime_backend_info make_realtime_backend_info_for_model(
+    const llama_server_bridge_realtime_model_impl & model) {
+
+    auto out = make_realtime_backend_info(model.backend_kind);
+    if (!model.resolved_runtime_backend_name.empty()) {
+        out.default_runtime_backend_name = model.resolved_runtime_backend_name.c_str();
+    }
+    if (model.default_session_cfg.expected_sample_rate_hz != 0) {
+        out.default_sample_rate_hz = model.default_session_cfg.expected_sample_rate_hz;
+    }
+    if (model.default_session_cfg.audio_ring_capacity_samples != 0) {
+        out.default_audio_ring_capacity_samples = model.default_session_cfg.audio_ring_capacity_samples;
+    }
+    return out;
+}
+
+struct llama_server_bridge_realtime_sortformer_params llama_server_bridge_default_realtime_sortformer_params(void) {
+    const auto info = make_realtime_backend_info(LLAMA_SERVER_BRIDGE_REALTIME_BACKEND_SORTFORMER);
+    llama_server_bridge_realtime_sortformer_params out = {};
+    out.gguf_path = nullptr;
+    out.backend_name = info.default_runtime_backend_name;
+    out.expected_sample_rate_hz = info.default_sample_rate_hz;
+    out.audio_ring_capacity_samples = info.default_audio_ring_capacity_samples;
+    return out;
+}
+
+struct llama_server_bridge_realtime_params llama_server_bridge_default_realtime_params_for_backend(int32_t backend_kind) {
+    const auto info = make_realtime_backend_info(backend_kind);
+    llama_server_bridge_realtime_params out = {};
+    out.backend_kind = info.backend_kind != 0 ? info.backend_kind : backend_kind;
+    out.model_path = nullptr;
+    out.backend_name = info.default_runtime_backend_name;
+    out.expected_sample_rate_hz = info.default_sample_rate_hz;
+    out.audio_ring_capacity_samples = info.default_audio_ring_capacity_samples;
+    out.capture_debug = 0;
+    return out;
+}
+
+struct llama_server_bridge_realtime_params llama_server_bridge_default_realtime_params(void) {
+    llama_server_bridge_realtime_params out = {};
+    out.backend_kind = LLAMA_SERVER_BRIDGE_REALTIME_BACKEND_AUTO;
+    out.model_path = nullptr;
+    out.backend_name = nullptr;
+    out.expected_sample_rate_hz = 0;
+    out.audio_ring_capacity_samples = 0;
+    out.capture_debug = 0;
+    return out;
+}
+
+int32_t llama_server_bridge_realtime_backend_count(void) {
+    const size_t count = llama::realtime::backend_descriptor_count();
+    if (count > static_cast<size_t>(INT32_MAX)) {
+        return INT32_MAX;
+    }
+    return static_cast<int32_t>(count);
+}
+
+int32_t llama_server_bridge_realtime_backend_kind_at(size_t index) {
+    const auto * descriptor = llama::realtime::backend_descriptor_at(index);
+    if (descriptor == nullptr) {
+        return 0;
+    }
+    return static_cast<int32_t>(descriptor->kind);
+}
+
+int32_t llama_server_bridge_realtime_backend_get_info(
+    int32_t backend_kind,
+    struct llama_server_bridge_realtime_backend_info * out_info) {
+
+    if (out_info == nullptr) {
+        return 0;
+    }
+    *out_info = make_realtime_backend_info(backend_kind);
+    return out_info->backend_kind != 0 ? 1 : 0;
+}
+
+const char * llama_server_bridge_realtime_backend_name(int32_t backend_kind) {
+    return make_realtime_backend_info(backend_kind).name;
+}
+
+int32_t llama_server_bridge_realtime_backend_kind_from_name(const char * name) {
+    if (name == nullptr || name[0] == '\0') {
+        return 0;
+    }
+    llama::realtime::backend_kind kind = llama::realtime::backend_kind::unknown;
+    if (!llama::realtime::parse_backend_kind_name(name, kind)) {
+        return 0;
+    }
+    return static_cast<int32_t>(kind);
+}
+
+int32_t llama_server_bridge_realtime_backend_kind_from_model_path(const char * model_path) {
+    if (model_path == nullptr || model_path[0] == '\0') {
+        return 0;
+    }
+    llama::realtime::backend_kind kind = llama::realtime::backend_kind::unknown;
+    std::string error;
+    if (!llama::realtime::detect_backend_kind_from_model_path(model_path, kind, error)) {
+        return 0;
+    }
+    return static_cast<int32_t>(kind);
+}
+
+int32_t llama_server_bridge_realtime_backend_supports_model_preload(int32_t backend_kind) {
+    return make_realtime_backend_info(backend_kind).supports_model_preload;
+}
+
+int32_t llama_server_bridge_realtime_backend_emits_transcript(int32_t backend_kind) {
+    return make_realtime_backend_info(backend_kind).emits_transcript;
+}
+
+int32_t llama_server_bridge_realtime_backend_emits_speaker_spans(int32_t backend_kind) {
+    return make_realtime_backend_info(backend_kind).emits_speaker_spans;
+}
+
+const char * llama_server_bridge_realtime_backend_default_runtime_backend_name(int32_t backend_kind) {
+    return make_realtime_backend_info(backend_kind).default_runtime_backend_name;
+}
+
+uint32_t llama_server_bridge_realtime_backend_default_sample_rate_hz(int32_t backend_kind) {
+    return make_realtime_backend_info(backend_kind).default_sample_rate_hz;
+}
+
+uint32_t llama_server_bridge_realtime_backend_default_audio_ring_capacity_samples(int32_t backend_kind) {
+    return make_realtime_backend_info(backend_kind).default_audio_ring_capacity_samples;
+}
+
+uint32_t llama_server_bridge_realtime_backend_required_input_channels(int32_t backend_kind) {
+    return make_realtime_backend_info(backend_kind).required_input_channels;
+}
+
+int32_t llama_server_bridge_realtime_model_cache_entry_count(void) {
+    std::lock_guard<std::mutex> lock(g_realtime_model_cache_mutex);
+    const size_t count = g_realtime_model_cache.size();
+    return count > static_cast<size_t>(INT32_MAX) ? INT32_MAX : static_cast<int32_t>(count);
+}
+
+void llama_server_bridge_realtime_model_cache_clear(void) {
+    decltype(g_realtime_model_cache) cleared;
+    {
+        std::lock_guard<std::mutex> lock(g_realtime_model_cache_mutex);
+        g_realtime_model_cache.swap(cleared);
+    }
+    cleared.clear();
 }
 
 void llama_server_bridge_result_free(struct llama_server_bridge_vlm_result * out) {
@@ -1265,6 +2072,160 @@ const char * llama_server_bridge_last_error(const struct llama_server_bridge * b
     }
     std::lock_guard<std::mutex> lock(bridge->error_mutex);
     return bridge->last_error.c_str();
+}
+
+const char * llama_server_bridge_realtime_last_error(const struct llama_server_bridge_realtime * bridge) {
+    if (bridge == nullptr) {
+        return "";
+    }
+    std::lock_guard<std::mutex> lock(bridge->error_mutex);
+    return bridge->last_error.c_str();
+}
+
+const char * llama_server_bridge_realtime_sortformer_model_last_error(
+    const llama_server_bridge_realtime_sortformer_model * model) {
+    return llama_server_bridge_realtime_model_last_error(
+        reinterpret_cast<const llama_server_bridge_realtime_model *>(model));
+}
+
+const char * llama_server_bridge_realtime_model_last_error(
+    const llama_server_bridge_realtime_model * model) {
+    auto typed_model = reinterpret_cast<const struct llama_server_bridge_realtime_model_impl *>(model);
+    if (typed_model == nullptr) {
+        return "";
+    }
+    std::lock_guard<std::mutex> lock(typed_model->error_mutex);
+    return typed_model->last_error.c_str();
+}
+
+struct realtime_resolved_params {
+    llama::realtime::backend_model_params backend_params;
+    llama::realtime::stream_session_config session_cfg;
+    bool capture_debug = false;
+};
+
+static llama_server_bridge_realtime_params sortformer_params_to_generic(
+    const struct llama_server_bridge_realtime_sortformer_params * params) {
+
+    const auto defaults = llama_server_bridge_default_realtime_sortformer_params();
+    llama_server_bridge_realtime_params out = llama_server_bridge_default_realtime_params_for_backend(
+        LLAMA_SERVER_BRIDGE_REALTIME_BACKEND_SORTFORMER);
+    out.model_path = params != nullptr ? params->gguf_path : defaults.gguf_path;
+    out.backend_name = (params != nullptr && params->backend_name != nullptr && params->backend_name[0] != '\0')
+        ? params->backend_name
+        : defaults.backend_name;
+    out.expected_sample_rate_hz =
+        (params != nullptr && params->expected_sample_rate_hz != 0)
+            ? params->expected_sample_rate_hz
+            : defaults.expected_sample_rate_hz;
+    out.audio_ring_capacity_samples =
+        (params != nullptr && params->audio_ring_capacity_samples != 0)
+            ? params->audio_ring_capacity_samples
+            : defaults.audio_ring_capacity_samples;
+    return out;
+}
+
+static bool translate_generic_realtime_params(
+    const struct llama_server_bridge_realtime_params * params,
+    const char * error_prefix,
+    realtime_resolved_params & out,
+    std::string & error) {
+
+    if (params == nullptr) {
+        error = std::string(error_prefix) + ": params is null";
+        return false;
+    }
+
+    if (params->model_path != nullptr) {
+        out.backend_params.model_path = params->model_path;
+    }
+    if (params->backend_name != nullptr) {
+        out.backend_params.backend_name = params->backend_name;
+    }
+
+    const int32_t resolved_backend_kind = params->backend_kind;
+    out.backend_params.kind = static_cast<llama::realtime::backend_kind>(resolved_backend_kind);
+
+    if (!llama::realtime::backend_resolve_runtime(
+            out.backend_params,
+            params->expected_sample_rate_hz,
+            params->audio_ring_capacity_samples,
+            out.backend_params,
+            out.session_cfg,
+            error)) {
+        error = std::string(error_prefix) + ": " + error;
+        return false;
+    }
+
+    out.capture_debug = params->capture_debug != 0;
+
+    error.clear();
+    return true;
+}
+
+static bool translate_realtime_session_params_from_loaded_model(
+    const llama_server_bridge_realtime_model_impl * model,
+    const struct llama_server_bridge_realtime_params * params,
+    const char * error_prefix,
+    realtime_resolved_params & out,
+    std::string & error) {
+
+    if (model == nullptr) {
+        error = std::string(error_prefix) + ": model is null";
+        return false;
+    }
+
+    const int32_t loaded_backend_kind = model->backend_kind;
+    const auto defaults = make_realtime_backend_info_for_model(*model);
+    out.backend_params.model_path = model->model_path;
+    out.backend_params.kind = static_cast<llama::realtime::backend_kind>(loaded_backend_kind);
+    out.backend_params.backend_name = model->resolved_runtime_backend_name;
+    out.session_cfg = model->default_session_cfg;
+
+    if (params == nullptr) {
+        if (out.session_cfg.expected_sample_rate_hz == 0) {
+            out.session_cfg.expected_sample_rate_hz = defaults.default_sample_rate_hz;
+        }
+        if (out.session_cfg.audio_ring_capacity_samples == 0) {
+            out.session_cfg.audio_ring_capacity_samples = defaults.default_audio_ring_capacity_samples;
+        }
+        out.capture_debug = false;
+        error.clear();
+        return true;
+    }
+
+    const int32_t requested_backend_kind =
+        params->backend_kind != 0 ? params->backend_kind : loaded_backend_kind;
+    if (requested_backend_kind != loaded_backend_kind) {
+        error = std::string(error_prefix) + ": backend kind mismatch";
+        return false;
+    }
+
+    if (params->backend_name != nullptr && params->backend_name[0] != '\0') {
+        const std::string requested_backend_name = params->backend_name;
+        if (!model->resolved_runtime_backend_name.empty() &&
+            requested_backend_name != model->resolved_runtime_backend_name) {
+            error = std::string(error_prefix) + ": runtime backend mismatch";
+            return false;
+        }
+    }
+
+    if (params->expected_sample_rate_hz != 0) {
+        out.session_cfg.expected_sample_rate_hz = params->expected_sample_rate_hz;
+    } else if (out.session_cfg.expected_sample_rate_hz == 0) {
+        out.session_cfg.expected_sample_rate_hz = defaults.default_sample_rate_hz;
+    }
+
+    if (params->audio_ring_capacity_samples != 0) {
+        out.session_cfg.audio_ring_capacity_samples = params->audio_ring_capacity_samples;
+    } else if (out.session_cfg.audio_ring_capacity_samples == 0) {
+        out.session_cfg.audio_ring_capacity_samples = defaults.default_audio_ring_capacity_samples;
+    }
+
+    out.capture_debug = params->capture_debug != 0;
+
+    error.clear();
+    return true;
 }
 
 struct llama_server_bridge * llama_server_bridge_create(const struct llama_server_bridge_params * params) {
@@ -1528,6 +2489,1425 @@ void llama_server_bridge_destroy(struct llama_server_bridge * bridge) {
         bridge->backend_acquired = false;
     }
     delete bridge;
+}
+
+struct llama_server_bridge_realtime * llama_server_bridge_realtime_sortformer_create(
+    const struct llama_server_bridge_realtime_sortformer_params * params) {
+    if (params == nullptr) {
+        std::fprintf(stderr, "llama_server_bridge_realtime_sortformer_create: params is null\n");
+        return nullptr;
+    }
+    const auto generic = sortformer_params_to_generic(params);
+    return llama_server_bridge_realtime_create(&generic);
+}
+
+llama_server_bridge_realtime_sortformer_model * llama_server_bridge_realtime_sortformer_model_create(
+    const struct llama_server_bridge_realtime_sortformer_params * params) {
+    if (params == nullptr) {
+        std::fprintf(stderr, "llama_server_bridge_realtime_sortformer_model_create: params is null\n");
+        return nullptr;
+    }
+    const auto generic = sortformer_params_to_generic(params);
+    return reinterpret_cast<llama_server_bridge_realtime_sortformer_model *>(
+        llama_server_bridge_realtime_model_create(&generic));
+}
+
+void llama_server_bridge_realtime_sortformer_model_destroy(
+    llama_server_bridge_realtime_sortformer_model * model) {
+    llama_server_bridge_realtime_model_destroy(
+        reinterpret_cast<llama_server_bridge_realtime_model *>(model));
+}
+
+struct llama_server_bridge_realtime * llama_server_bridge_realtime_sortformer_create_from_model(
+    const llama_server_bridge_realtime_sortformer_model * model,
+    const struct llama_server_bridge_realtime_sortformer_params * params) {
+    if (model == nullptr) {
+        std::fprintf(stderr, "llama_server_bridge_realtime_sortformer_create_from_model: model is null\n");
+        return nullptr;
+    }
+    const auto generic = sortformer_params_to_generic(params);
+    return llama_server_bridge_realtime_create_from_model(
+        reinterpret_cast<const llama_server_bridge_realtime_model *>(model),
+        &generic);
+}
+
+struct llama_server_bridge_realtime * llama_server_bridge_realtime_create(
+    const struct llama_server_bridge_realtime_params * params) {
+
+    realtime_resolved_params translated = {};
+    std::string parse_error;
+    if (!translate_generic_realtime_params(
+            params,
+            "llama_server_bridge_realtime_create",
+            translated,
+            parse_error)) {
+        std::fprintf(stderr, "%s\n", parse_error.c_str());
+        return nullptr;
+    }
+    auto bridge = std::make_unique<llama_server_bridge_realtime>();
+    try {
+        if (llama::realtime::backend_supports_model_preload(translated.backend_params.kind)) {
+            bridge->loaded_model = load_backend_model_maybe_cached(translated.backend_params);
+        } else {
+            acquire_backend(bridge->params);
+            bridge->backend_acquired = true;
+        }
+        auto backend = bridge->loaded_model
+            ? bridge->loaded_model->create_backend(translated.capture_debug)
+            : llama::realtime::create_backend(translated.backend_params, translated.capture_debug);
+        bridge->session_id = bridge->manager.create_session(std::move(backend), translated.session_cfg);
+        set_realtime_error(bridge.get(), "");
+        return bridge.release();
+    } catch (const std::exception & e) {
+        const std::string msg = normalize_error(e.what());
+        set_realtime_error(bridge.get(), msg);
+        std::fprintf(stderr, "llama_server_bridge_realtime_create: %s\n", msg.c_str());
+        if (bridge->backend_acquired) {
+            release_backend();
+            bridge->backend_acquired = false;
+        }
+        bridge->loaded_model.reset();
+        return nullptr;
+    } catch (...) {
+        const std::string msg = "unknown realtime backend creation failure";
+        set_realtime_error(bridge.get(), msg);
+        std::fprintf(stderr, "llama_server_bridge_realtime_create: %s\n", msg.c_str());
+        if (bridge->backend_acquired) {
+            release_backend();
+            bridge->backend_acquired = false;
+        }
+        bridge->loaded_model.reset();
+        return nullptr;
+    }
+}
+
+llama_server_bridge_realtime_model * llama_server_bridge_realtime_model_create(
+    const struct llama_server_bridge_realtime_params * params) {
+
+    realtime_resolved_params translated = {};
+    std::string parse_error;
+    if (!translate_generic_realtime_params(
+            params,
+            "llama_server_bridge_realtime_model_create",
+            translated,
+            parse_error)) {
+        std::fprintf(stderr, "%s\n", parse_error.c_str());
+        return nullptr;
+    }
+
+    const int32_t resolved_backend_kind = static_cast<int32_t>(translated.backend_params.kind);
+    if (!llama_server_bridge_realtime_backend_supports_model_preload(resolved_backend_kind)) {
+        std::fprintf(stderr, "llama_server_bridge_realtime_model_create: backend does not support model preload\n");
+        return nullptr;
+    }
+
+    auto model = std::make_unique<llama_server_bridge_realtime_model_impl>();
+    try {
+        RT_TRACE("rt_model_create: begin kind=%d model=%s backend=%s",
+            resolved_backend_kind,
+            translated.backend_params.model_path.c_str(),
+            translated.backend_params.backend_name.c_str());
+        model->backend_kind = resolved_backend_kind;
+        auto cached_model = load_backend_model_maybe_cached(translated.backend_params);
+        (void) cached_model;
+        model->model_path = translated.backend_params.model_path;
+        model->resolved_runtime_backend_name = translated.backend_params.backend_name;
+        model->default_session_cfg = translated.session_cfg;
+        RT_TRACE("rt_model_create: loaded kind=%d runtime=%s sr=%u ring=%u",
+            model->backend_kind,
+            model->resolved_runtime_backend_name.c_str(),
+            model->default_session_cfg.expected_sample_rate_hz,
+            static_cast<unsigned>(model->default_session_cfg.audio_ring_capacity_samples));
+        set_realtime_model_error(model.get(), "");
+        return reinterpret_cast<llama_server_bridge_realtime_model *>(model.release());
+    } catch (const std::exception & e) {
+        const std::string msg = normalize_error(e.what());
+        set_realtime_model_error(model.get(), msg);
+        std::fprintf(stderr, "llama_server_bridge_realtime_model_create: %s\n", msg.c_str());
+        if (model->backend_acquired) {
+            release_backend();
+            model->backend_acquired = false;
+        }
+        return nullptr;
+    } catch (...) {
+        const std::string msg = "unknown realtime model creation failure";
+        set_realtime_model_error(model.get(), msg);
+        std::fprintf(stderr, "llama_server_bridge_realtime_model_create: %s\n", msg.c_str());
+        if (model->backend_acquired) {
+            release_backend();
+            model->backend_acquired = false;
+        }
+        return nullptr;
+    }
+}
+
+int32_t llama_server_bridge_realtime_model_get_info(
+    const llama_server_bridge_realtime_model * model,
+    struct llama_server_bridge_realtime_backend_info * out_info) {
+
+    if (out_info == nullptr) {
+        return 0;
+    }
+
+    *out_info = llama_server_bridge_empty_realtime_backend_info();
+    const auto * typed_model = reinterpret_cast<const struct llama_server_bridge_realtime_model_impl *>(model);
+    if (typed_model == nullptr) {
+        return 0;
+    }
+
+    *out_info = make_realtime_backend_info_for_model(*typed_model);
+    RT_TRACE("rt_model_get_info: kind=%d runtime=%s sr=%u ring=%u",
+        out_info->backend_kind,
+        out_info->default_runtime_backend_name != nullptr ? out_info->default_runtime_backend_name : "(null)",
+        out_info->default_sample_rate_hz,
+        static_cast<unsigned>(out_info->default_audio_ring_capacity_samples));
+    return out_info->backend_kind != 0 ? 1 : 0;
+}
+
+void llama_server_bridge_realtime_model_destroy(
+    llama_server_bridge_realtime_model * model) {
+    auto typed_model = reinterpret_cast<struct llama_server_bridge_realtime_model_impl *>(model);
+    if (typed_model == nullptr) {
+        return;
+    }
+    if (typed_model->backend_acquired) {
+        release_backend();
+        typed_model->backend_acquired = false;
+    }
+    delete typed_model;
+}
+
+struct llama_server_bridge_realtime * llama_server_bridge_realtime_create_from_model(
+    const llama_server_bridge_realtime_model * model,
+    const struct llama_server_bridge_realtime_params * params) {
+
+    if (model == nullptr) {
+        std::fprintf(stderr, "llama_server_bridge_realtime_create_from_model: model is null\n");
+        return nullptr;
+    }
+
+    auto typed_model = reinterpret_cast<const struct llama_server_bridge_realtime_model_impl *>(model);
+    realtime_resolved_params translated = {};
+    std::string parse_error;
+    if (!translate_realtime_session_params_from_loaded_model(
+            typed_model,
+            params,
+            "llama_server_bridge_realtime_create_from_model",
+            translated,
+            parse_error)) {
+        std::fprintf(stderr, "%s\n", parse_error.c_str());
+        return nullptr;
+    }
+
+    auto bridge = std::make_unique<llama_server_bridge_realtime>();
+    try {
+        RT_TRACE("rt_create_from_model: begin kind=%d model=%s runtime=%s sr=%u ring=%u",
+            typed_model->backend_kind,
+            translated.backend_params.model_path.c_str(),
+            translated.backend_params.backend_name.c_str(),
+            translated.session_cfg.expected_sample_rate_hz,
+            static_cast<unsigned>(translated.session_cfg.audio_ring_capacity_samples));
+        bridge->loaded_model = load_backend_model_maybe_cached(translated.backend_params);
+        RT_TRACE("rt_create_from_model: cache/model acquired");
+        auto backend = bridge->loaded_model->create_backend(translated.capture_debug);
+        RT_TRACE("rt_create_from_model: backend created");
+        bridge->session_id = bridge->manager.create_session(std::move(backend), translated.session_cfg);
+        RT_TRACE("rt_create_from_model: session created id=%lld", static_cast<long long>(bridge->session_id));
+        set_realtime_error(bridge.get(), "");
+        return bridge.release();
+    } catch (const std::exception & e) {
+        const std::string msg = normalize_error(e.what());
+        set_realtime_error(bridge.get(), msg);
+        std::fprintf(stderr, "llama_server_bridge_realtime_create_from_model: %s\n", msg.c_str());
+        return nullptr;
+    } catch (...) {
+        const std::string msg = "unknown realtime session creation from model failure";
+        set_realtime_error(bridge.get(), msg);
+        std::fprintf(stderr, "llama_server_bridge_realtime_create_from_model: %s\n", msg.c_str());
+        return nullptr;
+    }
+}
+
+void llama_server_bridge_realtime_destroy(struct llama_server_bridge_realtime * bridge) {
+    if (bridge == nullptr) {
+        return;
+    }
+
+    try {
+        RT_TRACE("rt_destroy: session=%lld has=%d",
+            static_cast<long long>(bridge->session_id),
+            (bridge->session_id != 0 && bridge->manager.has_session(bridge->session_id)) ? 1 : 0);
+        if (bridge->session_id != 0 && bridge->manager.has_session(bridge->session_id)) {
+            bridge->manager.close_session(bridge->session_id);
+        }
+    } catch (...) {
+    }
+
+    if (bridge->backend_acquired) {
+        release_backend();
+        bridge->backend_acquired = false;
+    }
+    delete bridge;
+}
+
+int32_t llama_server_bridge_realtime_push_audio_f32(
+    struct llama_server_bridge_realtime * bridge,
+    const float * samples,
+    size_t n_samples,
+    uint32_t sample_rate_hz) {
+
+    if (bridge == nullptr || samples == nullptr) {
+        return -1;
+    }
+
+    try {
+        bridge->manager.push_audio(bridge->session_id, samples, n_samples, sample_rate_hz);
+        set_realtime_error(bridge, "");
+        return 0;
+    } catch (const std::exception & e) {
+        set_realtime_error(bridge, normalize_error(e.what()));
+        return -1;
+    } catch (...) {
+        set_realtime_error(bridge, "unknown realtime push_audio failure");
+        return -1;
+    }
+}
+
+int32_t llama_server_bridge_realtime_flush(struct llama_server_bridge_realtime * bridge) {
+    if (bridge == nullptr) {
+        return -1;
+    }
+
+    try {
+        bridge->manager.flush_session(bridge->session_id);
+        set_realtime_error(bridge, "");
+        return 0;
+    } catch (const std::exception & e) {
+        set_realtime_error(bridge, normalize_error(e.what()));
+        return -1;
+    } catch (...) {
+        set_realtime_error(bridge, "unknown realtime flush failure");
+        return -1;
+    }
+}
+
+int32_t llama_server_bridge_realtime_drain_events(
+    struct llama_server_bridge_realtime * bridge,
+    struct llama_server_bridge_realtime_event ** out_events,
+    size_t * out_count,
+    size_t max_events) {
+
+    if (bridge == nullptr || out_events == nullptr || out_count == nullptr) {
+        return -1;
+    }
+
+    *out_events = nullptr;
+    *out_count = 0;
+
+    try {
+        const auto events = bridge->manager.drain_events(bridge->session_id, max_events);
+        if (events.empty()) {
+            set_realtime_error(bridge, "");
+            return 0;
+        }
+
+        auto * out = static_cast<llama_server_bridge_realtime_event *>(
+            std::calloc(events.size(), sizeof(llama_server_bridge_realtime_event)));
+        if (out == nullptr) {
+            set_realtime_error(bridge, "failed to allocate realtime event array");
+            return -1;
+        }
+
+        for (size_t i = 0; i < events.size(); ++i) {
+            out[i].type = static_cast<int32_t>(events[i].type);
+            out[i].session_id = events[i].session_id;
+            out[i].begin_sec = events[i].begin_sec;
+            out[i].end_sec = events[i].end_sec;
+            out[i].speaker_id = events[i].speaker_id;
+            out[i].text = copy_to_c_string(events[i].text);
+            out[i].detail = copy_to_c_string(events[i].detail);
+        }
+
+        *out_events = out;
+        *out_count = events.size();
+        set_realtime_error(bridge, "");
+        return 0;
+    } catch (const std::exception & e) {
+        set_realtime_error(bridge, normalize_error(e.what()));
+        return -1;
+    } catch (...) {
+        set_realtime_error(bridge, "unknown realtime drain_events failure");
+        return -1;
+    }
+}
+
+void llama_server_bridge_realtime_free_events(
+    struct llama_server_bridge_realtime_event * events,
+    size_t count) {
+
+    if (events == nullptr) {
+        return;
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        std::free(events[i].text);
+        std::free(events[i].detail);
+    }
+    std::free(events);
+}
+
+enum class audio_session_realtime_lane {
+    diarization,
+    transcription,
+};
+
+static void translate_realtime_events_locked(
+    llama_server_bridge_audio_session * session,
+    const std::vector<llama::realtime::event> & events,
+    uint32_t extra_flags,
+    audio_session_realtime_lane lane) {
+
+    if (session == nullptr) {
+        return;
+    }
+
+    for (const auto & ev : events) {
+        audio_session_event_record out = {};
+        out.flags = extra_flags | LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FINAL;
+        out.start_sample = seconds_to_samples(ev.begin_sec, session->params.expected_input_sample_rate_hz);
+        out.end_sample = seconds_to_samples(ev.end_sec, session->params.expected_input_sample_rate_hz);
+        out.speaker_id = ev.speaker_id;
+        out.text = ev.text;
+        out.detail = ev.detail;
+
+        using llama::realtime::event_type;
+        switch (ev.type) {
+            case event_type::speaker_span_commit:
+                out.kind = lane == audio_session_realtime_lane::diarization
+                    ? LLAMA_SERVER_BRIDGE_AUDIO_EVENT_DIARIZATION_SPAN_COMMIT
+                    : LLAMA_SERVER_BRIDGE_AUDIO_EVENT_NOTICE;
+                out.item_id = next_audio_session_item_id_locked(session);
+                if (out.text.empty()) {
+                    out.text = audio_session_speaker_label(ev.speaker_id);
+                }
+                break;
+            case event_type::transcript_commit:
+                out.kind = lane == audio_session_realtime_lane::diarization
+                    ? LLAMA_SERVER_BRIDGE_AUDIO_EVENT_DIARIZATION_TRANSCRIPT_COMMIT
+                    : LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT;
+                out.item_id = next_audio_session_item_id_locked(session);
+                break;
+            case event_type::transcript_piece_commit:
+                out.kind = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT;
+                out.item_id = next_audio_session_item_id_locked(session);
+                break;
+            case event_type::transcript_word_commit:
+                out.kind = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_WORD_COMMIT;
+                out.item_id = next_audio_session_item_id_locked(session);
+                break;
+            case event_type::backend_status:
+                out.kind = lane == audio_session_realtime_lane::diarization
+                    ? LLAMA_SERVER_BRIDGE_AUDIO_EVENT_DIARIZATION_BACKEND_STATUS
+                    : LLAMA_SERVER_BRIDGE_AUDIO_EVENT_NOTICE;
+                out.item_id = next_audio_session_item_id_locked(session);
+                break;
+            case event_type::backend_error:
+                out.kind = lane == audio_session_realtime_lane::diarization
+                    ? LLAMA_SERVER_BRIDGE_AUDIO_EVENT_DIARIZATION_BACKEND_ERROR
+                    : LLAMA_SERVER_BRIDGE_AUDIO_EVENT_ERROR;
+                out.item_id = next_audio_session_item_id_locked(session);
+                break;
+            case event_type::session_notice:
+            default:
+                out.kind = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_NOTICE;
+                out.item_id = 0;
+                break;
+        }
+        push_audio_session_event_locked(session, std::move(out));
+    }
+}
+
+static void drain_realtime_bridge_events_locked(
+    llama_server_bridge_audio_session * session,
+    llama_server_bridge_realtime * bridge,
+    uint32_t extra_flags,
+    audio_session_realtime_lane lane) {
+
+    if (session == nullptr || bridge == nullptr) {
+        return;
+    }
+    const auto events = bridge->manager.drain_events(bridge->session_id);
+    translate_realtime_events_locked(session, events, extra_flags, lane);
+}
+
+static void replay_audio_into_realtime_bridge_locked(
+    llama_server_bridge_audio_session * session,
+    llama_server_bridge_realtime * bridge,
+    audio_session_realtime_lane lane) {
+
+    if (session == nullptr || bridge == nullptr) {
+        return;
+    }
+
+    size_t offset = 0;
+    for (const size_t chunk_size : session->chunk_sizes) {
+        if (chunk_size == 0) {
+            continue;
+        }
+        bridge->manager.push_audio(
+            bridge->session_id,
+            session->audio_samples.data() + offset,
+            chunk_size,
+            session->params.expected_input_sample_rate_hz);
+        offset += chunk_size;
+        drain_realtime_bridge_events_locked(
+            session,
+            bridge,
+            LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FROM_BUFFER_REPLAY,
+            lane);
+    }
+}
+
+static int append_audio_chunk_locked(
+    llama_server_bridge_audio_session * session,
+    const float * samples,
+    size_t n_samples,
+    uint32_t event_flags) {
+
+    if (session == nullptr || samples == nullptr) {
+        return -1;
+    }
+
+    if (n_samples == 0) {
+        return 0;
+    }
+    if (session->audio_flushed) {
+        return -1;
+    }
+    if (session->params.max_buffered_audio_samples > 0) {
+        const size_t limit = static_cast<size_t>(session->params.max_buffered_audio_samples);
+        if (session->audio_samples.size() + n_samples > limit) {
+            return -1;
+        }
+    }
+
+    session->audio_samples.insert(session->audio_samples.end(), samples, samples + n_samples);
+    session->chunk_sizes.push_back(n_samples);
+
+    if (session->diarization_bridge == nullptr) {
+        if (session->transcription_bridge == nullptr) {
+            return 0;
+        }
+    }
+
+    if (session->diarization_bridge != nullptr) {
+        session->diarization_bridge->manager.push_audio(
+            session->diarization_bridge->session_id,
+            samples,
+            n_samples,
+            session->params.expected_input_sample_rate_hz);
+        drain_realtime_bridge_events_locked(
+            session,
+            session->diarization_bridge,
+            event_flags,
+            audio_session_realtime_lane::diarization);
+    }
+    if (session->transcription_bridge != nullptr) {
+        session->transcription_bridge->manager.push_audio(
+            session->transcription_bridge->session_id,
+            samples,
+            n_samples,
+            session->params.expected_input_sample_rate_hz);
+        drain_realtime_bridge_events_locked(
+            session,
+            session->transcription_bridge,
+            event_flags,
+            audio_session_realtime_lane::transcription);
+    }
+    return 0;
+}
+
+static int start_audio_session_native_transcription(
+    llama_server_bridge_audio_session * session,
+    const owned_audio_transcription_params & transcription_params) {
+
+    if (session == nullptr) {
+        return -1;
+    }
+
+    join_audio_session_transcription_thread(session);
+
+    auto resolved = transcription_params.realtime_params.borrow();
+    if (resolved.expected_sample_rate_hz == 0) {
+        resolved.expected_sample_rate_hz = session->params.expected_input_sample_rate_hz;
+    }
+    realtime_resolved_params translated = {};
+    std::string parse_error;
+    if (!translate_generic_realtime_params(
+            &resolved,
+            "start_audio_session_native_transcription",
+            translated,
+            parse_error)) {
+        return fail_audio_session(session, parse_error);
+    }
+
+    llama_server_bridge_realtime * bridge_to_destroy = nullptr;
+    llama_server_bridge_realtime * bridge = nullptr;
+    try {
+        if (translated.session_cfg.expected_sample_rate_hz != session->params.expected_input_sample_rate_hz) {
+            return fail_audio_session(
+                session,
+                "native transcription expected_sample_rate_hz must match the audio session sample rate");
+        }
+
+        bool audio_already_flushed = false;
+        {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            audio_already_flushed = session->audio_flushed;
+        }
+
+        std::shared_ptr<llama::realtime::loaded_backend_model> offline_model;
+        if (audio_already_flushed) {
+            offline_model = load_backend_model_maybe_cached(translated.backend_params);
+        }
+        if (offline_model && offline_model->supports_offline_transcription()) {
+            bool already_running = false;
+            bool missing_audio = false;
+            std::vector<float> audio_snapshot;
+            {
+                std::lock_guard<std::mutex> lock(session->mutex);
+                if (session->transcription_running || session->transcription_bridge != nullptr) {
+                    already_running = true;
+                } else if (session->audio_samples.empty()) {
+                    missing_audio = true;
+                } else {
+                    session->transcription_requested = true;
+                    session->transcription_started = true;
+                    session->transcription_running = true;
+                    session->transcription_completed = false;
+                    session->transcription_stop_requested = false;
+                    session->transcription_native_realtime = true;
+                    audio_snapshot = session->audio_samples;
+
+                    audio_session_event_record started = {};
+                    started.kind = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_STARTED;
+                    started.detail = resolved.model_path != nullptr ? resolved.model_path : "native_offline";
+                    push_audio_session_event_locked(session, std::move(started));
+                }
+            }
+            if (already_running) {
+                return fail_audio_session(session, "transcription is already running for this audio session");
+            }
+            if (missing_audio) {
+                return fail_audio_session(session, "cannot start native offline transcription without buffered audio");
+            }
+
+            set_audio_session_error(session, "");
+            session->transcription_thread = std::thread(
+                [session,
+                 audio_snapshot = std::move(audio_snapshot),
+                 offline_model = std::move(offline_model),
+                 capture_debug = translated.capture_debug]() mutable {
+                    std::string error_message;
+                    bool success = false;
+                    std::vector<llama::realtime::event> native_events;
+
+                    try {
+                        offline_model->transcribe_audio_offline(
+                            audio_snapshot,
+                            native_events,
+                            capture_debug);
+                        success = true;
+                    } catch (const std::exception & e) {
+                        error_message = normalize_error(e.what());
+                    } catch (...) {
+                        error_message = "unknown native offline transcription failure";
+                    }
+
+                    if (!success) {
+                        fail_audio_session(
+                            session,
+                            error_message.empty()
+                                ? "native offline transcription failed"
+                                : error_message);
+                    } else {
+                        set_audio_session_error(session, "");
+                        std::lock_guard<std::mutex> lock(session->mutex);
+                        translate_realtime_events_locked(
+                            session,
+                            native_events,
+                            LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FROM_BUFFER_REPLAY,
+                            audio_session_realtime_lane::transcription);
+                    }
+
+                    {
+                        std::lock_guard<std::mutex> lock(session->mutex);
+                        session->transcription_running = false;
+                        session->transcription_requested = false;
+                        session->transcription_completed = success;
+                        session->transcription_stop_requested = false;
+                        session->transcription_native_realtime = false;
+                        audio_session_event_record stopped = {};
+                        stopped.kind = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_STOPPED;
+                        stopped.flags = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FINAL;
+                        stopped.end_sample = static_cast<uint64_t>(audio_snapshot.size());
+                        stopped.detail = success ? "completed" : "failed";
+                        push_audio_session_event_locked(session, std::move(stopped));
+                    }
+                });
+            return 0;
+        }
+
+        bridge = llama_server_bridge_realtime_create(&resolved);
+        if (bridge == nullptr) {
+            return fail_audio_session(session, "failed to create native realtime transcription bridge");
+        }
+
+        bool already_running = false;
+        {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            if (session->transcription_running || session->transcription_bridge != nullptr) {
+                already_running = true;
+            } else {
+                session->transcription_bridge = bridge;
+                session->transcription_requested = true;
+                session->transcription_started = true;
+                session->transcription_running = true;
+                session->transcription_completed = false;
+                session->transcription_stop_requested = false;
+                session->transcription_native_realtime = true;
+
+                audio_session_event_record started = {};
+                started.kind = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_STARTED;
+                started.detail = resolved.model_path != nullptr ? resolved.model_path : "native_realtime";
+                push_audio_session_event_locked(session, std::move(started));
+
+                replay_audio_into_realtime_bridge_locked(
+                    session,
+                    session->transcription_bridge,
+                    audio_session_realtime_lane::transcription);
+
+                if (session->audio_flushed) {
+                    session->transcription_bridge->manager.flush_session(session->transcription_bridge->session_id);
+                    drain_realtime_bridge_events_locked(
+                        session,
+                        session->transcription_bridge,
+                        LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FROM_BUFFER_REPLAY,
+                        audio_session_realtime_lane::transcription);
+
+                    bridge_to_destroy = session->transcription_bridge;
+                    session->transcription_bridge = nullptr;
+                    session->transcription_requested = false;
+                    session->transcription_running = false;
+                    session->transcription_completed = true;
+                    session->transcription_native_realtime = false;
+
+                    audio_session_event_record stopped = {};
+                    stopped.kind = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_STOPPED;
+                    stopped.flags = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FINAL;
+                    stopped.end_sample = static_cast<uint64_t>(session->audio_samples.size());
+                    stopped.detail = "completed";
+                    push_audio_session_event_locked(session, std::move(stopped));
+                }
+            }
+        }
+        if (already_running) {
+            destroy_realtime_bridge(bridge);
+            return fail_audio_session(session, "transcription is already running for this audio session");
+        }
+        if (bridge_to_destroy == nullptr) {
+            bridge = nullptr;
+        }
+        destroy_realtime_bridge(bridge_to_destroy);
+        set_audio_session_error(session, "");
+        return 0;
+    } catch (const std::exception & e) {
+        {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            if (session->transcription_bridge == bridge) {
+                session->transcription_bridge = nullptr;
+            }
+            session->transcription_requested = false;
+            session->transcription_started = false;
+            session->transcription_running = false;
+            session->transcription_completed = false;
+            session->transcription_native_realtime = false;
+        }
+        destroy_realtime_bridge(bridge);
+        destroy_realtime_bridge(bridge_to_destroy);
+        return fail_audio_session(session, normalize_error(e.what()));
+    } catch (...) {
+        {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            if (session->transcription_bridge == bridge) {
+                session->transcription_bridge = nullptr;
+            }
+            session->transcription_requested = false;
+            session->transcription_started = false;
+            session->transcription_running = false;
+            session->transcription_completed = false;
+            session->transcription_native_realtime = false;
+        }
+        destroy_realtime_bridge(bridge);
+        destroy_realtime_bridge(bridge_to_destroy);
+        return fail_audio_session(session, "unknown native transcription start failure");
+    }
+}
+
+static int maybe_launch_audio_session_transcription(llama_server_bridge_audio_session * session) {
+    if (session == nullptr) {
+        return -1;
+    }
+
+    std::vector<float> audio_snapshot;
+    owned_audio_transcription_params transcription_params = {};
+    bool missing_audio = false;
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (!session->transcription_requested || !session->audio_flushed) {
+            return 0;
+        }
+        if (session->transcription_params.mode == LLAMA_SERVER_BRIDGE_AUDIO_TRANSCRIPTION_MODE_REALTIME_NATIVE) {
+            return 0;
+        }
+        if (session->transcription_running || session->transcription_completed) {
+            return 0;
+        }
+        if (session->audio_samples.empty()) {
+            missing_audio = true;
+        } else {
+            session->transcription_running = true;
+            session->transcription_started = true;
+            session->transcription_stop_requested = false;
+            audio_snapshot = session->audio_samples;
+            transcription_params = session->transcription_params;
+        }
+    }
+    if (missing_audio) {
+        return fail_audio_session(session, "cannot start transcription without buffered audio");
+    }
+
+    join_audio_session_transcription_thread(session);
+    set_audio_session_error(session, "");
+    push_audio_session_event(
+        session,
+        LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_STARTED,
+        0,
+        0,
+        static_cast<uint64_t>(audio_snapshot.size()),
+        -1,
+        0,
+        "",
+        "offline_final_only");
+
+    session->transcription_thread = std::thread(
+        [session, audio_snapshot = std::move(audio_snapshot), transcription_params = std::move(transcription_params)]() mutable {
+            std::string error_message;
+            std::string result_json;
+            int result_status = 0;
+            bool success = false;
+
+            try {
+                const auto pcm16 = f32_mono_to_pcm16le_bytes(audio_snapshot);
+                const auto wav = pcm16_mono_16k_to_wav(pcm16);
+
+                llama_server_bridge * bridge = nullptr;
+                llama_server_bridge_json_result out = llama_server_bridge_empty_json_result();
+                std::string metadata_json;
+
+                auto borrowed_bridge_params = transcription_params.bridge_params.borrow();
+                bridge = llama_server_bridge_create(&borrowed_bridge_params);
+                if (bridge == nullptr) {
+                    error_message = "failed to create bridge for audio transcription";
+                } else {
+                    if (!build_audio_session_timeline_metadata(
+                            transcription_params.metadata_json,
+                            metadata_json,
+                            error_message)) {
+                        llama_server_bridge_destroy(bridge);
+                        bridge = nullptr;
+                    }
+                }
+                if (bridge != nullptr) {
+                    llama_server_bridge_audio_raw_request req = llama_server_bridge_default_audio_raw_request();
+                    req.audio_bytes = wav.data();
+                    req.audio_bytes_len = wav.size();
+                    req.audio_format = "wav";
+                    req.metadata_json = metadata_json.c_str();
+                    req.ffmpeg_convert = 0;
+
+                    const int32_t rc = llama_server_bridge_audio_transcriptions_raw(bridge, &req, &out);
+                    result_status = out.status;
+                    if (rc == 0 && out.ok != 0 && out.json != nullptr) {
+                        result_json = out.json;
+                        try {
+                            const json root_json = json::parse(result_json);
+                            emit_transcription_timeline_events(session, root_json, 0);
+                        } catch (const std::exception & e) {
+                            success = false;
+                            error_message = std::string("failed to parse transcription timeline JSON: ") + e.what();
+                        }
+                        if (error_message.empty()) {
+                            success = true;
+                        }
+                    } else {
+                        const char * bridge_err_ptr = llama_server_bridge_last_error(bridge);
+                        const std::string bridge_err = bridge_err_ptr != nullptr ? bridge_err_ptr : "";
+                        const std::string out_err = out.error_json != nullptr ? out.error_json : "";
+                        error_message = !out_err.empty() ? out_err : bridge_err;
+                        if (error_message.empty()) {
+                            error_message = "audio transcription request failed";
+                        }
+                    }
+                    llama_server_bridge_json_result_free(&out);
+                    llama_server_bridge_destroy(bridge);
+                }
+            } catch (const std::exception & e) {
+                error_message = normalize_error(e.what());
+            } catch (...) {
+                error_message = "unknown audio transcription failure";
+            }
+
+            if (!success) {
+                fail_audio_session(session, error_message.empty() ? "audio transcription failed" : error_message);
+            } else {
+                set_audio_session_error(session, "");
+                push_audio_session_event(
+                    session,
+                    LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_RESULT_JSON,
+                    LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FINAL,
+                    0,
+                    static_cast<uint64_t>(audio_snapshot.size()),
+                    -1,
+                    0,
+                    result_json,
+                    std::to_string(result_status));
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(session->mutex);
+                session->transcription_running = false;
+                session->transcription_requested = false;
+                session->transcription_completed = success;
+                session->transcription_stop_requested = false;
+                audio_session_event_record stopped = {};
+                stopped.kind = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_STOPPED;
+                stopped.flags = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FINAL;
+                stopped.end_sample = static_cast<uint64_t>(audio_snapshot.size());
+                stopped.detail = success ? "completed" : "failed";
+                push_audio_session_event_locked(session, std::move(stopped));
+            }
+        });
+    return 0;
+}
+
+struct llama_server_bridge_audio_session * llama_server_bridge_audio_session_create(
+    const struct llama_server_bridge_audio_session_params * params) {
+
+    auto session = std::make_unique<llama_server_bridge_audio_session>();
+    session->params = params != nullptr
+        ? *params
+        : llama_server_bridge_default_audio_session_params();
+
+    if (session->params.expected_input_sample_rate_hz == 0) {
+        session->params.expected_input_sample_rate_hz = 16000;
+    }
+    if (session->params.expected_input_channels == 0) {
+        session->params.expected_input_channels = 1;
+    }
+    if (session->params.expected_input_channels != 1) {
+        set_audio_session_error(session.get(), "audio session currently supports mono PCM only");
+        return nullptr;
+    }
+
+    set_audio_session_error(session.get(), "");
+    return session.release();
+}
+
+void llama_server_bridge_audio_session_destroy(
+    struct llama_server_bridge_audio_session * session) {
+
+    if (session == nullptr) {
+        return;
+    }
+
+    llama_server_bridge_realtime * diarization_bridge = nullptr;
+    llama_server_bridge_realtime * transcription_bridge = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        diarization_bridge = session->diarization_bridge;
+        session->diarization_bridge = nullptr;
+        transcription_bridge = session->transcription_bridge;
+        session->transcription_bridge = nullptr;
+    }
+    destroy_realtime_bridge(diarization_bridge);
+    destroy_realtime_bridge(transcription_bridge);
+
+    join_audio_session_transcription_thread(session);
+    delete session;
+}
+
+int32_t llama_server_bridge_audio_session_push_audio(
+    struct llama_server_bridge_audio_session * session,
+    const void * audio_bytes,
+    size_t frame_count,
+    uint32_t sample_rate_hz,
+    uint32_t channels,
+    int32_t sample_format) {
+
+    if (session == nullptr || audio_bytes == nullptr) {
+        return -1;
+    }
+    if (frame_count == 0) {
+        set_audio_session_error(session, "");
+        return 0;
+    }
+    if (sample_rate_hz != session->params.expected_input_sample_rate_hz) {
+        return fail_audio_session(
+            session,
+            "audio session sample_rate_hz must match expected_input_sample_rate_hz");
+    }
+    if (channels != session->params.expected_input_channels) {
+        return fail_audio_session(
+            session,
+            "audio session channel count must match expected_input_channels");
+    }
+
+    std::vector<float> mono_f32;
+    switch (sample_format) {
+        case LLAMA_SERVER_BRIDGE_AUDIO_SAMPLE_FORMAT_F32: {
+            const auto * samples = static_cast<const float *>(audio_bytes);
+            mono_f32.assign(samples, samples + frame_count);
+            break;
+        }
+        case LLAMA_SERVER_BRIDGE_AUDIO_SAMPLE_FORMAT_S16: {
+            const auto * samples = static_cast<const int16_t *>(audio_bytes);
+            mono_f32.resize(frame_count);
+            for (size_t i = 0; i < frame_count; ++i) {
+                mono_f32[i] = static_cast<float>(samples[i]) / 32768.0f;
+            }
+            break;
+        }
+        default:
+            return fail_audio_session(session, "unsupported audio session PCM sample format");
+    }
+
+    std::string append_error;
+    try {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (append_audio_chunk_locked(session, mono_f32.data(), mono_f32.size(), 0) != 0) {
+            append_error = session->audio_flushed
+                ? "cannot push audio after audio session flush"
+                : "audio session buffered audio limit exceeded";
+        } else {
+            set_audio_session_error(session, "");
+            return 0;
+        }
+        if (append_error.empty()) {
+            append_error = "audio session push failed";
+        }
+    } catch (const std::exception & e) {
+        return fail_audio_session(session, normalize_error(e.what()));
+    } catch (...) {
+        return fail_audio_session(session, "unknown audio session push failure");
+    }
+    if (append_error.empty()) {
+        append_error = "audio session push failed";
+    }
+    return fail_audio_session(session, append_error);
+}
+
+int32_t llama_server_bridge_audio_session_push_encoded(
+    struct llama_server_bridge_audio_session * session,
+    const uint8_t * audio_bytes,
+    size_t audio_bytes_len,
+    const char * audio_format) {
+
+    if (session == nullptr || audio_bytes == nullptr || audio_bytes_len == 0) {
+        return -1;
+    }
+    if (session->params.expected_input_sample_rate_hz != 16000 || session->params.expected_input_channels != 1) {
+        return fail_audio_session(
+            session,
+            "push_encoded currently requires a 16 kHz mono audio session");
+    }
+
+    std::vector<uint8_t> wav;
+    std::string error;
+    if (!ffmpeg_convert_to_wav_pcm16_mono_16k(audio_bytes, audio_bytes_len, audio_format, wav, error)) {
+        return fail_audio_session(session, error);
+    }
+
+    std::vector<uint8_t> pcm16le;
+    if (!wav_payload_to_pcm16le(wav, pcm16le, error)) {
+        return fail_audio_session(session, error);
+    }
+    const auto mono_f32 = pcm16le_bytes_to_f32_mono(pcm16le.data(), pcm16le.size());
+    return llama_server_bridge_audio_session_push_audio(
+        session,
+        mono_f32.data(),
+        mono_f32.size(),
+        session->params.expected_input_sample_rate_hz,
+        1,
+        LLAMA_SERVER_BRIDGE_AUDIO_SAMPLE_FORMAT_F32);
+}
+
+int32_t llama_server_bridge_audio_session_flush_audio(
+    struct llama_server_bridge_audio_session * session) {
+
+    if (session == nullptr) {
+        return -1;
+    }
+
+    llama_server_bridge_realtime * transcription_bridge_to_destroy = nullptr;
+    try {
+        {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            if (session->audio_flushed) {
+                set_audio_session_error(session, "");
+                return 0;
+            }
+            session->audio_flushed = true;
+            if (session->diarization_bridge != nullptr) {
+                session->diarization_bridge->manager.flush_session(session->diarization_bridge->session_id);
+                drain_realtime_bridge_events_locked(
+                    session,
+                    session->diarization_bridge,
+                    0,
+                    audio_session_realtime_lane::diarization);
+            }
+            if (session->transcription_bridge != nullptr) {
+                session->transcription_bridge->manager.flush_session(session->transcription_bridge->session_id);
+                drain_realtime_bridge_events_locked(
+                    session,
+                    session->transcription_bridge,
+                    0,
+                    audio_session_realtime_lane::transcription);
+                transcription_bridge_to_destroy = session->transcription_bridge;
+                session->transcription_bridge = nullptr;
+                session->transcription_requested = false;
+                session->transcription_running = false;
+                session->transcription_completed = true;
+                session->transcription_native_realtime = false;
+
+                audio_session_event_record stopped = {};
+                stopped.kind = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_STOPPED;
+                stopped.flags = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FINAL;
+                stopped.end_sample = static_cast<uint64_t>(session->audio_samples.size());
+                stopped.detail = "completed";
+                push_audio_session_event_locked(session, std::move(stopped));
+            }
+            audio_session_event_record flushed = {};
+            flushed.kind = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_STREAM_FLUSHED;
+            flushed.flags = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FINAL;
+            flushed.end_sample = static_cast<uint64_t>(session->audio_samples.size());
+            push_audio_session_event_locked(session, std::move(flushed));
+        }
+        destroy_realtime_bridge(transcription_bridge_to_destroy);
+        set_audio_session_error(session, "");
+        return maybe_launch_audio_session_transcription(session);
+    } catch (const std::exception & e) {
+        return fail_audio_session(session, normalize_error(e.what()));
+    } catch (...) {
+        return fail_audio_session(session, "unknown audio session flush failure");
+    }
+}
+
+int32_t llama_server_bridge_audio_session_start_diarization(
+    struct llama_server_bridge_audio_session * session,
+    const struct llama_server_bridge_realtime_params * params) {
+
+    if (session == nullptr) {
+        return -1;
+    }
+
+    const auto defaults = llama_server_bridge_default_realtime_params();
+    auto resolved = params != nullptr ? *params : defaults;
+    if (resolved.expected_sample_rate_hz == 0) {
+        resolved.expected_sample_rate_hz = session->params.expected_input_sample_rate_hz;
+    }
+    if (resolved.expected_sample_rate_hz != session->params.expected_input_sample_rate_hz) {
+        return fail_audio_session(
+            session,
+            "diarization expected_sample_rate_hz must match the audio session sample rate");
+    }
+
+    auto * bridge = llama_server_bridge_realtime_create(&resolved);
+    if (bridge == nullptr) {
+        return fail_audio_session(session, "failed to create realtime diarization bridge");
+    }
+
+    try {
+        bool already_running = false;
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->diarization_bridge != nullptr) {
+            already_running = true;
+        } else {
+            session->diarization_bridge = bridge;
+            session->diarization_started = true;
+            session->diarization_stopped = false;
+
+            audio_session_event_record started = {};
+            started.kind = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_DIARIZATION_STARTED;
+            started.detail = resolved.model_path != nullptr ? resolved.model_path : "";
+            push_audio_session_event_locked(session, std::move(started));
+
+            replay_audio_into_realtime_bridge_locked(
+                session,
+                session->diarization_bridge,
+                audio_session_realtime_lane::diarization);
+
+            if (session->audio_flushed) {
+                session->diarization_bridge->manager.flush_session(session->diarization_bridge->session_id);
+                drain_realtime_bridge_events_locked(
+                    session,
+                    session->diarization_bridge,
+                    LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FROM_BUFFER_REPLAY,
+                    audio_session_realtime_lane::diarization);
+            }
+        }
+        if (already_running) {
+            // handled below outside the session mutex
+        } else {
+            set_audio_session_error(session, "");
+            return 0;
+        }
+    } catch (const std::exception & e) {
+        {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            if (session->diarization_bridge == bridge) {
+                session->diarization_bridge = nullptr;
+            }
+        }
+        llama_server_bridge_realtime_destroy(bridge);
+        return fail_audio_session(session, normalize_error(e.what()));
+    } catch (...) {
+        {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            if (session->diarization_bridge == bridge) {
+                session->diarization_bridge = nullptr;
+            }
+        }
+        llama_server_bridge_realtime_destroy(bridge);
+        return fail_audio_session(session, "unknown audio session diarization start failure");
+    }
+    llama_server_bridge_realtime_destroy(bridge);
+    return fail_audio_session(session, "diarization is already running for this audio session");
+}
+
+int32_t llama_server_bridge_audio_session_stop_diarization(
+    struct llama_server_bridge_audio_session * session) {
+
+    if (session == nullptr) {
+        return -1;
+    }
+
+    llama_server_bridge_realtime * bridge = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        bridge = session->diarization_bridge;
+        session->diarization_bridge = nullptr;
+        if (bridge != nullptr) {
+            session->diarization_stopped = true;
+            audio_session_event_record stopped = {};
+            stopped.kind = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_DIARIZATION_STOPPED;
+            stopped.flags = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FINAL;
+            push_audio_session_event_locked(session, std::move(stopped));
+        }
+    }
+    if (bridge != nullptr) {
+        llama_server_bridge_realtime_destroy(bridge);
+    }
+    set_audio_session_error(session, "");
+    return 0;
+}
+
+int32_t llama_server_bridge_audio_session_start_transcription(
+    struct llama_server_bridge_audio_session * session,
+    const struct llama_server_bridge_audio_transcription_params * params) {
+
+    if (session == nullptr) {
+        return -1;
+    }
+
+    owned_audio_transcription_params owned = {};
+    owned.assign(params);
+    if (owned.mode == LLAMA_SERVER_BRIDGE_AUDIO_TRANSCRIPTION_MODE_REALTIME_NATIVE) {
+        return start_audio_session_native_transcription(session, owned);
+    }
+
+    bool already_running = false;
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->transcription_running) {
+            already_running = true;
+        } else {
+            session->transcription_params = std::move(owned);
+            session->transcription_requested = true;
+            session->transcription_started = false;
+            session->transcription_completed = false;
+            session->transcription_stop_requested = false;
+        }
+    }
+    if (already_running) {
+        return fail_audio_session(session, "transcription is already running for this audio session");
+    }
+    set_audio_session_error(session, "");
+    return maybe_launch_audio_session_transcription(session);
+}
+
+int32_t llama_server_bridge_audio_session_stop_transcription(
+    struct llama_server_bridge_audio_session * session) {
+
+    if (session == nullptr) {
+        return -1;
+    }
+
+    bool emit_stopped = false;
+    bool running = false;
+    llama_server_bridge_realtime * transcription_bridge = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->transcription_native_realtime && session->transcription_bridge != nullptr) {
+            transcription_bridge = session->transcription_bridge;
+            session->transcription_bridge = nullptr;
+            session->transcription_requested = false;
+            session->transcription_started = false;
+            session->transcription_running = false;
+            session->transcription_completed = false;
+            session->transcription_stop_requested = true;
+            session->transcription_native_realtime = false;
+            emit_stopped = true;
+        } else if (session->transcription_running) {
+            running = true;
+        } else {
+            emit_stopped = session->transcription_requested || session->transcription_started || session->transcription_completed;
+            session->transcription_requested = false;
+            session->transcription_started = false;
+            session->transcription_completed = false;
+            session->transcription_stop_requested = true;
+            session->transcription_native_realtime = false;
+        }
+    }
+    destroy_realtime_bridge(transcription_bridge);
+    if (running) {
+        return fail_audio_session(session, "cannot stop transcription while the offline job is already running");
+    }
+
+    join_audio_session_transcription_thread(session);
+
+    if (emit_stopped) {
+        push_audio_session_event(
+            session,
+            LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_STOPPED,
+            LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FINAL,
+            0,
+            0,
+            -1,
+            0,
+            "",
+            "stopped");
+    }
+    set_audio_session_error(session, "");
+    return 0;
+}
+
+int32_t llama_server_bridge_audio_session_wait_events(
+    struct llama_server_bridge_audio_session * session,
+    uint32_t timeout_ms) {
+
+    if (session == nullptr) {
+        return -1;
+    }
+
+    std::unique_lock<std::mutex> lock(session->mutex);
+    if (session->event_queue.empty() && timeout_ms > 0) {
+        session->cv.wait_for(
+            lock,
+            std::chrono::milliseconds(timeout_ms),
+            [session]() { return !session->event_queue.empty(); });
+    }
+    const size_t count = session->event_queue.size();
+    return count > static_cast<size_t>(INT32_MAX) ? INT32_MAX : static_cast<int32_t>(count);
+}
+
+int32_t llama_server_bridge_audio_session_drain_events(
+    struct llama_server_bridge_audio_session * session,
+    struct llama_server_bridge_audio_event ** out_events,
+    size_t * out_count,
+    size_t max_events) {
+
+    if (session == nullptr || out_events == nullptr || out_count == nullptr) {
+        return -1;
+    }
+
+    *out_events = nullptr;
+    *out_count = 0;
+
+    std::vector<audio_session_event_record> drained;
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        const size_t limit = (max_events == 0)
+            ? session->event_queue.size()
+            : std::min(max_events, session->event_queue.size());
+        drained.reserve(limit);
+        for (size_t i = 0; i < limit; ++i) {
+            drained.push_back(std::move(session->event_queue.front()));
+            session->event_queue.pop_front();
+        }
+    }
+
+    if (drained.empty()) {
+        set_audio_session_error(session, "");
+        return 0;
+    }
+
+    auto * out = static_cast<llama_server_bridge_audio_event *>(
+        std::calloc(drained.size(), sizeof(llama_server_bridge_audio_event)));
+    if (out == nullptr) {
+        return fail_audio_session(session, "failed to allocate audio session event array");
+    }
+
+    for (size_t i = 0; i < drained.size(); ++i) {
+        out[i].seq_no = drained[i].seq_no;
+        out[i].kind = drained[i].kind;
+        out[i].flags = drained[i].flags;
+        out[i].start_sample = drained[i].start_sample;
+        out[i].end_sample = drained[i].end_sample;
+        out[i].speaker_id = drained[i].speaker_id;
+        out[i].item_id = drained[i].item_id;
+        out[i].text = copy_to_c_string(drained[i].text);
+        out[i].detail = copy_to_c_string(drained[i].detail);
+    }
+
+    *out_events = out;
+    *out_count = drained.size();
+    set_audio_session_error(session, "");
+    return 0;
+}
+
+void llama_server_bridge_audio_session_free_events(
+    struct llama_server_bridge_audio_event * events,
+    size_t count) {
+
+    if (events == nullptr) {
+        return;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        std::free(events[i].text);
+        std::free(events[i].detail);
+    }
+    std::free(events);
+}
+
+const char * llama_server_bridge_audio_session_last_error(
+    const struct llama_server_bridge_audio_session * session) {
+
+    if (session == nullptr) {
+        return "";
+    }
+    std::lock_guard<std::mutex> lock(session->error_mutex);
+    return session->last_error.c_str();
 }
 
 static int32_t run_json_route(
@@ -2020,6 +4400,8 @@ int32_t llama_server_bridge_chat_complete(
             body["dry_penalty_last_n"] = req->dry_penalty_last_n;
         }
 
+        apply_bridge_reasoning_options(req, body);
+
         std::vector<raw_buffer> ignored_files;
         json llama_params = oaicompat_chat_params_parse(body, meta.chat_params, ignored_files);
 
@@ -2230,6 +4612,8 @@ int32_t llama_server_bridge_vlm_complete(
         if (req->dry_penalty_last_n >= 0) {
             body["dry_penalty_last_n"] = req->dry_penalty_last_n;
         }
+
+        apply_bridge_reasoning_options(req, body);
 
         std::vector<raw_buffer> ignored_files;
         json llama_params = oaicompat_chat_params_parse(body, meta.chat_params, ignored_files);

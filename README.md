@@ -4,7 +4,7 @@
 
 Openresearchtools-Engine is a local AI runtime primarily based on Llama.CPP, that you can embed directly into an application.
 
-It aims to unify chat, vision, embeddings, reranking, audio transcription/diarization, and PDF-to-Markdown in one native stack (Rust + C++), so you don’t have to glue together separate runtimes for each task.
+It aims to unify chat, vision, embeddings, reranking, audio transcription/diarization, and PDF-to-Markdown in one native stack (Rust + C++), so you don't have to glue together separate runtimes for each task.
 
 ## Implementation goals
 
@@ -12,14 +12,14 @@ It aims to unify chat, vision, embeddings, reranking, audio transcription/diariz
 * **Keep deployment and runtime paths lightweight** (avoid heavy Python-first stacks in the inference/runtime layer).
 * **Support true in-process integration**, not just process-spawn or HTTP-only approaches.
 * **Make inference behavior controllable in production** with explicit GPU/CPU selection, offload controls, and multi-GPU knobs.
-* **Handle both “easy” and “hard” PDFs** by supporting a fast digital-PDF path and a VLM-based conversion path for difficult layouts.
+* **Handle both "easy" and "hard" PDFs** by supporting a fast digital-PDF path and a VLM-based conversion path for difficult layouts.
 
-## What’s implemented so far
+## What's implemented so far
 
 * In-process `llama-server-bridge` (no HTTP requirement for app embedding).
 * Chat, VLM, embeddings, reranking.
-* Audio transcription, plus an experimental high-quality Pyannote-based diarization path integrated into the llama runtime environment.
-* PDF → Markdown:
+* Audio session runtime with Whisper transcription, native Sortformer diarization, native Voxtral realtime transcription, and Rust-side speaker/text assembly.
+* PDF -> Markdown:
 
   * fast native digital PDF path (`pdf.dll`)
   * VLM document-conversion path (`pdfvlm.dll`)
@@ -30,7 +30,7 @@ It aims to unify chat, vision, embeddings, reranking, audio transcription/diariz
 * Some components are **experimental**, especially the diarization path.
 * This project is an **independent engineering effort** and is **not affiliated with, sponsored by, or endorsed by** the upstream projects it builds on.
 * References to third-party project names are for compatibility and attribution only.
-* All third-party names and marks (including `llama.cpp`, `pyannote.audio`, `whisper.cpp`, `Docling`, `PDFium`, `FFmpeg`, and Qwen/Qwen3-VL) remain the property of their respective owners.
+* All third-party names and marks (including `llama.cpp`, `whisper.cpp`, `NVIDIA NeMo`, `Docling`, `PDFium`, `FFmpeg`, and Qwen/Qwen3-VL) remain the property of their respective owners.
 
 ## License and notices
 
@@ -38,8 +38,8 @@ Openresearchtools-engine source code is licensed under the MIT License; third-pa
 
 For full notices, license types, and source provenance:
 
-* `NOTICES.md`
-* `third_party/licenses/README.md`
+* [`NOTICES.md`](NOTICES.md)
+* [`third_party/licenses/README.md`](third_party/licenses/README.md)
 
 ## How to embed it
 
@@ -92,6 +92,15 @@ These runtime controls are available across `chat`, `vlm`, `audio`, `embed`, `re
 * `--split-mode <none|layer|row>` and `--tensor-split <csv>` (multi-GPU split)
 * `--threads <int>` and `--threads-batch <int>` (CPU compute thread controls)
 
+Reasoning controls for `chat`, `vlm`, and `pdfvlm`:
+
+* If `--reasoning` is omitted, no reasoning flags are sent and the model/runtime decides what to do.
+* `--reasoning off` automatically sends `reasoning_budget 0`.
+* `--reasoning on` and `--reasoning auto` automatically send `reasoning_budget -1` unless you override it.
+* If `--reasoning` is set and `--reasoning-format` is omitted, the runtime sends `deepseek`.
+* `--reasoning-format none` keeps visible thinking in the main output.
+* `--reasoning-format deepseek` asks the server/runtime to parse reasoning separately where supported.
+
 Default behavior:
 * Windows/Linux: if no GPU is specified (`--gpu`/`--devices` omitted), runtime is CPU-only
 * macOS (Apple Silicon / Metal builds): if no GPU is specified, runtime selects the first GPU
@@ -124,6 +133,27 @@ engine.exe chat `
   --n-predict 10000
 ```
 
+```powershell
+# Chat with reasoning disabled
+engine.exe chat `
+  --model ".\models\model.gguf" `
+  --gpu 0 `
+  --reasoning off `
+  --prompt "What is 17 multiplied by 19? Reply with only the final answer." `
+  --out ".\answer_reasoning_off.txt"
+```
+
+```powershell
+# Chat with visible reasoning output
+engine.exe chat `
+  --model ".\models\model.gguf" `
+  --gpu 0 `
+  --reasoning on `
+  --reasoning-format none `
+  --prompt "What is 17 multiplied by 19? Reply with only the final answer." `
+  --out ".\answer_reasoning_on.txt"
+```
+
 If you already have a Markdown file you want summarized, you can pass it directly. When you omit `--prompt`, the CLI uses a default summary prompt.
 
 ```powershell
@@ -151,7 +181,7 @@ engine.exe chat `
 
 Use `vlm` when you want to run a vision-language model over an image (including page renders) and produce Markdown or a prompt-driven description.
 
-This example runs “image → Markdown” conversion with the default extraction prompt.
+This example runs "image -> Markdown" conversion with the default extraction prompt.
 
 ```powershell
 # VLM markdown conversion (default prompt = markdown extraction)
@@ -163,6 +193,31 @@ engine.exe vlm `
   --mmproj-use-gpu 1 `
   --n-gpu-layers -1 `
   --main-gpu 0
+```
+
+```powershell
+# VLM with reasoning disabled
+engine.exe vlm `
+  --model ".\models\vision.gguf" `
+  --mmproj ".\models\mmproj.gguf" `
+  --image ".\image.png" `
+  --prompt "Describe the image briefly, then identify the main object shown." `
+  --gpu 0 `
+  --reasoning off `
+  --out ".\image_reasoning_off.txt"
+```
+
+```powershell
+# VLM with visible reasoning output
+engine.exe vlm `
+  --model ".\models\vision.gguf" `
+  --mmproj ".\models\mmproj.gguf" `
+  --image ".\image.png" `
+  --prompt "Describe the image briefly, then identify the main object shown." `
+  --gpu 0 `
+  --reasoning on `
+  --reasoning-format none `
+  --out ".\image_reasoning_on.txt"
 ```
 
 If you want the model to answer a specific question about an image, provide your own prompt.
@@ -185,7 +240,7 @@ engine.exe vlm `
 * `1`: run mmproj on GPU
 * `0`: run mmproj on CPU
 
-### Multi‑GPU split
+### Multi-GPU split
 
 If a model is too large for one GPU, you can split across multiple devices. This example shows a layer split with an explicit tensor split ratio.
 
@@ -205,10 +260,133 @@ engine.exe chat `
 
 ## Audio: transcription with and without diarization
 
-Openresearchtools-Engine's audio path is designed for two common workflows:
+`engine bridge audio-session` is the preferred audio entrypoint for current work.
 
-* **Transcription without diarization** (single-speaker style output) using `--mode speech` or `--mode subtitle`.
-* **Transcription with diarization** (speaker-aware transcript) using `--mode transcript` plus diarization models.
+Use `audio-session` when you want:
+
+* file transcription only
+* file diarization only
+* file transcription + diarization
+* live/session-style PCM ingress
+* native realtime Voxtral transcription
+
+`engine audio` remains available as the compatibility CLI route, but the current end-to-end session work is centered on `audio-session`.
+
+### Recommended `audio-session` commands
+
+Whisper transcription only from file:
+
+```powershell
+engine.exe bridge audio-session `
+  --audio-file ".\sample.wav" `
+  --whisper-hf-repo ggerganov/whisper.cpp `
+  --whisper-hf-file ggml-large-v3-turbo.bin `
+  --gpu 0 `
+  --out ".\sample_transcript.txt"
+```
+
+Whisper + native Sortformer diarization from file:
+
+```powershell
+engine.exe bridge audio-session `
+  --audio-file ".\meeting.wav" `
+  --diarization-model-path ".\models\sortformer.gguf" `
+  --diarization-device Vulkan0 `
+  --whisper-hf-repo ggerganov/whisper.cpp `
+  --whisper-hf-file ggml-large-v3-turbo.bin `
+  --gpu 0 `
+  --out ".\meeting_diarized.md" `
+  --timeline-json-out ".\meeting_timeline.json"
+```
+
+Diarization only from file:
+
+```powershell
+engine.exe bridge audio-session `
+  --audio-file ".\meeting.wav" `
+  --diarization-model-path ".\models\sortformer.gguf" `
+  --diarization-device Vulkan0 `
+  --out ".\meeting_spans.md"
+```
+
+Native Voxtral transcription on the same continuous session path:
+
+```powershell
+engine.exe bridge audio-session `
+  --audio-file ".\meeting.wav" `
+  --transcription-realtime-model ".\models\voxtral-mini-4b-realtime.gguf" `
+  --transcription-device Vulkan0 `
+  --out ".\meeting_voxtral.txt"
+```
+
+Native Voxtral + native Sortformer on the same continuous session path:
+
+```powershell
+engine.exe bridge audio-session `
+  --audio-file ".\meeting.wav" `
+  --transcription-realtime-model ".\models\voxtral-mini-4b-realtime.gguf" `
+  --transcription-device Vulkan0 `
+  --diarization-model-path ".\models\sortformer.gguf" `
+  --diarization-device Vulkan0 `
+  --out ".\meeting_voxtral_diarized.md" `
+  --timeline-json-out ".\meeting_voxtral_timeline.json"
+```
+
+Live PCM/stdin -> native Voxtral transcription:
+
+```powershell
+Get-Content ".\meeting_mono16k_s16le.raw" -Encoding Byte | `
+engine.exe bridge audio-session `
+  --stdin-pcm-s16le `
+  --stdin-chunk-frames 7680 `
+  --session-sample-rate 16000 `
+  --session-channels 1 `
+  --transcription-realtime-model ".\models\voxtral-mini-4b-realtime.gguf" `
+  --transcription-device Vulkan0 `
+  --out ".\live_voxtral.txt"
+```
+
+Live PCM/stdin -> native Voxtral + native Sortformer:
+
+```powershell
+Get-Content ".\meeting_mono16k_s16le.raw" -Encoding Byte | `
+engine.exe bridge audio-session `
+  --stdin-pcm-s16le `
+  --stdin-chunk-frames 7680 `
+  --session-sample-rate 16000 `
+  --session-channels 1 `
+  --transcription-realtime-model ".\models\voxtral-mini-4b-realtime.gguf" `
+  --transcription-device Vulkan0 `
+  --diarization-model-path ".\models\sortformer.gguf" `
+  --diarization-device Vulkan0 `
+  --out ".\live_voxtral_diarized.md"
+```
+
+Live PCM/stdin -> Whisper + native Sortformer (staged):
+
+```powershell
+Get-Content ".\meeting_mono16k_s16le.raw" -Encoding Byte | `
+engine.exe bridge audio-session `
+  --stdin-pcm-s16le `
+  --stdin-chunk-frames 7680 `
+  --session-sample-rate 16000 `
+  --session-channels 1 `
+  --staged `
+  --diarization-model-path ".\models\sortformer.gguf" `
+  --diarization-device Vulkan0 `
+  --whisper-hf-repo ggerganov/whisper.cpp `
+  --whisper-hf-file ggml-large-v3-turbo.bin `
+  --gpu 0 `
+  --out ".\live_whisper_diarized.md"
+```
+
+For the full session ABI surface, rolling-write behavior, and more live PCM/stdin examples, see:
+
+* [`docs/bridge-audio-dll.md`](docs/bridge-audio-dll.md)
+
+### Compatibility route: `engine audio`
+
+`engine audio` remains available for compatibility and one-shot file-oriented runs, but new work should prefer `engine bridge audio-session`.
 
 ### Command shape
 
@@ -256,15 +434,13 @@ Whisper is required for audio processing. Provide exactly one of:
 
 When you want speaker-aware transcripts, provide diarization models in one of these ways:
 
+* Local GGUF file: `--diarization-model-path <file.gguf>`
 * Local directory: `--diarization-models-dir <dir>`
-* Hugging Face repo: `--diarization-hf-repo <repo>`
 
 You can also optionally set:
 
 * `--diarization-device <value>` (defaults to `auto`)
-
-A repository of converted GGUF diarization models is available here:
-[https://huggingface.co/openresearchtools/speaker-diarization-community-1-GGUF](https://huggingface.co/openresearchtools/speaker-diarization-community-1-GGUF)
+* `--diarization-feed-ms <number>` (external audio ingress cadence in milliseconds, for example `100`, `470`, `1000`)
 
 ### Advanced audio knobs (CLI flags or `--body-json`)
 
@@ -280,18 +456,16 @@ Whisper controls:
 * `--whisper-offline`
 * `--whisper-word-time-offset-sec`
 
-Diarization and alignment controls:
+Diarization controls:
 
-* `--diarization-backend` (`native_cpp`/`auto`)
-* `--diarization-offline`
-* `--diarization-embedding-min-segment-duration-sec`
-* `--diarization-embedding-max-segments-per-speaker`
-* `--diarization-min-duration-off-sec`
+* `--diarization-model-path`, `--diarization-models-dir`
+* `--diarization-backend` (`auto`, `native_cpp`, `realtime`, `sortformer`)
+* `--diarization-device`
+* `--diarization-feed-ms`
 * `--speaker-seg-max-gap-sec`
 * `--speaker-seg-max-words`
 * `--speaker-seg-max-duration-sec`
 * `--speaker-seg-split-on-hard-break`, `--speaker-seg-no-split-on-hard-break`
-* `--aligner-plda-sim-threshold`
 
 Pipeline/runtime controls:
 
@@ -325,14 +499,15 @@ engine.exe audio `
   --mode transcript `
   --custom auto `
   --whisper-model ".\models\my-custom-whisper.bin" `
-  --diarization-models-dir ".\models\diarization" `
+  --diarization-model-path ".\models\sortformer.gguf" `
+  --diarization-feed-ms 470 `
   --whisper-word-time-offset-sec 0.85 `
   --source-audio-seconds 1032.4
 ```
 
 ### Audio examples
 
-This is a straightforward “speech mode” transcription run (no diarization). Use this when you just want clean text output and don’t need speaker separation.
+This is a straightforward "speech mode" transcription run (no diarization). Use this when you just want clean text output and don't need speaker separation.
 
 ```powershell
 # speech mode, default custom
@@ -345,7 +520,7 @@ engine.exe audio `
   --whisper-model ".\models\whisper.bin"
 ```
 
-This produces subtitle-style output, where you can control the window size via `--custom` (here, 4.5 seconds). It’s useful when you want timestamps/segments rather than one continuous paragraph.
+This produces subtitle-style output, where you can control the window size via `--custom` (here, 4.5 seconds). It's useful when you want timestamps/segments rather than one continuous paragraph.
 
 ```powershell
 # subtitle mode, 4.5-second windowing via custom
@@ -367,24 +542,26 @@ engine.exe audio `
   --mode transcript `
   --custom auto `
   --whisper-model ".\models\whisper.bin" `
-  --diarization-models-dir ".\models\diarization" `
+  --diarization-model-path ".\models\sortformer.gguf" `
+  --diarization-feed-ms 470 `
   --diarization-device auto
 ```
 
-**Offline note:** if you want to run diarization fully offline with `--diarization-models-dir`, download *all required diarization model files* into that single folder (and keep the directory contents intact). The runtime expects everything it needs to be present locally in that directory.
+**Offline note:** if you want to run diarization fully offline, point to a local GGUF file with `--diarization-model-path`, or place one inside `--diarization-models-dir`. The runtime does not fetch diarization models from Hugging Face anymore.
 
-This example also runs a diarized transcript, but forces a fixed speaker count (`--custom 3`) and pulls both Whisper and diarization models from Hugging Face.
+This example also runs a diarized transcript, but changes the ingress cadence for lower-latency updates while keeping the same native realtime backend.
 
 ```powershell
-# transcript mode, fixed 3 speakers, diarization from HF
+# transcript mode, lower-latency feed cadence
 engine.exe audio `
   --audio-file ".\meeting.mp3" `
   --output-dir ".\outputs" `
   --mode transcript `
-  --custom 3 `
+  --custom auto `
   --whisper-hf-repo ggerganov/whisper.cpp `
   --whisper-hf-file ggml-tiny.en.bin `
-  --diarization-hf-repo openresearchtools/speaker-diarization-community-1-GGUF `
+  --diarization-model-path ".\models\sortformer.gguf" `
+  --diarization-feed-ms 100 `
   --diarization-device cuda
 ```
 
@@ -411,7 +588,7 @@ Fast digital PDF conversion:
 engine.exe pdf extract --input ".\paper.pdf" --output ".\paper_fast.md" --overwrite
 ```
 
-VLM PDF conversion (PDF → render → VLM → Markdown). Choose the option that matches how you ship the PDFium runtime library:
+VLM PDF conversion (PDF -> render -> VLM -> Markdown). Choose the option that matches how you ship the PDFium runtime library:
 
 ```powershell
 # PDF VLM conversion
@@ -436,9 +613,32 @@ $env:PDFIUM_LIB=".\vendor\pdfium\pdfium.dll"
 engine.exe pdfvlm --pdf ".\paper.pdf" --model ".\models\vision.gguf" --mmproj ".\models\mmproj.gguf" --out ".\paper_vlm.md"
 ```
 
+```powershell
+# PDF VLM with reasoning disabled
+engine.exe pdfvlm `
+  --pdf ".\paper.pdf" `
+  --model ".\models\vision.gguf" `
+  --mmproj ".\models\mmproj.gguf" `
+  --gpu 0 `
+  --reasoning off `
+  --out ".\paper_vlm_reasoning_off.md"
+```
+
+```powershell
+# PDF VLM with visible reasoning output
+engine.exe pdfvlm `
+  --pdf ".\paper.pdf" `
+  --model ".\models\vision.gguf" `
+  --mmproj ".\models\mmproj.gguf" `
+  --gpu 0 `
+  --reasoning on `
+  --reasoning-format none `
+  --out ".\paper_vlm_reasoning_on.md"
+```
+
 ### VLM model note (tested configuration)
 
-For scientific PDF → Markdown conversion, we tested the Qwen3-VL GGUF release:
+For scientific PDF -> Markdown conversion, we tested the Qwen3-VL GGUF release:
 [https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/tree/main](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/tree/main)
 
 In our testing, we got **reasonably high quality results** with:
@@ -446,9 +646,9 @@ In our testing, we got **reasonably high quality results** with:
 * `Qwen3VL-8B-Instruct-Q8_0.gguf` (fits a 16GB VRAM GPU)
 * `mmproj-Qwen3VL-8B-Instruct-F16.gguf`
 
-One important caveat: on **large, complex tables**, the model can occasionally make structural mistakes (for example, attributing a number to the wrong row or the wrong column). If you plan to extract data from tables, it’s strongly recommended to **inspect the original PDF and the tables themselves** before trusting downstream derived values.
+One important caveat: on **large, complex tables**, the model can occasionally make structural mistakes (for example, attributing a number to the wrong row or the wrong column). If you plan to extract data from tables, it's strongly recommended to **inspect the original PDF and the tables themselves** before trusting downstream derived values.
 
-We have **no affiliation with the Qwen team**. This is simply a personal observation after testing multiple models that fit within a 16GB VRAM GPU.
+We have **no affiliation with the Qwen team**. This note reflects internal evaluation of models that fit within a 16GB VRAM GPU.
 
 ---
 
@@ -646,7 +846,10 @@ Openresearchtools-Engine is possible because of the open work done by these proj
 
 * `llama.cpp`: core model runtime, GPU offload controls, KV-cache behavior, multi-GPU split controls, and server-side inference lifecycle patterns used by the bridge and engine orchestration.
 * `whisper.cpp`: transcription pipeline foundations, including audio-to-token flow, timestamp-oriented decoding behavior, and integration patterns for speech tasks.
-* `pyannote.audio` and `WeSpeaker`: diarization lineage and reference ideas for segmentation/embedding-style speaker processing, plus speaker-turn reconstruction expectations used in the experimental diarization path.
+* `NVIDIA NeMo` / Sortformer: model/archive semantics and parity baselines used as the source basis for the repo-written native Sortformer conversion and validation flow.
+* `parakeet.cpp`: additional external C++ Sortformer reference studied during native Sortformer bring-up and converter/runtime cross-checking.
+* `voxtral-cpp`: primary native `ggml` implementation base for the current Voxtral realtime runtime, and the source origin for the repo-kept Voxtral GGUF conversion tool.
+* `vLLM`, `voxtral.c`, `voxtral-mini-realtime-rs`, and `mlx-audio`: external reference implementations and throughput/behavior baselines used during Voxtral bring-up and validation.
 * `Docling`: practical references for VLM document-conversion behavior, including page rendering/scaling heuristics and Markdown-oriented extraction expectations for PDF-to-Markdown workflows.
 * `PDFium` and `pdfium-render`: PDF rasterization and page access primitives used for native page rendering/extraction in the PDF modules.
 * `FFmpeg` (LGPL shared builds): audio normalization and format conversion path used when input media needs conversion to inference-friendly audio format.

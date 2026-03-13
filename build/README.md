@@ -29,7 +29,7 @@ Default download destinations:
 Both scripts now reject repo-internal destinations.
 
 `build_full_stack_cuda.ps1` fetches PDFium automatically, and fetches FFmpeg automatically when `-EnableFfmpeg` is set.
-Build source preparation is patch-only: repo `third_party/llama.cpp` snapshot + `0300` patch into `..\ENGINEbuilds\...` (no in-place overwrite of repo sources).
+Build source preparation is patch-only: repo `third_party/llama.cpp` snapshot + sorted patch set from `diarize/addons/patches/*.patch` into `..\ENGINEbuilds\...` (no in-place overwrite of repo sources).
 
 Windows x64 workflow fetch:
 
@@ -79,7 +79,39 @@ Defaults:
 
 - Prepared source: `..\ENGINEbuilds\sources\llama.cpp\`
 - Repo source: `third_party/llama.cpp`
-- Patch: `diarize/addons/patches/0300-llama-unified-audio.patch`
+- Patches: `diarize/addons/patches/*.patch` (applied in sorted order)
+
+Overlay behavior:
+
+- repo overlay sources under `diarize/addons/overlay/llama.cpp/tools/` are copied into the prepared workspace
+- this includes the standalone native realtime subsystem under `tools/realtime/`
+- upstream file modifications under `tools/` are patch-driven
+- overlay copy-in is for repo-added files such as `tools/realtime/*` and `tools/whisper/*`
+
+## Realtime native tooling
+
+The native realtime Sortformer runtime now lives as normal overlay source under:
+
+- `diarize/addons/overlay/llama.cpp/tools/realtime/`
+- `diarize/addons/overlay/llama.cpp/tools/server/`
+
+The repo-kept model conversion/parity tools for that path are:
+
+- `build/sortformer/convert_nemo_sortformer_to_gguf.py`
+- `build/voxtral/convert_voxtral_to_gguf.py`
+
+The current Sortformer converter is a repo-written ENGINE script based on NVIDIA NeMo Sortformer archive/parity references.
+The Voxtral converter is adapted from `voxtral-cpp/tools/convert_voxtral_to_gguf.py`.
+
+## License bundle maintenance
+
+Regenerate the curated top-level license bundle files after updating `third_party/licenses/README.md` or the top-level license set:
+
+```powershell
+.\build\generate_license_bundles.ps1
+```
+
+`build_engine.ps1` now regenerates the bundle `LICENSES*.txt` files into the output `licenses/` folder during staging, and the GitHub Actions workflows regenerate the checked-out `LICENSES*.txt` files before their preflight checks.
 
 ## One-command full backend flow (CUDA or Vulkan)
 
@@ -132,7 +164,6 @@ Default outputs:
   -Config Release `
   -BuildDir "..\ENGINEbuilds\llama\cmake-cuda-release" `
   -BuildLlamaServerCli:$false `
-  -BuildPyannoteCli:$false `
   -EnableFfmpeg
 ```
 
@@ -165,7 +196,7 @@ Default outputs:
 - `licenses/LICENSES.txt` (key runtime/release license texts combined into one file)
 - `licenses/THIRD_PARTY_NOTICES.md` (bundle-level notice index with pointers)
 - `licenses/third_party/*` copied from repo `third_party/licenses` top-level curated files
-  (tooling-only `torch`/`numpy`/`torchaudio` files are intentionally excluded)
+  (tooling-only `torch`/`numpy`/`PyYAML` files are not included in these curated shipped bundles)
 - `licenses/rust-full/*` copied from repo `third_party/licenses/rust-full`
 
 ## GitHub Actions: Windows x64 (CUDA or Vulkan)

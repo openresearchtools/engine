@@ -1,0 +1,95 @@
+diff --git a/tools/server/server-common.h b/tools/server/server-common.h
+--- a/tools/server/server-common.h
++++ b/tools/server/server-common.h
+@@ -278,6 +278,7 @@ struct server_chat_params {
+     bool use_jinja;
+     bool prefill_assistant;
+     common_reasoning_format reasoning_format;
++    int32_t reasoning_budget = -1;
+     std::map<std::string, std::string> chat_template_kwargs; // mapping key --> json value
+     common_chat_templates_ptr tmpls;
+     bool allow_image;
+diff --git a/tools/server/server-common.cpp b/tools/server/server-common.cpp
+--- a/tools/server/server-common.cpp
++++ b/tools/server/server-common.cpp
+@@ -956,9 +956,16 @@ json oaicompat_chat_params_parse(
+     inputs.parallel_tool_calls   = json_value(body, "parallel_tool_calls", false);
+     inputs.add_generation_prompt = json_value(body, "add_generation_prompt", true);
+     inputs.reasoning_format      = opt.reasoning_format;
++    int reasoning_budget         = opt.reasoning_budget;
+     if (body.contains("reasoning_format")) {
+         inputs.reasoning_format = common_reasoning_format_from_name(body.at("reasoning_format").get<std::string>());
+     }
++    if (body.contains("reasoning_budget")) {
++        reasoning_budget = body.at("reasoning_budget").get<int>();
++        if (reasoning_budget < -1) {
++            throw std::invalid_argument("invalid value for \"reasoning_budget\" (expected -1, 0, or positive integer)");
++        }
++    }
+     inputs.enable_thinking       = opt.enable_thinking;
+     if (!inputs.tools.empty() && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE) {
+         if (body.contains("grammar")) {
+@@ -984,6 +991,11 @@ json oaicompat_chat_params_parse(
+     } else if (!enable_thinking_kwarg.empty() && enable_thinking_kwarg[0] == '"') {
+         throw std::invalid_argument("invalid type for \"enable_thinking\" (expected boolean, got string)");
+     }
++
++    if (reasoning_budget == 0) {
++        inputs.enable_thinking = false;
++    }
++    llama_params["reasoning_budget"] = reasoning_budget;
+ 
+     // if the assistant message appears at the end of list, we do not add end-of-turn token
+     // for ex. this can be useful to modify the reasoning process in reasoning models
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -891,6 +891,7 @@ struct server_context {
+                 /* use_jinja             */ params_base.use_jinja,
+                 /* prefill_assistant     */ params_base.prefill_assistant,
+                 /* reasoning_format      */ params_base.reasoning_format,
++                /* reasoning_budget      */ params_base.reasoning_budget,
+                 /* chat_template_kwargs  */ params_base.default_template_kwargs,
+                 /* tmpls                 */ std::move(chat_templates),
+                 /* allow_image           */ mctx ? mtmd_support_vision(mctx) : false,
+diff --git a/tools/server/server-task.h b/tools/server/server-task.h
+--- a/tools/server/server-task.h
++++ b/tools/server/server-task.h
+@@ -82,6 +82,7 @@ struct task_params {
+ 
+     // per-request parameters for chat parsing
+     common_chat_parser_params chat_parser_params;
++    int32_t reasoning_budget = -1;
+ 
+     // Embeddings
+     int32_t embd_normalize = 2; // (-1=none, 0=max absolute int16, 1=taxicab, 2=Euclidean/L2, >2=p-norm)
+diff --git a/tools/server/server-task.cpp b/tools/server/server-task.cpp
+--- a/tools/server/server-task.cpp
++++ b/tools/server/server-task.cpp
+@@ -71,6 +71,7 @@ json task_params::to_json(bool only_metrics) const {
+             {"min_keep",                  sampling.min_keep},
+             {"chat_format",               common_chat_format_name(chat_parser_params.format)},
+             {"reasoning_format",          common_reasoning_format_name(chat_parser_params.reasoning_format)},
++            {"reasoning_budget",          reasoning_budget},
+             {"reasoning_in_content",      chat_parser_params.reasoning_in_content},
+             {"thinking_forced_open",      chat_parser_params.thinking_forced_open},
+             {"samplers",                  samplers},
+@@ -134,6 +135,7 @@ json task_params::to_json(bool only_metrics) const {
+         {"preserved_tokens",          sampling.preserved_tokens},
+         {"chat_format",               common_chat_format_name(chat_parser_params.format)},
+         {"reasoning_format",          common_reasoning_format_name(chat_parser_params.reasoning_format)},
++        {"reasoning_budget",          reasoning_budget},
+         {"reasoning_in_content",      chat_parser_params.reasoning_in_content},
+         {"thinking_forced_open",      chat_parser_params.thinking_forced_open},
+         {"samplers",                  samplers},
+@@ -342,6 +344,10 @@ task_params server_task::params_from_json_cmpl(
+             reasoning_format = common_reasoning_format_from_name(data.at("reasoning_format").get<std::string>());
+         }
+         params.chat_parser_params.reasoning_format = reasoning_format;
++        params.reasoning_budget = json_value(data, "reasoning_budget", params_base.reasoning_budget);
++        if (params.reasoning_budget < -1) {
++            throw std::runtime_error("Error: reasoning_budget must be -1, 0, or a positive integer");
++        }
+         params.chat_parser_params.reasoning_in_content = params.stream && (reasoning_format == COMMON_REASONING_FORMAT_DEEPSEEK_LEGACY);
+         params.chat_parser_params.thinking_forced_open = json_value(data, "thinking_forced_open", false);
+         params.chat_parser_params.parse_tool_calls = json_value(data, "parse_tool_calls", false);

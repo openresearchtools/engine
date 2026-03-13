@@ -60,6 +60,10 @@ pub struct llama_server_bridge_vlm_request {
     pub dry_multiplier: f32,
     pub dry_allowed_length: i32,
     pub dry_penalty_last_n: i32,
+
+    pub reasoning: *const c_char,
+    pub reasoning_budget: i32,
+    pub reasoning_format: *const c_char,
 }
 
 #[repr(C)]

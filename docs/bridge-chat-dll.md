@@ -12,7 +12,7 @@ Reference header: `bridge/llama_server_bridge.h`.
 #include "llama_server_bridge.h"
 
 llama_server_bridge_params p = llama_server_bridge_default_params();
-p.model_path = "C:/models/chat.gguf";
+p.model_path = "./models/chat.gguf";
 p.gpu = 1; // optional; remove for CPU default on Windows/Linux
 
 llama_server_bridge *bridge = llama_server_bridge_create(&p);
@@ -76,16 +76,26 @@ Defaults (from `llama_server_bridge_default_params()`):
 - `repeat_last_n`, `repeat_penalty`
 - `presence_penalty`, `frequency_penalty`
 - `dry_multiplier`, `dry_allowed_length`, `dry_penalty_last_n`
+- `reasoning` (`on`, `off`, `auto`, or null/unset)
+- `reasoning_budget` (`-1`, `0`, positive integer, or unset sentinel)
+- `reasoning_format` (`none`, `deepseek`, `deepseek-legacy`, or null/unset)
 
 Sentinel behavior in runtime:
 - negative values typically mean "use route defaults" for optional sampling knobs.
 - if `n_predict <= 0`, runtime falls back to internal default.
 
+Reasoning behavior:
+- If `reasoning` is unset, no reasoning flags are sent.
+- If `reasoning = "off"`, the bridge forces `reasoning_budget = 0`.
+- If `reasoning = "on"` or `reasoning = "auto"` and no budget is supplied, the bridge sends `reasoning_budget = -1`.
+- If `reasoning` is set and no format is supplied, the bridge sends `reasoning_format = "deepseek"`.
+- `reasoning = "auto"` leaves template/runtime thinking behavior up to the model chat template.
+
 ## Full chat example (advanced)
 
 ```c
 llama_server_bridge_params p = llama_server_bridge_default_params();
-p.model_path = "C:/models/chat.gguf";
+p.model_path = "./models/chat.gguf";
 p.gpu = 1;
 p.n_ctx = 50000;
 p.n_batch = 1024;
@@ -122,4 +132,35 @@ if (rc != 0 || out.ok == 0) {
 
 llama_server_bridge_result_free(&out);
 llama_server_bridge_destroy(bridge);
+```
+
+## Chat reasoning example
+
+```c
+llama_server_bridge_params p = llama_server_bridge_default_params();
+p.model_path = "./models/chat.gguf";
+p.gpu = 0;
+
+llama_server_bridge *bridge = llama_server_bridge_create(&p);
+
+llama_server_bridge_chat_request req = llama_server_bridge_default_chat_request();
+req.prompt = "What is 17 multiplied by 19? Reply with only the final answer.";
+req.n_predict = 256;
+req.reasoning = "off";
+// reasoning_budget is automatically forced to 0 by the bridge when reasoning="off".
+// reasoning_format defaults to "deepseek" when reasoning is set.
+
+llama_server_bridge_vlm_result out = llama_server_bridge_empty_vlm_result();
+int rc = llama_server_bridge_chat_complete(bridge, &req, &out);
+
+llama_server_bridge_result_free(&out);
+llama_server_bridge_destroy(bridge);
+```
+
+To request visible reasoning output instead of suppressing it:
+
+```c
+req.reasoning = "on";
+req.reasoning_budget = -1;
+req.reasoning_format = "none";
 ```
