@@ -38,8 +38,13 @@ Openresearchtools-engine source code is licensed under the MIT License; third-pa
 
 For full notices, license types, and source provenance:
 
-* [`NOTICES.md`](NOTICES.md)
-* [`third_party/licenses/README.md`](third_party/licenses/README.md)
+* [`third_party/LICENSES.md`](third_party/LICENSES.md)
+* [`third_party/README.md`](third_party/README.md)
+
+Packaged app bundles ship these as root files:
+
+* `LICENSES.md`
+* `Third-Party-Notices.md`
 
 ## How to embed it
 
@@ -857,4 +862,5 @@ Openresearchtools-Engine is possible because of the open work done by these proj
 
 For full notices, license types, and source provenance:
 
-* `third_party/licenses/README.md`
+* `third_party/LICENSES.md`
+* `third_party/README.md`

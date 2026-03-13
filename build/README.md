@@ -105,13 +105,13 @@ The Voxtral converter is adapted from `voxtral-cpp/tools/convert_voxtral_to_gguf
 
 ## License bundle maintenance
 
-Regenerate the curated top-level license bundle files after updating `third_party/licenses/README.md` or the top-level license set:
+Regenerate the consolidated bundle license file after updating `third_party/README.md`, `third_party/licenses/rust-full/`, or the top-level license set:
 
 ```powershell
 .\build\generate_license_bundles.ps1
 ```
 
-`build_engine.ps1` now regenerates the bundle `LICENSES*.txt` files into the output `licenses/` folder during staging, and the GitHub Actions workflows regenerate the checked-out `LICENSES*.txt` files before their preflight checks.
+`build_engine.ps1` now copies the checked-in `third_party/LICENSES.md` file to bundle root as `LICENSES.md` without regenerating it. GitHub Actions only preflight-check that the checked-in files exist, then stage them as-is. Bundle notices are copied from `third_party/README.md` to bundle root as `Third-Party-Notices.md`.
 
 ## One-command full backend flow (CUDA or Vulkan)
 
@@ -188,16 +188,13 @@ Default outputs:
 - `vendor/pdfium/pdfium.dll` (if found)
 - `llama-server-bridge.dll` and related llama/ggml runtime DLLs (if found, kept in bundle root)
 - `cublas64_*.dll`, `cublasLt64_*.dll`, `cudart64_*.dll` (CUDA backend when CUDA runtime staging is enabled)
-- `NVIDIA-CUDA-RUNTIME-NOTICE.txt` in bundle root (CUDA backend) with pointers to official CUDA licensing files under `licenses/third_party/`
+- `NVIDIA-CUDA-RUNTIME-NOTICE.txt` in bundle root (CUDA backend)
 - `vendor/ffmpeg/bin/*.dll` runtime files required by bridge audio conversion (if enabled)
 - `vendor/pdfium/*` license/notice files copied from PDFium runtime source (with repo fallback files when needed)
 - `vendor/ffmpeg/*` license/notice files copied from FFmpeg runtime source (with repo fallback files when needed)
 - `LICENSE-ENGINE.txt` (project license)
-- `licenses/LICENSES.txt` (key runtime/release license texts combined into one file)
-- `licenses/THIRD_PARTY_NOTICES.md` (bundle-level notice index with pointers)
-- `licenses/third_party/*` copied from repo `third_party/licenses` top-level curated files
-  (tooling-only `torch`/`numpy`/`PyYAML` files are not included in these curated shipped bundles)
-- `licenses/rust-full/*` copied from repo `third_party/licenses/rust-full`
+- `LICENSES.md` (single overinclusive bundle license file copied from `third_party/LICENSES.md`)
+- `Third-Party-Notices.md` (bundle-level notice/provenance file copied from `third_party/licenses/README.md`)
 
 ## GitHub Actions: Windows x64 (CUDA or Vulkan)
 
@@ -222,10 +219,8 @@ gh workflow run windows-x64.yml --ref main -f backend=vulkan
 
 Windows bundle license/provenance notes:
 
-- Key bundle license file is selected by backend profile:
-  - CUDA: `third_party/licenses/LICENSES-cuda.txt`
-  - Vulkan: `third_party/licenses/LICENSES-vulkan.txt`
-  - Fallback: `third_party/licenses/LICENSES.txt`
+- Key bundle license file for all packaged variants: `third_party/LICENSES.md`
+- Bundle notice file for all packaged variants: `third_party/README.md` renamed to `Third-Party-Notices.md`
 - FFmpeg runtime files and license/provenance files are staged under `vendor/ffmpeg/`.
 - `vendor/ffmpeg/ffmpeg-SOURCE.txt` is required and validated in workflow bundle checks.
 - PDFium runtime and license/provenance files are staged under `vendor/pdfium/`.
@@ -305,12 +300,13 @@ Bundle layout on macOS arm64:
 - `libllama-server-bridge*.dylib` and `libggml*.dylib` in bundle root
 - `vendor/pdfium/libpdfium.dylib`
 - `vendor/ffmpeg/lib/lib*.dylib`
-- `licenses/*`
+- `LICENSES.md`
+- `Third-Party-Notices.md`
 
 License staging note for macOS arm64:
 
-- Key bundle file `licenses/LICENSES.txt` is selected from the metal profile (`third_party/licenses/LICENSES-metal.txt`), with fallback to `LICENSES-vulkan.txt` then `LICENSES.txt`.
-- PDFium/FFmpeg license files are staged under `vendor/pdfium/*` and `vendor/ffmpeg/*` (no separate `licenses/pdfium` or `licenses/ffmpeg` folders).
+- Root bundle files are `LICENSES.md` and `Third-Party-Notices.md`, copied from `third_party/LICENSES.md` and `third_party/README.md`.
+- PDFium/FFmpeg license files are staged under `vendor/pdfium/*` and `vendor/ffmpeg/*` (no separate top-level `licenses/` folder).
 - `vendor/ffmpeg/*` uses fallback repo-curated `ffmpeg-LGPL-2.1.txt` and backend-specific source notice files (`ffmpeg-SOURCE-*.txt`, staged as `vendor/ffmpeg/ffmpeg-SOURCE.txt`) when source installs do not ship license files in the install prefix.
 
 ## GitHub Actions: Ubuntu x64 Vulkan (CPU + Vulkan)
@@ -341,12 +337,13 @@ Bundle layout on Ubuntu x64:
 - `libllama-server-bridge*.so` and `libggml*.so` in bundle root
 - `vendor/pdfium/libpdfium.so`
 - `vendor/ffmpeg/lib/lib*.so*`
-- `licenses/*`
+- `LICENSES.md`
+- `Third-Party-Notices.md`
 
 License staging note for Ubuntu x64:
 
-- Key bundle file `licenses/LICENSES.txt` is selected from `third_party/licenses/LICENSES-ubuntu-vulkan.txt`, with fallback to `LICENSES-vulkan.txt` then `LICENSES.txt`.
-- PDFium/FFmpeg license files are staged under `vendor/pdfium/*` and `vendor/ffmpeg/*` (no separate `licenses/pdfium` or `licenses/ffmpeg` folders).
+- Root bundle files are `LICENSES.md` and `Third-Party-Notices.md`, copied from `third_party/LICENSES.md` and `third_party/README.md`.
+- PDFium/FFmpeg license files are staged under `vendor/pdfium/*` and `vendor/ffmpeg/*` (no separate top-level `licenses/` folder).
 - FFmpeg in this workflow is fetched from `https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest` using asset `ffmpeg-master-latest-linux64-lgpl-shared.tar.xz`.
 
 ## GitHub Actions: Unified Release

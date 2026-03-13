@@ -184,7 +184,6 @@ function Stage-RepoLicenseFiles {
     param(
         [string]$RepoRoot,
         [string]$BundleOutDir,
-        [string]$BundleLicenseRoot,
         [string]$LicenseProfile
     )
 
@@ -194,111 +193,24 @@ function Stage-RepoLicenseFiles {
         return
     }
 
-    New-Item -ItemType Directory -Force -Path $BundleLicenseRoot | Out-Null
-
-    $licenseGenerator = Join-Path $RepoRoot "build\generate_license_bundles.ps1"
-    if (Test-Path -LiteralPath $licenseGenerator) {
-        & $licenseGenerator -RepoRoot $RepoRoot -OutputRoot $BundleLicenseRoot
-    } else {
-        Write-Warning "License bundle generator not found at '$licenseGenerator' (using checked-in LICENSES*.txt only)"
-    }
-
-    $destDir = Join-Path $BundleLicenseRoot "third_party"
-    New-Item -ItemType Directory -Force -Path $destDir | Out-Null
-
-    $excludedTopLevelFiles = @(
-        "torch-LICENSE.txt",
-        "torch-NOTICE.txt",
-        "numpy-LICENSE.txt",
-        "PyYAML-LICENSE.txt",
-        "ffmpeg-SOURCE.txt",
-        "ffmpeg-SOURCE-windows-x64.txt",
-        "ffmpeg-SOURCE-ubuntu-x64.txt",
-        "ffmpeg-SOURCE-macos-arm64.txt"
-    )
-    if ($LicenseProfile -eq "vulkan") {
-        $excludedTopLevelFiles += @(
-            "nvidia-cuda-EULA.txt",
-            "nvidia-cuda-runtime-NOTICE.txt"
-        )
-    }
-
-    # Copy curated, top-level license files only. Skip tooling-only files.
-    $topLevelFiles = Get-ChildItem -Path $sourceDir -File -ErrorAction SilentlyContinue
-    foreach ($file in $topLevelFiles) {
-        if ($excludedTopLevelFiles -contains $file.Name) {
-            continue
-        }
-        Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $destDir $file.Name) -Force
-    }
-
-    $rustFullSource = Join-Path $sourceDir "rust-full"
-    $rustFullDest = Join-Path $BundleLicenseRoot "rust-full"
-    if (Test-Path -LiteralPath $rustFullSource) {
-        New-Item -ItemType Directory -Force -Path $rustFullDest | Out-Null
-        Copy-Item -Path (Join-Path $rustFullSource "*") -Destination $rustFullDest -Recurse -Force
-    } else {
-        Write-Warning "Rust full license inventory folder not found at '$rustFullSource' (skipping rust-full copy)"
-    }
-
     $repoLicenseFile = Join-Path $RepoRoot "LICENSE"
     if (Test-Path -LiteralPath $repoLicenseFile) {
         Copy-Item -LiteralPath $repoLicenseFile -Destination (Join-Path $BundleOutDir "LICENSE-ENGINE.txt") -Force
     }
 
-    $bundleKeyLicenses = Join-Path $BundleLicenseRoot "LICENSES.txt"
-    $licenseCandidates = @()
-    if (-not [string]::IsNullOrWhiteSpace($LicenseProfile) -and $LicenseProfile -ne "default") {
-        $licenseCandidates += "LICENSES-$LicenseProfile.txt"
-    }
-    $licenseCandidates += "LICENSES.txt"
-
-    $selectedLicensePath = ""
-    $licenseSearchRoots = @($BundleLicenseRoot, $destDir)
-    foreach ($searchRoot in $licenseSearchRoots) {
-        foreach ($candidateName in $licenseCandidates) {
-            $candidatePath = Join-Path $searchRoot $candidateName
-            if (Test-Path -LiteralPath $candidatePath) {
-                $selectedLicensePath = $candidatePath
-                break
-            }
-        }
-        if (-not [string]::IsNullOrWhiteSpace($selectedLicensePath)) {
-            break
-        }
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace($selectedLicensePath)) {
-        Copy-Item -LiteralPath $selectedLicensePath -Destination $bundleKeyLicenses -Force
+    $consolidatedLicensePath = Join-Path $RepoRoot "third_party\LICENSES.md"
+    if (Test-Path -LiteralPath $consolidatedLicensePath) {
+        Copy-Item -LiteralPath $consolidatedLicensePath -Destination (Join-Path $BundleOutDir "LICENSES.md") -Force
     } else {
-        Write-Warning "Key release licenses file not found in bundle license roots (candidates: $($licenseCandidates -join ', '))"
+        Write-Warning "Consolidated license file not found at '$consolidatedLicensePath'"
     }
 
-    $noticePath = Join-Path $BundleLicenseRoot "THIRD_PARTY_NOTICES.md"
-    @"
-# Third-Party Notices
-
-This bundle includes third-party software.
-
-Key combined license text:
-
-- ./LICENSES.txt
-
-Bundled license folders:
-
-- ./third_party/
-- ./rust-full/
-- ../vendor/pdfium/
-- ../vendor/ffmpeg/
-
-Project license:
-
-- ../LICENSE-ENGINE.txt
-
-Full license inventory (including transitive/tooling exports):
-
-- https://github.com/openresearchtools/engine/tree/main/third_party/licenses
-"@ | Set-Content -Path $noticePath -Encoding ASCII
+    $noticeSource = Join-Path $RepoRoot "third_party\README.md"
+    if (Test-Path -LiteralPath $noticeSource) {
+        Copy-Item -LiteralPath $noticeSource -Destination (Join-Path $BundleOutDir "Third-Party-Notices.md") -Force
+    } else {
+        Write-Warning "Third-party notices source file not found at '$noticeSource'"
+    }
 }
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -397,6 +309,22 @@ $ffmpegVendorDir = Join-Path $vendorRoot "ffmpeg"
 $ffmpegVendorBinDir = Join-Path $ffmpegVendorDir "bin"
 New-Item -ItemType Directory -Force -Path $vendorRoot | Out-Null
 
+$legacyLicenseDir = Join-Path $OutDir "licenses"
+if (Test-Path -LiteralPath $legacyLicenseDir) {
+    Remove-Item -LiteralPath $legacyLicenseDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+$legacyRootLicenseFiles = @(
+    "LICENSES.txt",
+    "THIRD_PARTY_NOTICES.md"
+)
+foreach ($legacyFileName in $legacyRootLicenseFiles) {
+    $legacyFilePath = Join-Path $OutDir $legacyFileName
+    if (Test-Path -LiteralPath $legacyFilePath) {
+        Remove-Item -LiteralPath $legacyFilePath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # Remove legacy root-level runtime files so output remains vendor-scoped.
 $legacyRuntimePatterns = @(
     "pdfium.dll",
@@ -471,9 +399,8 @@ if (Test-Path -LiteralPath $PdfiumDll) {
     Write-Warning "PDFium library not found at '$PdfiumDll' (skipping copy)"
 }
 
-$bundleLicenseRoot = Join-Path $OutDir "licenses"
 if ($StageRepoLicenseFiles) {
-    Stage-RepoLicenseFiles -RepoRoot $repoRoot -BundleOutDir $OutDir -BundleLicenseRoot $bundleLicenseRoot -LicenseProfile $LicenseProfile
+    Stage-RepoLicenseFiles -RepoRoot $repoRoot -BundleOutDir $OutDir -LicenseProfile $LicenseProfile
 }
 
 $pdfiumRoot = Resolve-PdfiumRoot -PdfiumDllPath $PdfiumDll
@@ -607,5 +534,5 @@ if ($StageCudaRuntime) {
 Write-Host "Engine build and bundle staging completed."
 Write-Host "Cargo target dir: $CargoTargetDir"
 Write-Host "Bundle dir: $OutDir"
-Write-Host "Bundle key license index: $(Join-Path $OutDir 'licenses')"
+Write-Host "Bundle root license files: $(Join-Path $OutDir 'LICENSES.md'), $(Join-Path $OutDir 'Third-Party-Notices.md')"
 Write-Host "Bundle component license locations: $(Join-Path $OutDir 'vendor')"

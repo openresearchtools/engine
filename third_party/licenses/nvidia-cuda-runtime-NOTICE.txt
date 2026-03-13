@@ -10,9 +10,8 @@ Shipped NVIDIA files in the bundle root:
 These files are redistributed under the NVIDIA CUDA EULA.
 
 Official licensing files in this bundle:
-- ./licenses/third_party/nvidia-cuda-EULA.txt
-- ./licenses/third_party/nvidia-cuda-runtime-NOTICE.txt
-- ./licenses/LICENSES.txt
+- ./NVIDIA-CUDA-RUNTIME-NOTICE.txt
+- ./LICENSES.md
 
 Official NVIDIA CUDA EULA page:
 https://docs.nvidia.com/cuda/eula/index.html

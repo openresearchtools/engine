@@ -44,20 +44,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Generate License Bundles
-        shell: pwsh
-        run: |
-          powershell -ExecutionPolicy Bypass -File .\build\generate_license_bundles.ps1 -RepoRoot $env:GITHUB_WORKSPACE
-
       - name: Preflight Required License Files
         shell: pwsh
         run: |
           $requiredCommon = @(
+            "third_party/LICENSES.md",
+            "third_party/README.md",
             "third_party/licenses/pdfium-LICENSE.txt",
             "third_party/licenses/pdfium-binaries-LICENSE.txt",
             "third_party/licenses/ffmpeg-LGPL-2.1.txt",
-            "third_party/licenses/ffmpeg-SOURCE-windows-x64.txt",
-            "third_party/licenses/LICENSES.txt"
+            "third_party/licenses/ffmpeg-SOURCE-windows-x64.txt"
           )
           foreach ($path in $requiredCommon) {
             if (-not (Test-Path -LiteralPath $path)) {
@@ -67,7 +63,6 @@ jobs:
 
           if ($env:BACKEND -eq "cuda") {
             $requiredCuda = @(
-              "third_party/licenses/LICENSES-cuda.txt",
               "third_party/licenses/nvidia-cuda-EULA.txt",
               "third_party/licenses/nvidia-cuda-runtime-NOTICE.txt"
             )
@@ -77,14 +72,7 @@ jobs:
               }
             }
           } else {
-            $requiredVulkan = @(
-              "third_party/licenses/LICENSES-vulkan.txt"
-            )
-            foreach ($path in $requiredVulkan) {
-              if (-not (Test-Path -LiteralPath $path)) {
-                throw "Missing required Vulkan preflight file: $path"
-              }
-            }
+            Write-Host "Using the consolidated third_party/LICENSES.md file for non-CUDA bundles."
           }
 
       - name: Configure Git Long Paths
@@ -191,8 +179,8 @@ jobs:
               "pdfvlm.dll",
               "vendor\\pdfium\\pdfium.dll",
               "LICENSE-ENGINE.txt",
-              "licenses\\LICENSES.txt",
-              "licenses\\THIRD_PARTY_NOTICES.md"
+              "LICENSES.md",
+              "Third-Party-Notices.md"
           )
           foreach ($required in $requiredFiles) {
               if (-not (Test-Path -LiteralPath (Join-Path $bundle $required))) {
@@ -229,13 +217,14 @@ jobs:
               }
           }
 
-          $legacyLicenseDirs = @(
+          $legacyLicensePaths = @(
+              "licenses",
               "licenses\\ffmpeg",
               "licenses\\pdfium"
           )
-          foreach ($legacyDir in $legacyLicenseDirs) {
-              if (Test-Path -LiteralPath (Join-Path $bundle $legacyDir)) {
-                  throw "Legacy license directory should not exist anymore: $legacyDir"
+          foreach ($legacyPath in $legacyLicensePaths) {
+              if (Test-Path -LiteralPath (Join-Path $bundle $legacyPath)) {
+                  throw "Legacy license staging path should not exist anymore: $legacyPath"
               }
           }
 

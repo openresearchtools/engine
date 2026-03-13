@@ -26,7 +26,8 @@ These scripts are tooling-only and not part of runtime inference.
 
 ## Licenses and notices
 
-- [`third_party/licenses/README.md`](https://github.com/openresearchtools/engine/blob/main/third_party/licenses/README.md)
+- [`third_party/LICENSES.md`](https://github.com/openresearchtools/engine/blob/main/third_party/LICENSES.md)
+- [`third_party/README.md`](https://github.com/openresearchtools/engine/blob/main/third_party/README.md)
 
 ## Release inventory tracking
 

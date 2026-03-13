@@ -24,4 +24,5 @@ Use the main build entrypoint:
 
 ## Licenses And Notices
 
-- [`third_party/licenses/README.md`](https://github.com/openresearchtools/engine/blob/main/third_party/licenses/README.md)
+- [`third_party/LICENSES.md`](https://github.com/openresearchtools/engine/blob/main/third_party/LICENSES.md)
+- [`third_party/README.md`](https://github.com/openresearchtools/engine/blob/main/third_party/README.md)
