@@ -77,6 +77,10 @@ struct llama_server_bridge_chat_request {
     float dry_multiplier;
     int32_t dry_allowed_length;
     int32_t dry_penalty_last_n;
+
+    const char * reasoning;        // null/unset, or: on | off | auto
+    int32_t reasoning_budget;      // INT32_MIN = unset, -1 = unlimited, 0 = disable, >0 = requested limit
+    const char * reasoning_format; // null/unset, or: none | deepseek | deepseek-legacy
 };
 
 struct llama_server_bridge_vlm_request {
@@ -99,6 +103,10 @@ struct llama_server_bridge_vlm_request {
     float dry_multiplier;
     int32_t dry_allowed_length;
     int32_t dry_penalty_last_n;
+
+    const char * reasoning;        // null/unset, or: on | off | auto
+    int32_t reasoning_budget;      // INT32_MIN = unset, -1 = unlimited, 0 = disable, >0 = requested limit
+    const char * reasoning_format; // null/unset, or: none | deepseek | deepseek-legacy
 };
 
 struct llama_server_bridge_vlm_result {

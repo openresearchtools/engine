@@ -4617,6 +4617,6 @@ index d3d4316..206edac 100644
 +            ctx_http.thread.join(); // keep the main thread alive
 +        }
 +
-         clean_up();
-     } else {
-         LOG_INF("%s: server is listening on %s\n", __func__, ctx_http.listening_address.c_str());
+        clean_up();
+    } else {
+        LOG_INF("%s: server is listening on %s\n", __func__, ctx_http.listening_address.c_str());

@@ -92,6 +92,15 @@ These runtime controls are available across `chat`, `vlm`, `audio`, `embed`, `re
 * `--split-mode <none|layer|row>` and `--tensor-split <csv>` (multi-GPU split)
 * `--threads <int>` and `--threads-batch <int>` (CPU compute thread controls)
 
+Reasoning controls for `chat`, `vlm`, and `pdfvlm`:
+
+* If `--reasoning` is omitted, no reasoning flags are sent and the model/runtime decides what to do.
+* `--reasoning off` automatically sends `reasoning_budget 0`.
+* `--reasoning on` and `--reasoning auto` automatically send `reasoning_budget -1` unless you override it.
+* If `--reasoning` is set and `--reasoning-format` is omitted, the runtime sends `deepseek`.
+* `--reasoning-format none` keeps visible thinking in the main output.
+* `--reasoning-format deepseek` asks the server/runtime to parse reasoning separately where supported.
+
 Default behavior:
 * Windows/Linux: if no GPU is specified (`--gpu`/`--devices` omitted), runtime is CPU-only
 * macOS (Apple Silicon / Metal builds): if no GPU is specified, runtime selects the first GPU
@@ -122,6 +131,27 @@ engine.exe chat `
   --n-ubatch 1024 `
   --n-parallel 1 `
   --n-predict 10000
+```
+
+```powershell
+# Chat with reasoning disabled
+engine.exe chat `
+  --model ".\models\model.gguf" `
+  --gpu 0 `
+  --reasoning off `
+  --prompt "What is 17 multiplied by 19? Reply with only the final answer." `
+  --out ".\answer_reasoning_off.txt"
+```
+
+```powershell
+# Chat with visible reasoning output
+engine.exe chat `
+  --model ".\models\model.gguf" `
+  --gpu 0 `
+  --reasoning on `
+  --reasoning-format none `
+  --prompt "What is 17 multiplied by 19? Reply with only the final answer." `
+  --out ".\answer_reasoning_on.txt"
 ```
 
 If you already have a Markdown file you want summarized, you can pass it directly. When you omit `--prompt`, the CLI uses a default summary prompt.
@@ -163,6 +193,31 @@ engine.exe vlm `
   --mmproj-use-gpu 1 `
   --n-gpu-layers -1 `
   --main-gpu 0
+```
+
+```powershell
+# VLM with reasoning disabled
+engine.exe vlm `
+  --model ".\models\vision.gguf" `
+  --mmproj ".\models\mmproj.gguf" `
+  --image ".\image.png" `
+  --prompt "Describe the image briefly, then identify the main object shown." `
+  --gpu 0 `
+  --reasoning off `
+  --out ".\image_reasoning_off.txt"
+```
+
+```powershell
+# VLM with visible reasoning output
+engine.exe vlm `
+  --model ".\models\vision.gguf" `
+  --mmproj ".\models\mmproj.gguf" `
+  --image ".\image.png" `
+  --prompt "Describe the image briefly, then identify the main object shown." `
+  --gpu 0 `
+  --reasoning on `
+  --reasoning-format none `
+  --out ".\image_reasoning_on.txt"
 ```
 
 If you want the model to answer a specific question about an image, provide your own prompt.
@@ -556,6 +611,29 @@ engine.exe pdfvlm --pdf ".\paper.pdf" --model ".\models\vision.gguf" --mmproj ".
 # Option C: set env var once (PDFIUM_DLL is still accepted for compatibility)
 $env:PDFIUM_LIB=".\vendor\pdfium\pdfium.dll"
 engine.exe pdfvlm --pdf ".\paper.pdf" --model ".\models\vision.gguf" --mmproj ".\models\mmproj.gguf" --out ".\paper_vlm.md"
+```
+
+```powershell
+# PDF VLM with reasoning disabled
+engine.exe pdfvlm `
+  --pdf ".\paper.pdf" `
+  --model ".\models\vision.gguf" `
+  --mmproj ".\models\mmproj.gguf" `
+  --gpu 0 `
+  --reasoning off `
+  --out ".\paper_vlm_reasoning_off.md"
+```
+
+```powershell
+# PDF VLM with visible reasoning output
+engine.exe pdfvlm `
+  --pdf ".\paper.pdf" `
+  --model ".\models\vision.gguf" `
+  --mmproj ".\models\mmproj.gguf" `
+  --gpu 0 `
+  --reasoning on `
+  --reasoning-format none `
+  --out ".\paper_vlm_reasoning_on.md"
 ```
 
 ### VLM model note (tested configuration)

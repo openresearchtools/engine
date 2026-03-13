@@ -23,6 +23,7 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -1625,6 +1626,83 @@ static std::string build_audio_body_with_base64(
     return metadata.dump();
 }
 
+static constexpr int32_t LLAMA_SERVER_BRIDGE_REASONING_BUDGET_UNSET = INT32_MIN;
+
+enum class bridge_reasoning_mode {
+    unset,
+    on,
+    off,
+    auto_mode,
+};
+
+static bridge_reasoning_mode parse_bridge_reasoning_mode(const char * value) {
+    if (value == nullptr || value[0] == '\0') {
+        return bridge_reasoning_mode::unset;
+    }
+
+    const std::string mode(value);
+    if (mode == "on") {
+        return bridge_reasoning_mode::on;
+    }
+    if (mode == "off") {
+        return bridge_reasoning_mode::off;
+    }
+    if (mode == "auto") {
+        return bridge_reasoning_mode::auto_mode;
+    }
+
+    throw std::invalid_argument("reasoning must be one of: on, off, auto");
+}
+
+static std::string normalize_bridge_reasoning_format(const char * value) {
+    if (value == nullptr || value[0] == '\0') {
+        return "deepseek";
+    }
+
+    const std::string format(value);
+    if (format == "none" || format == "deepseek" || format == "deepseek-legacy") {
+        return format;
+    }
+
+    throw std::invalid_argument(
+        "reasoning_format must be one of: none, deepseek, deepseek-legacy");
+}
+
+template <typename RequestT>
+static void apply_bridge_reasoning_options(const RequestT * req, json & body) {
+    const bridge_reasoning_mode mode = parse_bridge_reasoning_mode(req->reasoning);
+    const bool has_reasoning = mode != bridge_reasoning_mode::unset;
+    const bool has_budget = req->reasoning_budget != LLAMA_SERVER_BRIDGE_REASONING_BUDGET_UNSET;
+    const bool has_format = req->reasoning_format != nullptr && req->reasoning_format[0] != '\0';
+
+    if (!has_reasoning) {
+        if (has_budget || has_format) {
+            throw std::invalid_argument(
+                "reasoning_budget and reasoning_format require reasoning to be set");
+        }
+        return;
+    }
+
+    int32_t reasoning_budget = has_budget ? req->reasoning_budget : -1;
+    if (mode == bridge_reasoning_mode::off) {
+        reasoning_budget = 0;
+    }
+    if (reasoning_budget < -1) {
+        throw std::invalid_argument("reasoning_budget must be -1, 0, or a positive integer");
+    }
+
+    body["reasoning_budget"] = reasoning_budget;
+    body["reasoning_format"] = normalize_bridge_reasoning_format(req->reasoning_format);
+
+    if (mode != bridge_reasoning_mode::auto_mode) {
+        json kwargs = body.contains("chat_template_kwargs") && body["chat_template_kwargs"].is_object()
+            ? body["chat_template_kwargs"]
+            : json::object();
+        kwargs["enable_thinking"] = (mode == bridge_reasoning_mode::on);
+        body["chat_template_kwargs"] = std::move(kwargs);
+    }
+}
+
 struct llama_server_bridge_params llama_server_bridge_default_params(void) {
     llama_server_bridge_params p = {};
     p.model_path = nullptr;
@@ -1676,6 +1754,9 @@ struct llama_server_bridge_chat_request llama_server_bridge_default_chat_request
     req.dry_multiplier = -1.0f;
     req.dry_allowed_length = -1;
     req.dry_penalty_last_n = -1;
+    req.reasoning = nullptr;
+    req.reasoning_budget = LLAMA_SERVER_BRIDGE_REASONING_BUDGET_UNSET;
+    req.reasoning_format = nullptr;
     return req;
 }
 
@@ -1698,6 +1779,9 @@ struct llama_server_bridge_vlm_request llama_server_bridge_default_vlm_request(v
     req.dry_multiplier = -1.0f;
     req.dry_allowed_length = -1;
     req.dry_penalty_last_n = -1;
+    req.reasoning = nullptr;
+    req.reasoning_budget = LLAMA_SERVER_BRIDGE_REASONING_BUDGET_UNSET;
+    req.reasoning_format = nullptr;
     return req;
 }
 
@@ -4316,6 +4400,8 @@ int32_t llama_server_bridge_chat_complete(
             body["dry_penalty_last_n"] = req->dry_penalty_last_n;
         }
 
+        apply_bridge_reasoning_options(req, body);
+
         std::vector<raw_buffer> ignored_files;
         json llama_params = oaicompat_chat_params_parse(body, meta.chat_params, ignored_files);
 
@@ -4526,6 +4612,8 @@ int32_t llama_server_bridge_vlm_complete(
         if (req->dry_penalty_last_n >= 0) {
             body["dry_penalty_last_n"] = req->dry_penalty_last_n;
         }
+
+        apply_bridge_reasoning_options(req, body);
 
         std::vector<raw_buffer> ignored_files;
         json llama_params = oaicompat_chat_params_parse(body, meta.chat_params, ignored_files);

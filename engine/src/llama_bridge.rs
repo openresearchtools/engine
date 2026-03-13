@@ -75,6 +75,10 @@ pub struct llama_server_bridge_chat_request {
     pub dry_multiplier: f32,
     pub dry_allowed_length: i32,
     pub dry_penalty_last_n: i32,
+
+    pub reasoning: *const c_char,
+    pub reasoning_budget: i32,
+    pub reasoning_format: *const c_char,
 }
 
 #[repr(C)]
@@ -99,6 +103,10 @@ pub struct llama_server_bridge_vlm_request {
     pub dry_multiplier: f32,
     pub dry_allowed_length: i32,
     pub dry_penalty_last_n: i32,
+
+    pub reasoning: *const c_char,
+    pub reasoning_budget: i32,
+    pub reasoning_format: *const c_char,
 }
 
 #[repr(C)]
@@ -970,6 +978,83 @@ fn parse_optional_positive_i32_arg(args: &[String], key: &str) -> Result<Option<
     Ok(value)
 }
 
+#[derive(Debug, Clone, Default)]
+struct ReasoningCliOptions {
+    mode: Option<String>,
+    budget: Option<i32>,
+    format: Option<String>,
+}
+
+impl ReasoningCliOptions {
+    fn is_enabled(&self) -> bool {
+        self.mode.is_some()
+    }
+
+    fn effective_budget(&self) -> Option<i32> {
+        self.mode.as_deref().map(|mode| {
+            if mode == "off" {
+                0
+            } else {
+                self.budget.unwrap_or(-1)
+            }
+        })
+    }
+
+    fn effective_format(&self) -> Option<&str> {
+        self.mode
+            .as_ref()
+            .map(|_| self.format.as_deref().unwrap_or("deepseek"))
+    }
+}
+
+fn parse_reasoning_cli_options(args: &[String]) -> Result<ReasoningCliOptions, String> {
+    let mode = arg_value(args, "--reasoning");
+    let budget = parse_optional_i32_arg(args, "--reasoning-budget")?;
+    let format = arg_value(args, "--reasoning-format");
+
+    if mode.is_none() {
+        if budget.is_some() {
+            return Err("--reasoning-budget requires --reasoning".to_string());
+        }
+        if format.is_some() {
+            return Err("--reasoning-format requires --reasoning".to_string());
+        }
+        return Ok(ReasoningCliOptions::default());
+    }
+
+    match mode.as_deref() {
+        Some("on" | "off" | "auto") => {}
+        Some(_) => {
+            return Err("--reasoning must be one of: on, off, auto".to_string());
+        }
+        None => {}
+    }
+
+    if let Some(value) = budget {
+        if value < -1 {
+            return Err("--reasoning-budget must be -1, 0, or a positive integer".to_string());
+        }
+    }
+
+    if let Some(value) = format.as_deref() {
+        match value {
+            "none" | "deepseek" | "deepseek-legacy" => {}
+            _ => {
+                return Err(
+                    "--reasoning-format must be one of: none, deepseek, deepseek-legacy"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    Ok(ReasoningCliOptions {
+        mode,
+        budget,
+        format,
+    })
+}
+
 fn parse_optional_f64_arg(args: &[String], key: &str) -> Result<Option<f64>, String> {
     match arg_value(args, key) {
         Some(v) => v
@@ -1296,10 +1381,10 @@ fn make_bridge(
 fn bridge_cli_usage() -> &'static str {
     "bridge usage:
   list-devices
-  vlm --model <gguf> --mmproj <gguf> --image <png/jpg/webp> [--prompt <text>] [--out <md>] [--n-predict 5000] [--mmproj-use-gpu <-1|0|1>]
+  vlm --model <gguf> --mmproj <gguf> --image <png/jpg/webp> [--prompt <text>] [--out <md>] [--n-predict 5000] [--mmproj-use-gpu <-1|0|1>] [--reasoning <on|off|auto>] [--reasoning-budget <-1|0|N>] [--reasoning-format <none|deepseek|deepseek-legacy>]
   audio --audio-file <audio-file> [--audio-format <format-hint>] [--output-dir <dir>] --mode <subtitle|speech|transcript> --custom <value> [whisper source + diarization source flags + advanced audio knobs]
   audio-session (--audio-file <audio-file> [--audio-format <format-hint>] | --stdin-pcm-s16le | --stdin-pcm-f32le) [--diarization-model-path <gguf>] [--whisper-model <bin> | --whisper-hf-repo <repo> --whisper-hf-file <file> | --transcription-realtime-model <gguf>] [--out <md>] [--timeline-json-out <json>] [--staged]
-  chat --model <gguf> [--prompt <text>] [--markdown <md>] [--out <md>] [--devices <csv>] [--n-predict 10000]
+  chat --model <gguf> [--prompt <text>] [--markdown <md>] [--out <md>] [--devices <csv>] [--n-predict 10000] [--reasoning <on|off|auto>] [--reasoning-budget <-1|0|N>] [--reasoning-format <none|deepseek|deepseek-legacy>]
   embed --model <gguf> (--markdown <md> | --body-json <json-or-path>) [--out <json>] [--devices <csv>] [--batch-size 32] [--chunk-words 500] [--batches 8]
   rerank --model <gguf> (--markdown <md> | --body-json <json-or-path>) [--out <json>] [--devices <csv>] [--docs-per-query 32] [--chunk-words 500] [--batches 8]
 shared optional flags:
@@ -2202,6 +2287,7 @@ fn run_vlm(args: &[String]) -> Result<(), String> {
     let n_gpu_layers = parse_i32_arg(args, "--n-gpu-layers", -1)?;
     let main_gpu = parse_i32_arg(args, "--main-gpu", -1)?;
     let mmproj_use_gpu = parse_i32_arg(args, "--mmproj-use-gpu", -1)?;
+    let reasoning = parse_reasoning_cli_options(args)?;
     if mmproj_use_gpu != -1 && mmproj_use_gpu != 0 && mmproj_use_gpu != 1 {
         return Err("--mmproj-use-gpu must be -1, 0 or 1".to_string());
     }
@@ -2259,6 +2345,26 @@ fn run_vlm(args: &[String]) -> Result<(), String> {
     req.top_k = -1;
     req.min_p = -1.0;
     req.seed = -1;
+    let reasoning_c = reasoning
+        .mode
+        .as_ref()
+        .map(|value| CString::new(value.as_str()))
+        .transpose()
+        .map_err(|_| "reasoning contains NUL byte".to_string())?;
+    let reasoning_format_c = reasoning
+        .effective_format()
+        .map(CString::new)
+        .transpose()
+        .map_err(|_| "reasoning format contains NUL byte".to_string())?;
+    if let Some(value) = reasoning_c.as_ref() {
+        req.reasoning = value.as_ptr();
+    }
+    if let Some(value) = reasoning.effective_budget() {
+        req.reasoning_budget = value;
+    }
+    if let Some(value) = reasoning_format_c.as_ref() {
+        req.reasoning_format = value.as_ptr();
+    }
 
     let t_infer = Instant::now();
     let mut out = unsafe { llama_server_bridge_empty_vlm_result() };
@@ -2913,6 +3019,9 @@ fn run_chat(args: &[String]) -> Result<(), String> {
         "--threads-batch",
         "--n-gpu-layers",
         "--main-gpu",
+        "--reasoning",
+        "--reasoning-budget",
+        "--reasoning-format",
     ];
 
     let model = arg_value(args, "--model").ok_or("--model is required".to_string())?;
@@ -2959,6 +3068,7 @@ fn run_chat(args: &[String]) -> Result<(), String> {
     let n_threads_batch = parse_optional_positive_i32_arg(args, "--threads-batch")?;
     let n_gpu_layers = parse_i32_arg(args, "--n-gpu-layers", -1)?;
     let main_gpu = parse_i32_arg(args, "--main-gpu", -1)?;
+    let reasoning = parse_reasoning_cli_options(args)?;
 
     let markdown_text = if let Some(path) = &markdown {
         Some(
@@ -3022,6 +3132,26 @@ fn run_chat(args: &[String]) -> Result<(), String> {
     req.top_k = -1;
     req.min_p = 0.0;
     req.seed = -1;
+    let reasoning_c = reasoning
+        .mode
+        .as_ref()
+        .map(|value| CString::new(value.as_str()))
+        .transpose()
+        .map_err(|_| "reasoning contains NUL byte".to_string())?;
+    let reasoning_format_c = reasoning
+        .effective_format()
+        .map(CString::new)
+        .transpose()
+        .map_err(|_| "reasoning format contains NUL byte".to_string())?;
+    if let Some(value) = reasoning_c.as_ref() {
+        req.reasoning = value.as_ptr();
+    }
+    if let Some(value) = reasoning.effective_budget() {
+        req.reasoning_budget = value;
+    }
+    if let Some(value) = reasoning_format_c.as_ref() {
+        req.reasoning_format = value.as_ptr();
+    }
 
     let t_infer = Instant::now();
     let mut out = unsafe { llama_server_bridge_empty_vlm_result() };
