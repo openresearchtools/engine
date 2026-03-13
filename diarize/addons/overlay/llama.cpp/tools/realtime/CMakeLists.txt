@@ -30,6 +30,10 @@ target_include_directories(${TARGET_LIB} PUBLIC
     ../../ggml/include
 )
 target_link_libraries(${TARGET_LIB} PUBLIC ggml)
+if (TARGET ggml-cpu)
+    # Voxtral runtime uses the CPU backend API directly for fallback contexts.
+    target_link_libraries(${TARGET_LIB} PUBLIC ggml-cpu)
+endif()
 
 add_executable(${TARGET_SMOKE} realtime-smoke.cpp)
 target_compile_features(${TARGET_SMOKE} PRIVATE cxx_std_17)
