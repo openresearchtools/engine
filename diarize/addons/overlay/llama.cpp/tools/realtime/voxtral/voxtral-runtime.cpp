@@ -1,7 +1,6 @@
 // Adapted from the MIT-licensed voxtral-cpp reference implementation.
 #include "voxtral-runtime.h"
 #include "gguf.h"
-#include "ggml-cpu.h"
 #ifdef GGML_USE_METAL
 #include "ggml-metal.h"
 #endif
@@ -62,6 +61,35 @@ static constexpr int32_t VOXTRAL_MAX_ENC_CHUNK      = 2000; // max enc tokens pe
 #define LOG_WARN(ctx_ptr, ...)  LOG(ctx_ptr, voxtral_log_level::warn,  __VA_ARGS__)
 #define LOG_ERR(ctx_ptr, ...)   LOG(ctx_ptr, voxtral_log_level::error, __VA_ARGS__)
 #define LOG_DBG(ctx_ptr, ...)   LOG(ctx_ptr, voxtral_log_level::debug, __VA_ARGS__)
+
+static void ensure_backend_registry_loaded() {
+    if (ggml_backend_reg_count() == 0) {
+        ggml_backend_load_all();
+    }
+}
+
+static ggml_backend_t init_cpu_backend() {
+    ensure_backend_registry_loaded();
+    return ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+}
+
+static void set_backend_n_threads(ggml_backend_t backend, int n_threads) {
+    if (backend == nullptr) {
+        return;
+    }
+
+    ggml_backend_dev_t dev = ggml_backend_get_device(backend);
+    ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
+    if (reg == nullptr) {
+        return;
+    }
+
+    auto * set_n_threads = (ggml_backend_set_n_threads_t)
+        ggml_backend_reg_get_proc_address(reg, "ggml_backend_set_n_threads");
+    if (set_n_threads != nullptr) {
+        set_n_threads(backend, n_threads);
+    }
+}
 
 static ggml_tensor * ggml_rowwise_scale(
     ggml_context * gctx,
@@ -903,7 +931,14 @@ voxtral_model * voxtral_model_load_from_file(
     }
 
     if (!weights_backend) {
-        weights_backend = ggml_backend_cpu_init();
+        weights_backend = init_cpu_backend();
+        if (!weights_backend) {
+            fprintf(stderr, "voxtral: failed to initialize CPU backend\n");
+            gguf_free(gguf_ctx);
+            ggml_free(ctx_meta);
+            delete model;
+            return nullptr;
+        }
     }
 
     model->backend_weights = weights_backend;
@@ -1176,21 +1211,40 @@ voxtral_context * voxtral_init_from_model(
     bool has_gpu = (ctx->gpu_type != voxtral_gpu_backend::none);
 
     if (!ctx->backend) {
-        ctx->backend = ggml_backend_cpu_init();
+        ctx->backend = init_cpu_backend();
+        if (!ctx->backend) {
+            LOG_ERR(ctx, "failed to initialize CPU backend");
+            delete ctx;
+            return nullptr;
+        }
         ctx->owns_backend = true;
-        ggml_backend_cpu_set_n_threads(ctx->backend, ctx->n_threads);
+        set_backend_n_threads(ctx->backend, ctx->n_threads);
         LOG_INFO(ctx, "backend: CPU with %d threads", ctx->n_threads);
     } else if (ctx->owns_backend) {
-        ctx->backend_cpu = ggml_backend_cpu_init();
-        ggml_backend_cpu_set_n_threads(ctx->backend_cpu, ctx->n_threads);
+        ctx->backend_cpu = init_cpu_backend();
+        if (!ctx->backend_cpu) {
+            LOG_ERR(ctx, "failed to initialize CPU fallback backend");
+            if (ctx->backend) {
+                ggml_backend_free(ctx->backend);
+                ctx->backend = nullptr;
+            }
+            delete ctx;
+            return nullptr;
+        }
+        set_backend_n_threads(ctx->backend_cpu, ctx->n_threads);
         const char * gpu_name = "GPU";
         if (ctx->gpu_type == voxtral_gpu_backend::cuda)   gpu_name = "CUDA";
         if (ctx->gpu_type == voxtral_gpu_backend::metal)  gpu_name = "METAL";
         if (ctx->gpu_type == voxtral_gpu_backend::vulkan) gpu_name = "VULKAN";
         LOG_INFO(ctx, "backend: %s (CPU fallback %d threads)", gpu_name, ctx->n_threads);
     } else if (has_gpu) {
-        ctx->backend_cpu = ggml_backend_cpu_init();
-        ggml_backend_cpu_set_n_threads(ctx->backend_cpu, ctx->n_threads);
+        ctx->backend_cpu = init_cpu_backend();
+        if (!ctx->backend_cpu) {
+            LOG_ERR(ctx, "failed to initialize CPU fallback backend");
+            delete ctx;
+            return nullptr;
+        }
+        set_backend_n_threads(ctx->backend_cpu, ctx->n_threads);
     }
 
     // Try to init BLAS backend for accelerated CPU matmuls
