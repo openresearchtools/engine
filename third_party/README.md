@@ -23,6 +23,25 @@ from that upstream.
 
 Packaged applications now ship one overinclusive `LICENSES.md` plus one `Third-Party-Notices.md` at bundle root. The combined license file intentionally over-includes text so one file covers all supported bundle variants.
 
+## First-party shipped ENGINE code
+
+Openresearchtools-Engine source in this repository, including new native C++ and Rust modules added by this project, is covered by the repo MIT license at `../LICENSE` and by the `Openresearchtools-Engine [LICENSE]` section at the top of `../LICENSES.md`.
+
+This includes shipped ENGINE-authored native/runtime layers such as:
+
+- `bridge/llama_server_bridge.cpp`
+- `bridge/llama_server_bridge.h`
+- `bridge/llama_server_audio_capture.cpp`
+- `bridge/llama_server_audio_capture.h`
+- `bridge/llama_server_cluster.cpp`
+- `bridge/llama_server_cluster.h`
+- `bridge/llama_server_multi_node_server.cpp`
+- `bridge/llama_server_multi_node_server.h`
+- `multi_node_server/`
+- `clusterui/`
+
+The third-party entries below are for upstream code, bundled dependencies, and source provenance that those ENGINE-owned files build on, embed, adapt, or distribute alongside.
+
 ## Directly imported or adapted source in shipped runtime
 
 ### 1) llama.cpp
@@ -77,7 +96,17 @@ Build note: BoringSSL is fetched by CMake in build profiles that enable `LLAMA_B
 - License type: Public Domain OR MIT-0
 - License file: `miniaudio-LICENSE.txt`
 
-### 1d) Additional ggml CPU-component attributions
+### 1d) webrtc-audio-processing
+
+- Role: optional live microphone cleanup stack used by the native `llama-server-audio` capture bridge before PCM is forwarded into the main bridge session path.
+- Upstream repository: `cross-platform/webrtc-audio-processing`
+- Upstream URL: <https://github.com/cross-platform/webrtc-audio-processing>
+- Runtime bundle location when enabled:
+  - `vendor/webrtc-audio-processing`
+- License type: BSD-3-Clause style
+- License file: `webrtc-audio-processing-LICENSE.txt`
+
+### 1e) Additional ggml CPU-component attributions
 
 - YaRN reference implementation attribution inside ggml CPU rope path
   - Upstream: <https://github.com/jquesnelle/yarn>
@@ -92,7 +121,7 @@ Build note: BoringSSL is fetched by CMake in build profiles that enable `LLAMA_B
   - License type: MIT
   - License file: `kleidiai-LICENSE.txt`
 
-### 1e) Additional C/C++ source-attribution licenses
+### 1f) Additional C/C++ source-attribution licenses
 
 - `openvinotoolkit/openvino`
   - License type: Apache-2.0
@@ -306,12 +335,6 @@ Primary direct Python dependencies used by those repo-kept converters:
   - License type: MIT
   - License file: `PyYAML-LICENSE.txt`
 
-Checked-in tooling license snapshot:
-
-- `tooling-full/`
-
-This folder is a repo-kept license snapshot for the current Python tooling stack. It is not part of the shipped runtime bundle.
-
 ## Runtime integration notes
 
 - Audio patch/overlay mechanism for upstream sync is maintained in `diarize/addons/overlay/llama.cpp/`.
@@ -393,6 +416,114 @@ This folder is a repo-kept license snapshot for the current Python tooling stack
 - License type: MIT OR Apache-2.0
 - License file: `pdfium-render-LICENSE.md`
 
+### `eframe` / `egui`
+
+- Role: native immediate-mode app shell, widgets, layout, rendering integration, and controller UI foundations for `clusterui`.
+- License type: MIT OR Apache-2.0
+- License files:
+  - `eframe-LICENSE-MIT.txt`
+  - `eframe-LICENSE-APACHE.txt`
+  - `egui-LICENSE-MIT.txt`
+  - `egui-LICENSE-APACHE.txt`
+
+### `egui_commonmark`
+
+- Role: Markdown/README rendering inside the controller UI.
+- License type: MIT OR Apache-2.0
+- License files:
+  - `egui_commonmark-LICENSE-MIT.txt`
+  - `egui_commonmark-LICENSE-APACHE.txt`
+
+### `axum` / `tokio` / `tower-http`
+
+- Role: embedded cluster HTTP API server, async orchestration, and HTTP middleware for `clusterui`.
+- License types:
+  - `axum`: MIT
+  - `tokio`: MIT
+  - `tower-http`: MIT
+- License files:
+  - `axum-LICENSE.txt`
+  - `tokio-LICENSE.txt`
+  - `tower-http-LICENSE.txt`
+
+### `reqwest`
+
+- Role: controller-side HTTP client for runtime downloads, metadata fetches, and remote artifact transfer helpers.
+- License type: MIT OR Apache-2.0
+- License files:
+  - `reqwest-LICENSE-MIT.txt`
+  - `reqwest-LICENSE-APACHE.txt`
+
+### `rfd` / `tray-icon`
+
+- Role:
+  - `rfd`: native file/folder dialogs in the controller UI
+  - `tray-icon`: system tray integration for the controller app
+- License types:
+  - `rfd`: MIT
+  - `tray-icon`: MIT OR Apache-2.0
+- License files:
+  - `rfd-LICENSE.txt`
+  - `tray-icon-LICENSE-MIT.txt`
+  - `tray-icon-LICENSE-APACHE.txt`
+
+### `base64` / `bincode` / `sha2`
+
+- Role: transport encoding, binary protocol framing, and artifact integrity hashing in `clusterui`.
+- License types:
+  - `base64`: MIT OR Apache-2.0
+  - `bincode`: MIT
+  - `sha2`: MIT OR Apache-2.0
+- License files:
+  - `base64-LICENSE-MIT.txt`
+  - `base64-LICENSE-APACHE.txt`
+  - `bincode-LICENSE.txt`
+  - `sha2-LICENSE-MIT.txt`
+  - `sha2-LICENSE-APACHE.txt`
+
+### `sysinfo` / `time`
+
+- Role:
+  - `sysinfo`: node/device/process telemetry and resource reporting in `clusterui`
+  - `time`: runtime timestamps, static clock labels, and controller-side time formatting
+- License types:
+  - `sysinfo`: MIT
+  - `time`: MIT OR Apache-2.0
+- License files:
+  - `sysinfo-LICENSE.txt`
+  - `time-LICENSE-MIT.txt`
+  - `time-LICENSE-APACHE.txt`
+
+### `tar` / `zip`
+
+- Role: bundle/runtime archive staging and packaged dependency handling in the controller/runtime installer paths.
+- License types:
+  - `tar`: MIT OR Apache-2.0
+  - `zip`: MIT
+- License files:
+  - `tar-LICENSE-MIT.txt`
+  - `tar-LICENSE-APACHE.txt`
+  - `zip-LICENSE.txt`
+
+### `windows-sys`
+
+- Role: Windows-specific networking, interface discovery, and system integration paths used by the controller app.
+- License type: MIT OR Apache-2.0
+- License files:
+  - `windows-sys-LICENSE-MIT.txt`
+  - `windows-sys-LICENSE-APACHE.txt`
+
 ## Rust transitive license export
 
-- Full transitive Rust crate export (Windows target, non-dev graph): `rust-full/`
+- Full transitive Rust crate export (current non-dev shipped graphs):
+  - workspace Windows graph
+  - `clusterui` macOS graph
+  - exported to `rust-full/`
+
+## Checked-in tooling license snapshot
+
+This repo also keeps a Python-tooling license snapshot at:
+
+- <https://github.com/openresearchtools/engine/tree/main/third_party/licenses/tooling-full>
+
+It is not part of the shipped runtime bundle.

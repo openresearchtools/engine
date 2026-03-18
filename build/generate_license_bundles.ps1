@@ -33,6 +33,7 @@ if ([string]::IsNullOrWhiteSpace($OutputPath)) {
 
 $licenseRoot = Join-Path $RepoRoot "third_party\licenses"
 $rustFullRoot = Join-Path $licenseRoot "rust-full"
+$standardLicenseRoot = Join-Path $licenseRoot "_standards"
 $projectLicensePath = Join-Path $RepoRoot "LICENSE"
 
 if (-not (Test-Path -LiteralPath $licenseRoot)) {
@@ -41,6 +42,10 @@ if (-not (Test-Path -LiteralPath $licenseRoot)) {
 
 if (-not (Test-Path -LiteralPath $rustFullRoot)) {
     throw "Rust full license root not found: $rustFullRoot"
+}
+
+if (-not (Test-Path -LiteralPath $standardLicenseRoot)) {
+    throw "Standard license root not found: $standardLicenseRoot"
 }
 
 if (-not (Test-Path -LiteralPath $projectLicensePath)) {
@@ -151,7 +156,7 @@ function Split-LicenseExpression {
 
     $normalized = $Expression.Trim()
     $normalized = $normalized -replace '[()]', ''
-    $parts = $normalized -split '\s+OR\s+'
+    $parts = $normalized -split '\s+(?:OR|AND)\s+'
     return $parts |
         ForEach-Object { $_.Trim() } |
         Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
@@ -216,6 +221,9 @@ $standardLicenseTexts = @{
     "MIT" = Get-Text -Path (Join-Path $licenseRoot "anyhow-LICENSE-MIT.txt")
     "Apache-2.0" = Get-Text -Path (Join-Path $licenseRoot "anyhow-LICENSE-APACHE.txt")
     "Zlib" = Get-Text -Path (Join-Path $rustFullRoot "zune-core-0.5.1\LICENSE-ZLIB")
+    "BSL-1.0" = Get-Text -Path (Join-Path $standardLicenseRoot "BSL-1.0.txt")
+    "OFL-1.1" = Get-Text -Path (Join-Path $standardLicenseRoot "OFL-1.1.txt")
+    "Ubuntu-font-1.0" = Get-Text -Path (Join-Path $standardLicenseRoot "Ubuntu-font-1.0.txt")
 }
 
 function Add-SectionFromFileOrStub {
@@ -239,7 +247,7 @@ function Add-SectionFromFileOrStub {
                 throw "No full-text fallback is configured for license id '$licenseId' used by '$Path'."
             }
 
-            $note = "The local source '$SourceLabel' only carries a short license expression note. The full text below expands the $licenseId option referenced by that source."
+            $note = "The local source '$SourceLabel' only carries a short license expression note. The full text below expands the $licenseId term referenced by that source."
             Add-LicenseSection -Builder $Builder -DisplayName $DisplayName -SourceLabel "$SourceLabel -> $licenseId" -Body $standardLicenseTexts[$licenseId] -Note $note
         }
         return
@@ -255,6 +263,7 @@ $cudaPreferredOrder = @(
     "boringssl-LICENSE.txt",
     "ggml-LICENSE.txt",
     "miniaudio-LICENSE.txt",
+    "webrtc-audio-processing-LICENSE.txt",
     "yarn-LICENSE.txt",
     "llamafile-sgemm-LICENSE.txt",
     "kleidiai-LICENSE.txt",
@@ -297,7 +306,34 @@ $cudaPreferredOrder = @(
     "image-LICENSE-APACHE.txt",
     "encoding_rs-LICENSE-MIT.txt",
     "encoding_rs-LICENSE-APACHE.txt",
-    "encoding_rs-LICENSE-WHATWG.txt"
+    "encoding_rs-LICENSE-WHATWG.txt",
+    "axum-LICENSE.txt",
+    "base64-LICENSE-MIT.txt",
+    "base64-LICENSE-APACHE.txt",
+    "bincode-LICENSE.txt",
+    "eframe-LICENSE-MIT.txt",
+    "eframe-LICENSE-APACHE.txt",
+    "egui-LICENSE-MIT.txt",
+    "egui-LICENSE-APACHE.txt",
+    "egui_commonmark-LICENSE-MIT.txt",
+    "egui_commonmark-LICENSE-APACHE.txt",
+    "reqwest-LICENSE-MIT.txt",
+    "reqwest-LICENSE-APACHE.txt",
+    "rfd-LICENSE.txt",
+    "sha2-LICENSE-MIT.txt",
+    "sha2-LICENSE-APACHE.txt",
+    "sysinfo-LICENSE.txt",
+    "tar-LICENSE-MIT.txt",
+    "tar-LICENSE-APACHE.txt",
+    "time-LICENSE-MIT.txt",
+    "time-LICENSE-APACHE.txt",
+    "tokio-LICENSE.txt",
+    "tower-http-LICENSE.txt",
+    "tray-icon-LICENSE-MIT.txt",
+    "tray-icon-LICENSE-APACHE.txt",
+    "windows-sys-LICENSE-MIT.txt",
+    "windows-sys-LICENSE-APACHE.txt",
+    "zip-LICENSE.txt"
 )
 
 $bundleExcludedTopLevelFiles = @(

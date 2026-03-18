@@ -706,7 +706,10 @@ fn ensure_machine_readable_text(
          Suspicious pages: [{}]. Use a different PDF source or OCR fallback.",
         sample_pages
     )
-    .context(format!("Machine-readability gate rejected {}", clean_display_path(pdf_path))))
+    .context(format!(
+        "Machine-readability gate rejected {}",
+        clean_display_path(pdf_path)
+    )))
 }
 
 fn looks_non_machine_readable(page_count: usize, stats: &ReadabilityStats) -> bool {
@@ -774,7 +777,10 @@ fn line_looks_garbled(line: &str) -> bool {
     let alpha_ratio = alpha as f32 / char_count as f32;
     let punct_ratio = ascii_punct as f32 / char_count as f32;
 
-    let wordlike_tokens = tokens.iter().filter(|token| token_looks_wordlike(token)).count();
+    let wordlike_tokens = tokens
+        .iter()
+        .filter(|token| token_looks_wordlike(token))
+        .count();
     let wordlike_ratio = wordlike_tokens as f32 / tokens.len() as f32;
 
     let long_punct_run = has_long_ascii_punctuation_run(trimmed, 5);

@@ -62,8 +62,7 @@ struct ExtractArgs {
 }
 
 pub fn run_pdf_cli_from_args(argv: &[String]) -> Result<()> {
-    let cli = Cli::try_parse_from(argv)
-        .with_context(|| "invalid arguments for pdf".to_string())?;
+    let cli = Cli::try_parse_from(argv).with_context(|| "invalid arguments for pdf".to_string())?;
 
     match cli.command {
         Commands::Extract(args) => run_extract(&cli.pdfium_lib, args),

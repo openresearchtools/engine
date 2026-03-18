@@ -23,6 +23,7 @@ jobs:
       PDFIUM_RELEASE_API: "https://api.github.com/repos/bblanchon/pdfium-binaries/releases/latest"
       FFMPEG_RELEASE_API: "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest"
       FFMPEG_ASSET_NAME: "ffmpeg-master-latest-linux64-lgpl-shared.tar.xz"
+      WEBRTC_AUDIO_PROCESSING_REF: "907015852bc78d8e3ac0e8fbb93c93e76110192a"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,6 +41,8 @@ jobs:
             "third_party/licenses/pdfium-binaries-LICENSE.txt"
             "third_party/licenses/ffmpeg-LGPL-2.1.txt"
             "third_party/licenses/ffmpeg-SOURCE-ubuntu-x64.txt"
+            "third_party/licenses/miniaudio-LICENSE.txt"
+            "third_party/licenses/webrtc-audio-processing-LICENSE.txt"
           )
           for f in "${required[@]}"; do
             [[ -f "$f" ]] || { echo "Missing required preflight file: $f"; exit 1; }
@@ -70,6 +73,7 @@ jobs:
             build-essential \
             cmake \
             ninja-build \
+            meson \
             pkg-config \
             curl \
             tar \
@@ -198,6 +202,23 @@ jobs:
             --out-dir "$BUILD_ROOT/llama-src" \
             --force
 
+      - name: Build WebRTC AudioProcessing (Linux x64 static)
+        shell: bash
+        run: |
+          set -euo pipefail
+          webrtc_root="$BUILD_ROOT/runtime-deps/webrtc-audio-processing"
+          webrtc_src="$webrtc_root/src"
+          webrtc_build="$webrtc_root/build"
+
+          rm -rf "$webrtc_root"
+          mkdir -p "$webrtc_root"
+          git clone --depth 1 https://github.com/cross-platform/webrtc-audio-processing.git "$webrtc_src"
+          git -C "$webrtc_src" fetch --depth 1 origin "$WEBRTC_AUDIO_PROCESSING_REF"
+          git -C "$webrtc_src" checkout --force FETCH_HEAD
+
+          meson setup "$webrtc_build" "$webrtc_src" --default-library=static --buildtype=release
+          meson compile -C "$webrtc_build"
+
       - name: Configure and Build llama Bridge (CPU+Vulkan)
         shell: bash
         run: |
@@ -205,6 +226,23 @@ jobs:
           llama_src="$BUILD_ROOT/llama-src"
           llama_build="$BUILD_ROOT/llama-build"
           ffmpeg_root="$FFMPEG_ROOT"
+          webrtc_root="$BUILD_ROOT/runtime-deps/webrtc-audio-processing"
+          webrtc_src="$webrtc_root/src"
+          webrtc_libs=()
+          for candidate in \
+            "$webrtc_root/build/webrtc/modules/audio_processing/libwebrtc_audio_processing.a" \
+            "$webrtc_root/build/webrtc/modules/audio_processing/libwebrtc_audio_processing_privatearch.a" \
+            "$webrtc_root/build/webrtc/modules/audio_coding/libaudio_coding.a" \
+            "$webrtc_root/build/webrtc/common_audio/libcommon_audio.a" \
+            "$webrtc_root/build/webrtc/common_audio/libcommon_audio_sse2.a" \
+            "$webrtc_root/build/webrtc/system_wrappers/libsystem_wrappers.a" \
+            "$webrtc_root/build/webrtc/base/liblibbase.a" \
+            "$webrtc_root/build/webrtc/libwebrtc.a"; do
+            [[ -f "$candidate" ]] && webrtc_libs+=("$candidate")
+          done
+          [[ "${#webrtc_libs[@]}" -gt 0 ]] || { echo "WebRTC AudioProcessing static libraries not found"; exit 1; }
+          webrtc_libs_cmake="$(printf '%s;' "${webrtc_libs[@]}")"
+          webrtc_libs_cmake="${webrtc_libs_cmake%;}"
 
           rm -rf "$llama_build"
           mkdir -p "$llama_build"
@@ -224,6 +262,10 @@ jobs:
             -DLLAMA_BUILD_LIBRESSL=OFF
             -DLLAMA_SERVER_BRIDGE_ENABLE_FFMPEG=ON
             -DLLAMA_SERVER_BRIDGE_FFMPEG_ROOT="$ffmpeg_root"
+            -DLLAMA_SERVER_AUDIO_BUILD=ON
+            -DLLAMA_SERVER_AUDIO_ENABLE_WEBRTC=ON
+            -DLLAMA_SERVER_AUDIO_WEBRTC_ROOT="$webrtc_src"
+            -DLLAMA_SERVER_AUDIO_WEBRTC_LIBRARIES="$webrtc_libs_cmake"
             -DGGML_BACKEND_DL=ON
             # Keep this off for broad toolchain compatibility in CI.
             -DGGML_CPU_ALL_VARIANTS=OFF
@@ -232,7 +274,7 @@ jobs:
           )
 
           cmake "${cmake_args[@]}"
-          cmake --build "$llama_build" --parallel --target llama-server-bridge
+          cmake --build "$llama_build" --parallel --target llama-server-bridge llama-server-audio
 
       - name: Build Rust Runtime
         shell: bash
@@ -260,12 +302,14 @@ jobs:
           bundle_pdfium="$bundle_vendor/pdfium"
           bundle_ffmpeg_root="$bundle_vendor/ffmpeg"
           bundle_ffmpeg="$bundle_ffmpeg_root/lib"
+          bundle_miniaudio="$bundle_vendor/miniaudio"
+          bundle_webrtc="$bundle_vendor/webrtc-audio-processing"
           cargo_release="$BUILD_ROOT/cargo-target/release"
 
           rm -rf "$bundle"
-          mkdir -p "$bundle" "$bundle_pdfium" "$bundle_ffmpeg"
+          mkdir -p "$bundle" "$bundle_pdfium" "$bundle_ffmpeg" "$bundle_miniaudio" "$bundle_webrtc"
 
-          cp "$cargo_release/engine" "$bundle/engine"
+          cp "$cargo_release/example-cli" "$bundle/example-cli"
           cp "$cargo_release/libpdf.so" "$bundle/libpdf.so"
           cp "$cargo_release/libpdfvlm.so" "$bundle/libpdfvlm.so"
 
@@ -284,6 +328,7 @@ jobs:
             cp -a "$lib" "$bundle/$(basename "$lib")"
           done < <(find "$llama_lib_root" -type f,l \( \
             -name "libllama-server-bridge*.so*" -o \
+            -name "libllama-server-audio*.so*" -o \
             -name "libllama*.so*" -o \
             -name "libggml*.so*" -o \
             -name "libmtmd*.so*" \
@@ -329,6 +374,10 @@ jobs:
 
           copy_license_files "$PDFIUM_ROOT" "$bundle_pdfium"
           copy_license_files "$FFMPEG_ROOT" "$bundle_ffmpeg_root"
+          copy_license_files "$BUILD_ROOT/runtime-deps/webrtc-audio-processing/src" "$bundle_webrtc"
+
+          cp "$GITHUB_WORKSPACE/third_party/licenses/miniaudio-LICENSE.txt" "$bundle_miniaudio/miniaudio-LICENSE.txt"
+          cp "$GITHUB_WORKSPACE/third_party/licenses/webrtc-audio-processing-LICENSE.txt" "$bundle_webrtc/webrtc-audio-processing-LICENSE.txt"
 
           # Always include authoritative PDFium license texts from this repo.
           pdfium_primary="$GITHUB_WORKSPACE/third_party/licenses/pdfium-LICENSE.txt"
@@ -382,7 +431,7 @@ jobs:
           }
 
           root_rpath='$ORIGIN:$ORIGIN/vendor/ffmpeg/lib:$ORIGIN/vendor/pdfium'
-          set_rpath_if_elf "$bundle/engine" "$root_rpath"
+          set_rpath_if_elf "$bundle/example-cli" "$root_rpath"
           while IFS= read -r -d '' sofile; do
             set_rpath_if_elf "$sofile" "$root_rpath"
           done < <(find "$bundle" -maxdepth 1 -type f -name "*.so*" -print0)
@@ -427,7 +476,7 @@ jobs:
             fi
           }
 
-          check_ldd "$bundle/engine"
+          check_ldd "$bundle/example-cli"
           while IFS= read -r -d '' sofile; do
             check_ldd "$sofile"
           done < <(find "$bundle" -type f -name "*.so*" -print0)
@@ -440,10 +489,12 @@ jobs:
           [[ -d "$bundle" ]] || { echo "Bundle folder not found: $bundle"; exit 1; }
 
           required=(
-            "engine"
+            "example-cli"
             "libpdf.so"
             "libpdfvlm.so"
             "vendor/pdfium/libpdfium.so"
+            "vendor/miniaudio/miniaudio-LICENSE.txt"
+            "vendor/webrtc-audio-processing/webrtc-audio-processing-LICENSE.txt"
             "LICENSE-ENGINE.txt"
             "LICENSES.md"
             "Third-Party-Notices.md"
@@ -453,6 +504,7 @@ jobs:
           done
 
           ls "$bundle"/libllama-server-bridge*.so* >/dev/null 2>&1 || { echo "Missing libllama-server-bridge*.so"; exit 1; }
+          ls "$bundle"/libllama-server-audio*.so* >/dev/null 2>&1 || { echo "Missing libllama-server-audio*.so"; exit 1; }
           ls "$bundle"/libggml-cpu*.so* >/dev/null 2>&1 || { echo "Missing libggml-cpu*.so"; exit 1; }
           ls "$bundle"/libggml-vulkan*.so* >/dev/null 2>&1 || { echo "Missing libggml-vulkan*.so"; exit 1; }
 
@@ -466,8 +518,11 @@ jobs:
 
           find "$bundle/vendor/ffmpeg" -type f \( -iname '*LICENSE*' -o -iname '*LICENCE*' -o -iname '*COPYING*' -o -iname '*COPYRIGHT*' -o -iname '*NOTICE*' -o -iname '*PATENTS*' -o -iname '*EULA*' -o -iname '*SOURCE*' \) | grep -q . || { echo "No FFmpeg license files found under vendor/ffmpeg"; exit 1; }
           find "$bundle/vendor/pdfium" -type f \( -iname '*LICENSE*' -o -iname '*LICENCE*' -o -iname '*COPYING*' -o -iname '*COPYRIGHT*' -o -iname '*NOTICE*' -o -iname '*PATENTS*' -o -iname '*EULA*' -o -iname '*SOURCE*' \) | grep -q . || { echo "No PDFium license files found under vendor/pdfium"; exit 1; }
+          find "$bundle/vendor/webrtc-audio-processing" -type f \( -iname '*LICENSE*' -o -iname '*LICENCE*' -o -iname '*COPYING*' -o -iname '*COPYRIGHT*' -o -iname '*NOTICE*' -o -iname '*PATENTS*' -o -iname '*EULA*' -o -iname '*SOURCE*' \) | grep -q . || { echo "No WebRTC AudioProcessing license files found under vendor/webrtc-audio-processing"; exit 1; }
           [[ -f "$bundle/vendor/pdfium/pdfium-LICENSE.txt" ]] || { echo "Missing required PDFium license text: vendor/pdfium/pdfium-LICENSE.txt"; exit 1; }
           [[ -f "$bundle/vendor/pdfium/pdfium-binaries-LICENSE.txt" ]] || { echo "Missing required PDFium binaries license text: vendor/pdfium/pdfium-binaries-LICENSE.txt"; exit 1; }
+          [[ -f "$bundle/vendor/miniaudio/miniaudio-LICENSE.txt" ]] || { echo "Missing miniaudio license text: vendor/miniaudio/miniaudio-LICENSE.txt"; exit 1; }
+          [[ -f "$bundle/vendor/webrtc-audio-processing/webrtc-audio-processing-LICENSE.txt" ]] || { echo "Missing WebRTC AudioProcessing license text: vendor/webrtc-audio-processing/webrtc-audio-processing-LICENSE.txt"; exit 1; }
 
       - name: Validate Linux ABI Baseline
         shell: bash
@@ -531,14 +586,14 @@ jobs:
         run: |
           set -euo pipefail
           bundle="$BUILD_ROOT/bundle"
-          smoke_out="$RUNNER_TEMP/engine-list-devices-linux.txt"
+          smoke_out="$RUNNER_TEMP/example-cli-list-devices-linux.txt"
 
           cd "$bundle"
-          chmod +x ./engine
+          chmod +x ./example-cli
           unset LD_LIBRARY_PATH
-          ./engine list-devices > "$smoke_out" 2>&1 || {
+          ./example-cli list-devices > "$smoke_out" 2>&1 || {
             cat "$smoke_out"
-            echo "engine list-devices failed"
+            echo "example-cli list-devices failed"
             exit 1
           }
           cat "$smoke_out"

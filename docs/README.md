@@ -10,7 +10,10 @@ Each function doc is written in the same order:
 
 ## Document index
 
+- [Engine User Manual (`Engine.exe` / `Engine.app`)](./manual.md)
 - [Common Runtime And Device Rules](./common-runtime-and-devices.md)
+- [Distributed Cluster Architecture (Planned)](./distributed-cluster-architecture.md)
+- [Distributed Cluster Implementation Plan (Draft)](./distributed-cluster-implementation-plan.md)
 - [PDF DLL (`pdf.dll`)](./pdf-dll.md)
 - [PDF VLM DLL (`pdfvlm.dll`)](./pdfvlm-dll.md)
 - [Bridge Chat (`llama-server-bridge.dll`)](./bridge-chat-dll.md)

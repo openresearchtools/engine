@@ -31,6 +31,8 @@ param(
     [string]$FfmpegBinDir = "",
     [string]$FfmpegReleaseApiUrl = "",
     [string]$FfmpegAssetPattern = "",
+    [string]$WebRtcRoot = "",
+    [string]$WebRtcRef = "907015852bc78d8e3ac0e8fbb93c93e76110192a",
     [string]$PdfiumTag = "latest",
     [string]$PdfiumDll = "",
     [int]$Jobs = 0
@@ -327,6 +329,11 @@ if ([string]::IsNullOrWhiteSpace($FfmpegBinDir)) {
 }
 $FfmpegBinDir = Resolve-AbsolutePath -PathValue $FfmpegBinDir -RepoRoot $repoRoot
 
+if ([string]::IsNullOrWhiteSpace($WebRtcRoot)) {
+    $WebRtcRoot = Join-Path $buildsRoot "runtime-deps\\webrtc-audio-processing"
+}
+$WebRtcRoot = Resolve-AbsolutePath -PathValue $WebRtcRoot -RepoRoot $repoRoot
+
 if ([string]::IsNullOrWhiteSpace($PdfiumDll)) {
     $PdfiumDll = Join-Path $buildsRoot "runtime-deps\\pdfium\\bin\\pdfium.dll"
 }
@@ -338,12 +345,16 @@ if (Test-IsUnderPath -PathValue $FfmpegRoot -BasePath $repoRoot) {
 if (Test-IsUnderPath -PathValue $FfmpegBinDir -BasePath $repoRoot) {
     throw "FfmpegBinDir must be outside the repo. Use a path under ..\\ENGINEbuilds\\runtime-deps. Current: $FfmpegBinDir"
 }
+if (Test-IsUnderPath -PathValue $WebRtcRoot -BasePath $repoRoot) {
+    throw "WebRtcRoot must be outside the repo. Use a path under ..\\ENGINEbuilds\\runtime-deps. Current: $WebRtcRoot"
+}
 if (Test-IsUnderPath -PathValue $PdfiumDll -BasePath $repoRoot) {
     throw "PdfiumDll must be outside the repo. Use a path under ..\\ENGINEbuilds\\runtime-deps. Current: $PdfiumDll"
 }
 
 $bridgeScript = Join-Path $PSScriptRoot "build_bridge.ps1"
 $engineScript = Join-Path $PSScriptRoot "build_engine.ps1"
+$buildWebRtcScript = Join-Path $PSScriptRoot "build-webrtc-audio-processing.ps1"
 $downloadPdfiumScript = Join-Path $PSScriptRoot "download-pdfium-win-x64.ps1"
 $downloadFfmpegScript = Join-Path $PSScriptRoot "download-ffmpeg-lgpl-win-x64.ps1"
 
@@ -352,6 +363,9 @@ if (-not (Test-Path -LiteralPath $bridgeScript)) {
 }
 if (-not (Test-Path -LiteralPath $engineScript)) {
     throw "Missing build script: $engineScript"
+}
+if (-not (Test-Path -LiteralPath $buildWebRtcScript)) {
+    throw "Missing dependency build script: $buildWebRtcScript"
 }
 if ($FetchRuntimeDeps) {
     if (-not (Test-Path -LiteralPath $downloadPdfiumScript)) {
@@ -363,6 +377,18 @@ if ($FetchRuntimeDeps) {
 }
 
 if ($FetchRuntimeDeps) {
+    $webrtcArgs = @{
+        OutDir = $WebRtcRoot
+        Ref = $WebRtcRef
+    }
+    if ($ForceDependencyRefresh) {
+        $webrtcArgs["Force"] = $true
+    }
+    & $buildWebRtcScript @webrtcArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to build WebRTC AudioProcessing runtime dependency."
+    }
+
     $pdfiumDestination = Split-Path -Parent $PdfiumDll
     if ((Split-Path -Leaf $pdfiumDestination).Equals("bin", [System.StringComparison]::OrdinalIgnoreCase)) {
         $pdfiumDestination = Split-Path -Parent $pdfiumDestination
@@ -429,6 +455,7 @@ if ($enableFfmpeg) {
     $bridgeArgs["EnableFfmpeg"] = $true
     $bridgeArgs["FfmpegRoot"] = $FfmpegRoot
 }
+$bridgeArgs["WebRtcRoot"] = $WebRtcRoot
 
 & $bridgeScript @bridgeArgs
 if ($LASTEXITCODE -ne 0) {
@@ -452,7 +479,9 @@ $engineArgs = @{
     BridgeBinDir = $bridgeBinDir
     PdfiumDll = $PdfiumDll
     FfmpegBinDir = $FfmpegBinDir
+    WebRtcRoot = $WebRtcRoot
     StageCmakeRuntime = $true
+    StageAudioRuntime = $true
     StageFfmpegRuntime = $enableFfmpeg
     StageCudaRuntime = $StageCudaRuntime
     LicenseProfile = $Backend

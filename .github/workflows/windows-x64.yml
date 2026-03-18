@@ -53,7 +53,9 @@ jobs:
             "third_party/licenses/pdfium-LICENSE.txt",
             "third_party/licenses/pdfium-binaries-LICENSE.txt",
             "third_party/licenses/ffmpeg-LGPL-2.1.txt",
-            "third_party/licenses/ffmpeg-SOURCE-windows-x64.txt"
+            "third_party/licenses/ffmpeg-SOURCE-windows-x64.txt",
+            "third_party/licenses/miniaudio-LICENSE.txt",
+            "third_party/licenses/webrtc-audio-processing-LICENSE.txt"
           )
           foreach ($path in $requiredCommon) {
             if (-not (Test-Path -LiteralPath $path)) {
@@ -94,6 +96,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Install Meson
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check meson
 
       - name: Install Ninja
         shell: pwsh
@@ -174,10 +181,15 @@ jobs:
           }
 
           $requiredFiles = @(
-              "engine.exe",
+              "example-cli.exe",
+              "Engine.exe",
+              "rpc-server.exe",
               "pdf.dll",
               "pdfvlm.dll",
+              "llama-server-audio.dll",
               "vendor\\pdfium\\pdfium.dll",
+              "vendor\\miniaudio\\miniaudio-LICENSE.txt",
+              "vendor\\webrtc-audio-processing\\webrtc-audio-processing-LICENSE.txt",
               "LICENSE-ENGINE.txt",
               "LICENSES.md",
               "Third-Party-Notices.md"
@@ -192,7 +204,10 @@ jobs:
           if (-not $bridge) {
               throw "Missing llama-server-bridge.dll in bundle."
           }
-
+          $audioBridge = Get-ChildItem -Path $bundle -File -Filter "llama-server-audio.dll" -ErrorAction SilentlyContinue
+          if (-not $audioBridge) {
+              throw "Missing llama-server-audio.dll in bundle."
+          }
           $cpuVariants = Get-ChildItem -Path $bundle -File -Filter "ggml-cpu-*.dll" -ErrorAction SilentlyContinue
           if (-not $cpuVariants -or $cpuVariants.Count -eq 0) {
               throw "No ggml CPU variant DLLs found in bundle (expected ggml-cpu-*.dll)."
@@ -254,6 +269,21 @@ jobs:
               throw "Missing FFmpeg source/provenance notice in vendor\\ffmpeg: ffmpeg-SOURCE.txt"
           }
 
+          $vendorMiniaudioDir = Join-Path $bundle "vendor\\miniaudio"
+          if (-not (Test-Path -LiteralPath (Join-Path $vendorMiniaudioDir "miniaudio-LICENSE.txt"))) {
+              throw "Missing miniaudio license in vendor\\miniaudio"
+          }
+
+          $vendorWebRtcDir = Join-Path $bundle "vendor\\webrtc-audio-processing"
+          $webrtcLicenseFiles = Get-ChildItem -Path $vendorWebRtcDir -Recurse -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match $licenseRegex }
+          if (-not $webrtcLicenseFiles) {
+              throw "No WebRTC AudioProcessing license files found under vendor\\webrtc-audio-processing"
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $vendorWebRtcDir "webrtc-audio-processing-LICENSE.txt"))) {
+              throw "Missing curated WebRTC AudioProcessing license file in vendor\\webrtc-audio-processing"
+          }
+
           if ($env:BACKEND -eq "cuda") {
               $cudaRuntimePatterns = @("cublas64_*.dll", "cublasLt64_*.dll", "cudart64_*.dll")
               foreach ($pattern in $cudaRuntimePatterns) {
@@ -266,6 +296,10 @@ jobs:
               if (-not (Test-Path -LiteralPath $cudaNotice)) {
                   throw "Missing CUDA runtime notice file in bundle root: NVIDIA-CUDA-RUNTIME-NOTICE.txt"
               }
+              $cudaEula = Join-Path $bundle "NVIDIA-CUDA-EULA.txt"
+              if (-not (Test-Path -LiteralPath $cudaEula)) {
+                  throw "Missing CUDA EULA file in bundle root: NVIDIA-CUDA-EULA.txt"
+              }
           } else {
               $unexpectedCudaRuntime = @()
               $unexpectedCudaRuntime += Get-ChildItem -Path $bundle -File -Filter "cublas*.dll" -ErrorAction SilentlyContinue
@@ -275,6 +309,9 @@ jobs:
               }
               if (Test-Path -LiteralPath (Join-Path $bundle "NVIDIA-CUDA-RUNTIME-NOTICE.txt")) {
                   throw "CUDA runtime notice file was bundled unexpectedly for backend '$($env:BACKEND)'."
+              }
+              if (Test-Path -LiteralPath (Join-Path $bundle "NVIDIA-CUDA-EULA.txt")) {
+                  throw "CUDA EULA file was bundled unexpectedly for backend '$($env:BACKEND)'."
               }
           }
 

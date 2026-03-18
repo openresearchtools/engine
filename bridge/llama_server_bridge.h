@@ -29,6 +29,7 @@ typedef struct llama_server_bridge_realtime_model_impl llama_server_bridge_realt
 struct llama_server_bridge_params {
     const char * model_path;
     const char * mmproj_path;
+    const char * cluster_instance_name; // optional: route calls to a named shared cluster instance instead of a direct model
 
     int32_t n_ctx;
     int32_t n_batch;
@@ -47,6 +48,11 @@ struct llama_server_bridge_params {
     int32_t seed;
     int32_t ctx_shift;
     int32_t kv_unified;
+    int32_t use_mmap;       // -1 unset/default, 0 disable mmap, 1 enable mmap
+    int32_t use_direct_io;  // -1 unset/default, 0 disable direct IO, 1 enable direct IO
+    int32_t use_mlock;      // -1 unset/default, 0 disable mlock, 1 enable mlock
+    int32_t no_host;        // -1 unset/default, 0 allow host buffers, 1 disallow host buffers
+    int32_t no_extra_bufts; // -1 unset/default, 0 allow extra bufts, 1 disable extra bufts
 
     // optional multi-device / split controls
     const char * devices;       // comma-separated device names or indices
@@ -232,6 +238,9 @@ enum llama_server_bridge_audio_event_kind {
 enum llama_server_bridge_audio_event_flags {
     LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FINAL = 1u << 0,
     LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FROM_BUFFER_REPLAY = 1u << 1,
+    LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_PREVIEW = 1u << 2,
+    LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_SNAPSHOT_START = 1u << 3,
+    LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_SNAPSHOT_END = 1u << 4,
 };
 
 struct llama_server_bridge_audio_session_params {
@@ -336,6 +345,10 @@ LLAMA_SERVER_BRIDGE_API void llama_server_bridge_json_result_free(struct llama_s
 LLAMA_SERVER_BRIDGE_API const char * llama_server_bridge_last_error(const struct llama_server_bridge * bridge);
 
 LLAMA_SERVER_BRIDGE_API int32_t llama_server_bridge_list_devices(
+    struct llama_server_bridge_device_info ** out_devices,
+    size_t * out_count);
+LLAMA_SERVER_BRIDGE_API int32_t llama_server_bridge_list_devices_ex(
+    int32_t include_rpc_backends,
     struct llama_server_bridge_device_info ** out_devices,
     size_t * out_count);
 

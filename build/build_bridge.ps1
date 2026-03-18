@@ -11,6 +11,7 @@ param(
     [string]$BuildRoot = "",
     [string]$BuildDir = "",
     [string]$BridgeSrcDir = "",
+    [string]$MultiNodeServerSrcDir = "",
     [string]$BridgeRelativeDir = "MARKDOWN\\bridge",
     [bool]$StageBridgeSources = $true,
     [bool]$StageWhisperSource = $true,
@@ -22,6 +23,7 @@ param(
     [bool]$EnableCpuAllVariants = $false,
     [bool]$DisableGgmlNative = $false,
     [string]$FfmpegRoot = "",
+    [string]$WebRtcRoot = "",
     [ValidateSet("off", "openssl", "boringssl", "libressl")]
     [string]$HttpsBackend = "boringssl",
     [int]$Jobs = 0
@@ -250,6 +252,75 @@ function Resolve-CmakeExecutable {
     throw "CMake executable not found. Install cmake or pass -CmakeExe with full path."
 }
 
+function Get-WebRtcStaticLibraries {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RootDir
+    )
+
+    $preferredRelativePaths = @(
+        "webrtc\modules\audio_processing\libwebrtc_audio_processing.a",
+        "webrtc\modules\audio_processing\libwebrtc_audio_processing_privatearch.a",
+        "webrtc\modules\audio_coding\libaudio_coding.a",
+        "webrtc\common_audio\libcommon_audio.a",
+        "webrtc\common_audio\libcommon_audio_sse2.a",
+        "webrtc\system_wrappers\libsystem_wrappers.a",
+        "webrtc\base\liblibbase.a",
+        "webrtc\libwebrtc.a",
+        "webrtc\\modules\\audio_processing\\webrtc_audio_processing.lib",
+        "webrtc\\modules\\audio_processing\\webrtc_audio_processing_privatearch.lib",
+        "webrtc\\modules\\audio_coding\\audio_coding.lib",
+        "webrtc\\common_audio\\common_audio.lib",
+        "webrtc\\common_audio\\common_audio_sse2.lib",
+        "webrtc\\system_wrappers\\system_wrappers.lib",
+        "webrtc\\base\\libbase.lib",
+        "webrtc\\webrtc.lib"
+    )
+
+    $libs = New-Object System.Collections.Generic.List[string]
+    foreach ($relativePath in $preferredRelativePaths) {
+        $candidate = Join-Path $RootDir $relativePath
+        if (Test-Path -LiteralPath $candidate) {
+            $libs.Add([System.IO.Path]::GetFullPath($candidate))
+        }
+    }
+
+    if ($libs.Count -gt 0) {
+        return $libs.ToArray()
+    }
+
+    $fallbackPatterns = @(
+        "libwebrtc_audio_processing.a",
+        "libwebrtc_audio_processing_privatearch.a",
+        "libaudio_coding.a",
+        "libcommon_audio.a",
+        "libcommon_audio_sse2.a",
+        "libsystem_wrappers.a",
+        "liblibbase.a",
+        "libwebrtc.a",
+        "webrtc_audio_processing.lib",
+        "webrtc_audio_processing_privatearch.lib",
+        "audio_coding.lib",
+        "common_audio.lib",
+        "common_audio_sse2.lib",
+        "system_wrappers.lib",
+        "libbase.lib",
+        "webrtc.lib"
+    )
+
+    foreach ($pattern in $fallbackPatterns) {
+        $matches = Get-ChildItem -Path $RootDir -Recurse -File -Filter $pattern -ErrorAction SilentlyContinue | Sort-Object FullName
+        foreach ($match in $matches) {
+            $fullName = [System.IO.Path]::GetFullPath($match.FullName)
+            if (-not $libs.Contains($fullName)) {
+                $libs.Add($fullName)
+            }
+        }
+    }
+
+    return $libs.ToArray()
+}
+
 function Ensure-BridgeCmakeHooks {
     param(
         [string]$LlamaRoot
@@ -300,6 +371,11 @@ function Ensure-BridgeCmakeHooks {
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $buildsRoot = Join-Path (Split-Path -Parent $repoRoot) "ENGINEbuilds"
+$logicalCpuCount = [Environment]::ProcessorCount
+if ($Jobs -le 0) {
+    $Jobs = $logicalCpuCount
+}
+$env:CMAKE_BUILD_PARALLEL_LEVEL = [string]$Jobs
 $CmakeExe = Resolve-CmakeExecutable -ToolValue $CmakeExe
 $CmakeGenerator = Resolve-CmakeGenerator -ConfiguredGenerator $CmakeGenerator -GeneratorExplicit $PSBoundParameters.ContainsKey("CmakeGenerator")
 $CmakeArch = Resolve-CmakeArch -ConfiguredArch $CmakeArch -ArchExplicit $PSBoundParameters.ContainsKey("CmakeArch")
@@ -367,13 +443,26 @@ if ([string]::IsNullOrWhiteSpace($BridgeSrcDir)) {
 }
 $BridgeSrcDir = Resolve-AbsolutePath -PathValue $BridgeSrcDir -RepoRoot $repoRoot
 
+if ([string]::IsNullOrWhiteSpace($MultiNodeServerSrcDir)) {
+    $MultiNodeServerSrcDir = Join-Path $repoRoot "multi_node_server"
+}
+$MultiNodeServerSrcDir = Resolve-AbsolutePath -PathValue $MultiNodeServerSrcDir -RepoRoot $repoRoot
+
 if ([string]::IsNullOrWhiteSpace($FfmpegRoot)) {
     $FfmpegRoot = Join-Path $buildsRoot "runtime-deps\\ffmpeg"
 }
 $FfmpegRoot = Resolve-AbsolutePath -PathValue $FfmpegRoot -RepoRoot $repoRoot
 
+if ([string]::IsNullOrWhiteSpace($WebRtcRoot)) {
+    $WebRtcRoot = Join-Path $buildsRoot "runtime-deps\\webrtc-audio-processing"
+}
+$WebRtcRoot = Resolve-AbsolutePath -PathValue $WebRtcRoot -RepoRoot $repoRoot
+
 if (Test-IsUnderPath -PathValue $FfmpegRoot -BasePath $repoRoot) {
     throw "FfmpegRoot must be outside the repo. Use a path under ..\\ENGINEbuilds\\runtime-deps. Current: $FfmpegRoot"
+}
+if (Test-IsUnderPath -PathValue $WebRtcRoot -BasePath $repoRoot) {
+    throw "WebRtcRoot must be outside the repo. Use a path under ..\\ENGINEbuilds\\runtime-deps. Current: $WebRtcRoot"
 }
 
 $cmakeLists = Join-Path $LlamaCppDir "CMakeLists.txt"
@@ -403,6 +492,12 @@ if ($StageBridgeSources) {
     $bridgeDstDir = Join-Path $LlamaCppDir $BridgeRelativeDir
     New-Item -ItemType Directory -Force -Path $bridgeDstDir | Out-Null
     Copy-Item -Path (Join-Path $BridgeSrcDir "*") -Destination $bridgeDstDir -Recurse -Force
+
+    if (-not (Test-Path -LiteralPath $MultiNodeServerSrcDir)) {
+        throw "Multi-node server source dir not found: $MultiNodeServerSrcDir"
+    }
+    $multiNodeServerDstDir = Join-Path $LlamaCppDir "MARKDOWN\\multi_node_server"
+    Copy-DirectoryTree -SourceRoot $MultiNodeServerSrcDir -DestinationRoot $multiNodeServerDstDir
 }
 
 if ($StageWhisperSource) {
@@ -450,6 +545,22 @@ if ($StageWhisperSource) {
     Assert-AudioPatchApplied -LlamaRoot $LlamaCppDir
 }
 
+$webRtcSourceRoot = ""
+$webRtcStaticLibraries = @()
+if (Test-Path -LiteralPath $WebRtcRoot) {
+    $sourceCandidates = @(
+        (Join-Path $WebRtcRoot "src"),
+        $WebRtcRoot
+    )
+    foreach ($candidate in $sourceCandidates) {
+        if (Test-Path -LiteralPath (Join-Path $candidate "meson.build")) {
+            $webRtcSourceRoot = [System.IO.Path]::GetFullPath($candidate)
+            break
+        }
+    }
+    $webRtcStaticLibraries = @(Get-WebRtcStaticLibraries -RootDir $WebRtcRoot)
+}
+
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 
 if (-not (Test-CmakeGeneratorSupportsPlatform -Generator $CmakeGenerator) -and -not [string]::IsNullOrWhiteSpace($CmakeArch)) {
@@ -462,9 +573,11 @@ $cmakeArgs = @(
     "-B", $BuildDir,
     "-G", $CmakeGenerator,
     "-DBUILD_SHARED_LIBS=ON",
+    "-DGGML_RPC=ON",
     "-DLLAMA_BUILD_SERVER=ON",
     "-DLLAMA_BUILD_MARKDOWN_BRIDGE=ON",
-    "-DLLAMA_HTTPLIB=ON"
+    "-DLLAMA_HTTPLIB=ON",
+    "-DLLAMA_SERVER_AUDIO_BUILD=ON"
 )
 
 if (-not [string]::IsNullOrWhiteSpace($CmakeArch)) {
@@ -529,6 +642,14 @@ if ($EnableFfmpeg) {
     $cmakeArgs += "-DLLAMA_SERVER_BRIDGE_FFMPEG_ROOT=$FfmpegRoot"
 }
 
+if (-not [string]::IsNullOrWhiteSpace($webRtcSourceRoot) -and $webRtcStaticLibraries.Count -gt 0) {
+    $cmakeArgs += "-DLLAMA_SERVER_AUDIO_ENABLE_WEBRTC=ON"
+    $cmakeArgs += "-DLLAMA_SERVER_AUDIO_WEBRTC_ROOT=$webRtcSourceRoot"
+    $cmakeArgs += "-DLLAMA_SERVER_AUDIO_WEBRTC_LIBRARIES=$($webRtcStaticLibraries -join ';')"
+} else {
+    $cmakeArgs += "-DLLAMA_SERVER_AUDIO_ENABLE_WEBRTC=OFF"
+}
+
 $oldErrorActionPreference = $ErrorActionPreference
 try {
     $ErrorActionPreference = "Continue"
@@ -541,7 +662,7 @@ if ($cmakeConfigureExitCode -ne 0) {
     throw "CMake configure failed for build dir: $BuildDir"
 }
 
-$buildTargets = @("llama-server-bridge")
+$buildTargets = @("llama-server-bridge", "multi-node-server", "llama-server-audio")
 if ($BuildLlamaServerCli) {
     $buildTargets += "llama-server"
 }
@@ -557,3 +678,5 @@ Write-Host "Bridge build completed."
 Write-Host "CMake build dir: $BuildDir"
 Write-Host "Runtime output dir (expected): $(Join-Path $BuildDir 'bin')"
 Write-Host "HTTPS backend: $HttpsBackend"
+Write-Host "WebRTC AudioProcessing source: $(if ($webRtcSourceRoot) { $webRtcSourceRoot } else { '<disabled>' })"
+Write-Host "Parallel jobs: $Jobs"

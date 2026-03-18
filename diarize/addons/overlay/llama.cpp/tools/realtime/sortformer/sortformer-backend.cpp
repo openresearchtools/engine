@@ -8,13 +8,30 @@ namespace llama::realtime {
 
 namespace {
 
-event make_span_event(int32_t speaker_id, double begin_sec, double end_sec) {
+event make_span_event(int32_t speaker_id, double begin_sec, double end_sec, uint32_t flags = event_flag_none) {
     event ev;
     ev.type = event_type::speaker_span_commit;
     ev.speaker_id = speaker_id;
     ev.begin_sec = begin_sec;
     ev.end_sec = end_sec;
+    ev.flags = flags;
     return ev;
+}
+
+bool spans_equal(
+    const std::vector<sortformer_speaker_span> & lhs,
+    const std::vector<sortformer_speaker_span> & rhs) {
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < lhs.size(); ++i) {
+        if (lhs[i].speaker_id != rhs[i].speaker_id ||
+            lhs[i].begin_sec != rhs[i].begin_sec ||
+            lhs[i].end_sec != rhs[i].end_sec) {
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace
@@ -65,6 +82,7 @@ void sortformer_stream_backend::reset() {
     all_chunk_preds_.rows = 0;
     all_chunk_preds_.cols = model_ref().metadata().max_speakers;
     all_chunk_preds_.data.clear();
+    last_preview_spans_.clear();
 }
 
 void sortformer_stream_backend::push_audio(const float * samples, size_t n_samples, std::vector<event> & out_events) {
@@ -96,7 +114,7 @@ const std::vector<sortformer_backend_step_debug> & sortformer_stream_backend::de
 }
 
 void sortformer_stream_backend::process_ready_chunks(std::vector<event> & out_events) {
-    (void) out_events;
+    bool processed_any = false;
     while (stream_state_.has_ready_chunk()) {
         const auto request = stream_state_.next_chunk();
         const uint32_t nominal_rows = static_cast<uint32_t>(request.nominal_input_end_frame - request.input_begin_frame);
@@ -124,6 +142,11 @@ void sortformer_stream_backend::process_ready_chunks(std::vector<event> & out_ev
         }
 
         stream_state_.mark_chunk_complete();
+        processed_any = true;
+    }
+
+    if (processed_any) {
+        emit_preview_spans(out_events);
     }
 }
 
@@ -155,6 +178,29 @@ void sortformer_stream_backend::emit_postprocessed_spans(std::vector<event> & ou
     const auto spans = sortformer_postprocess_speaker_spans(all_chunk_preds_, postprocess_params_);
     for (const auto & span : spans) {
         out_events.push_back(make_span_event(span.speaker_id, span.begin_sec, span.end_sec));
+    }
+}
+
+void sortformer_stream_backend::emit_preview_spans(std::vector<event> & out_events) {
+    const auto spans = sortformer_postprocess_speaker_spans(all_chunk_preds_, postprocess_params_);
+    if (spans_equal(spans, last_preview_spans_)) {
+        return;
+    }
+
+    last_preview_spans_ = spans;
+    if (spans.empty()) {
+        return;
+    }
+
+    for (size_t i = 0; i < spans.size(); ++i) {
+        uint32_t flags = event_flag_preview;
+        if (i == 0) {
+            flags |= event_flag_snapshot_start;
+        }
+        if (i + 1 == spans.size()) {
+            flags |= event_flag_snapshot_end;
+        }
+        out_events.push_back(make_span_event(spans[i].speaker_id, spans[i].begin_sec, spans[i].end_sec, flags));
     }
 }
 

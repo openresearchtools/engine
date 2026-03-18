@@ -48,13 +48,43 @@ Packaged app bundles ship these as root files:
 
 ## How to embed it
 
-* `engine.exe` is an example wrapper showing how to call functions.
-* `engine` is not the embedding boundary; treat it as a reference CLI only.
+* `example-cli.exe` is an example wrapper showing how to call functions.
+* `example-cli` is not the embedding boundary; treat it as a reference CLI only.
+* The controller app ships as `Engine.exe` on Windows and as `Engine.dmg` containing `Engine.app` on macOS.
 * Production embedding target is native binaries:
 
   * `llama-server-bridge.dll`
   * `pdf.dll`
   * `pdfvlm.dll`
+
+## Engine app
+
+`Engine.exe` / `Engine.app` is the desktop controller for ENGINE’s local and multi-node runtime stack.
+
+It lets you discover and pair machines, see which devices and models are available on each node, create named runtimes on any connected system, and keep one stable control point even when the actual runtime is running somewhere else in the cluster.
+
+Engine is based on the llama.cpp runtime family together with ENGINE’s own native bridge and clustering layers. That includes remote runtime ownership, cross-node workers, model transfer between nodes, named-instance HTTP routing, native audio and transcription paths, and mixed-device orchestration across CUDA, Vulkan, and Metal systems.
+
+Cluster behavior:
+
+* Any connected node can act as the initiator, the runtime owner, or a worker.
+* A runtime can be started from one machine while the primary GPU and actual owner live on another machine.
+* Cluster instance calls still resolve by instance owner, so the local API/bridge entrypoint can forward to the real runtime host.
+* The cluster is backend-agnostic across nodes: CUDA, Vulkan, and Metal nodes can participate in the same cluster, with each machine using its native backend locally.
+
+Transport guidance:
+
+* Direct Thunderbolt or USB4 link-local connections are preferred where available because they provide the best practical speeds for model transfer and cross-node traffic.
+* Normal private LAN still works, but large model copies and RPC-heavy workloads benefit materially from the higher direct-link bandwidth.
+
+CPU guidance:
+
+* CPU execution is available by enabling CPU devices in Settings.
+* For clustered tensor-model workloads it is generally not recommended, is often untested, and is dramatically slower than GPU-backed execution.
+
+If you want to report a bug or request a feature, use GitHub issues in this repository:
+
+* <https://github.com/openresearchtools/engine/issues>
 
 ## Detailed DLL docs
 
@@ -65,7 +95,8 @@ For function-by-function embedding docs (minimal calls, GPU selection, and full 
 ## Project layout
 
 * `bridge/` native in-process bridge for llama runtime APIs.
-* `engine/` Rust CLI wrapper.
+* `engine/` Rust CLI wrapper crate (builds `example-cli`).
+* `clusterui/` controller app crate (builds `Engine`).
 * `pdf/` fast PDF extraction module.
 * `pdfvlm/` PDF->image->VLM->Markdown module.
 * `diarize/` patch assets for integrated audio stack.
@@ -80,9 +111,9 @@ Start here to confirm what the runtime can see (CPU/GPU devices) before you tune
 
 ```powershell
 # Device enumeration
-engine.exe list-devices
+example-cli.exe list-devices
 # Equivalent bridge form:
-engine.exe bridge list-devices
+example-cli.exe bridge list-devices
 ```
 
 ### Common runtime flags (all bridge commands)
@@ -126,7 +157,7 @@ This runs a direct prompt-based chat request with full GPU offload on a single G
 
 ```powershell
 # Chat with prompt (single GPU, full offload)
-engine.exe chat `
+example-cli.exe chat `
   --model ".\models\model.gguf" `
   --prompt "Summarize key findings in 5 bullets." `
   --n-gpu-layers -1 `
@@ -140,7 +171,7 @@ engine.exe chat `
 
 ```powershell
 # Chat with reasoning disabled
-engine.exe chat `
+example-cli.exe chat `
   --model ".\models\model.gguf" `
   --gpu 0 `
   --reasoning off `
@@ -150,7 +181,7 @@ engine.exe chat `
 
 ```powershell
 # Chat with visible reasoning output
-engine.exe chat `
+example-cli.exe chat `
   --model ".\models\model.gguf" `
   --gpu 0 `
   --reasoning on `
@@ -163,7 +194,7 @@ If you already have a Markdown file you want summarized, you can pass it directl
 
 ```powershell
 # Chat from markdown only (uses default summary prompt)
-engine.exe chat `
+example-cli.exe chat `
   --model ".\models\model.gguf" `
   --markdown ".\input.md" `
   --n-gpu-layers -1 `
@@ -174,7 +205,7 @@ To do targeted extraction or structured analysis, combine a prompt and a Markdow
 
 ```powershell
 # Chat with both prompt and markdown context
-engine.exe chat `
+example-cli.exe chat `
   --model ".\models\model.gguf" `
   --prompt "Extract all statistical tests and p-values." `
   --markdown ".\input.md" `
@@ -190,7 +221,7 @@ This example runs "image -> Markdown" conversion with the default extraction pro
 
 ```powershell
 # VLM markdown conversion (default prompt = markdown extraction)
-engine.exe vlm `
+example-cli.exe vlm `
   --model ".\models\vision.gguf" `
   --mmproj ".\models\mmproj.gguf" `
   --image ".\page.png" `
@@ -202,7 +233,7 @@ engine.exe vlm `
 
 ```powershell
 # VLM with reasoning disabled
-engine.exe vlm `
+example-cli.exe vlm `
   --model ".\models\vision.gguf" `
   --mmproj ".\models\mmproj.gguf" `
   --image ".\image.png" `
@@ -214,7 +245,7 @@ engine.exe vlm `
 
 ```powershell
 # VLM with visible reasoning output
-engine.exe vlm `
+example-cli.exe vlm `
   --model ".\models\vision.gguf" `
   --mmproj ".\models\mmproj.gguf" `
   --image ".\image.png" `
@@ -229,7 +260,7 @@ If you want the model to answer a specific question about an image, provide your
 
 ```powershell
 # VLM image chat (set your own prompt)
-engine.exe vlm `
+example-cli.exe vlm `
   --model ".\models\vision.gguf" `
   --mmproj ".\models\mmproj.gguf" `
   --image ".\image.png" `
@@ -251,7 +282,7 @@ If a model is too large for one GPU, you can split across multiple devices. This
 
 ```powershell
 # Multi-GPU split
-engine.exe chat `
+example-cli.exe chat `
   --model ".\models\model.gguf" `
   --markdown ".\input.md" `
   --devices 0,1 `
@@ -265,7 +296,7 @@ engine.exe chat `
 
 ## Audio: transcription with and without diarization
 
-`engine bridge audio-session` is the preferred audio entrypoint for current work.
+`example-cli bridge audio-session` is the preferred audio entrypoint for current work.
 
 Use `audio-session` when you want:
 
@@ -275,14 +306,14 @@ Use `audio-session` when you want:
 * live/session-style PCM ingress
 * native realtime Voxtral transcription
 
-`engine audio` remains available as the compatibility CLI route, but the current end-to-end session work is centered on `audio-session`.
+`example-cli audio` remains available as the compatibility CLI route, but the current end-to-end session work is centered on `audio-session`.
 
 ### Recommended `audio-session` commands
 
 Whisper transcription only from file:
 
 ```powershell
-engine.exe bridge audio-session `
+example-cli.exe bridge audio-session `
   --audio-file ".\sample.wav" `
   --whisper-hf-repo ggerganov/whisper.cpp `
   --whisper-hf-file ggml-large-v3-turbo.bin `
@@ -293,7 +324,7 @@ engine.exe bridge audio-session `
 Whisper + native Sortformer diarization from file:
 
 ```powershell
-engine.exe bridge audio-session `
+example-cli.exe bridge audio-session `
   --audio-file ".\meeting.wav" `
   --diarization-model-path ".\models\sortformer.gguf" `
   --diarization-device Vulkan0 `
@@ -307,7 +338,7 @@ engine.exe bridge audio-session `
 Diarization only from file:
 
 ```powershell
-engine.exe bridge audio-session `
+example-cli.exe bridge audio-session `
   --audio-file ".\meeting.wav" `
   --diarization-model-path ".\models\sortformer.gguf" `
   --diarization-device Vulkan0 `
@@ -317,7 +348,7 @@ engine.exe bridge audio-session `
 Native Voxtral transcription on the same continuous session path:
 
 ```powershell
-engine.exe bridge audio-session `
+example-cli.exe bridge audio-session `
   --audio-file ".\meeting.wav" `
   --transcription-realtime-model ".\models\voxtral-mini-4b-realtime.gguf" `
   --transcription-device Vulkan0 `
@@ -327,7 +358,7 @@ engine.exe bridge audio-session `
 Native Voxtral + native Sortformer on the same continuous session path:
 
 ```powershell
-engine.exe bridge audio-session `
+example-cli.exe bridge audio-session `
   --audio-file ".\meeting.wav" `
   --transcription-realtime-model ".\models\voxtral-mini-4b-realtime.gguf" `
   --transcription-device Vulkan0 `
@@ -341,7 +372,7 @@ Live PCM/stdin -> native Voxtral transcription:
 
 ```powershell
 Get-Content ".\meeting_mono16k_s16le.raw" -Encoding Byte | `
-engine.exe bridge audio-session `
+example-cli.exe bridge audio-session `
   --stdin-pcm-s16le `
   --stdin-chunk-frames 7680 `
   --session-sample-rate 16000 `
@@ -355,7 +386,7 @@ Live PCM/stdin -> native Voxtral + native Sortformer:
 
 ```powershell
 Get-Content ".\meeting_mono16k_s16le.raw" -Encoding Byte | `
-engine.exe bridge audio-session `
+example-cli.exe bridge audio-session `
   --stdin-pcm-s16le `
   --stdin-chunk-frames 7680 `
   --session-sample-rate 16000 `
@@ -371,7 +402,7 @@ Live PCM/stdin -> Whisper + native Sortformer (staged):
 
 ```powershell
 Get-Content ".\meeting_mono16k_s16le.raw" -Encoding Byte | `
-engine.exe bridge audio-session `
+example-cli.exe bridge audio-session `
   --stdin-pcm-s16le `
   --stdin-chunk-frames 7680 `
   --session-sample-rate 16000 `
@@ -389,17 +420,17 @@ For the full session ABI surface, rolling-write behavior, and more live PCM/stdi
 
 * [`docs/bridge-audio-dll.md`](docs/bridge-audio-dll.md)
 
-### Compatibility route: `engine audio`
+### Compatibility route: `example-cli audio`
 
-`engine audio` remains available for compatibility and one-shot file-oriented runs, but new work should prefer `engine bridge audio-session`.
+`example-cli audio` remains available for compatibility and one-shot file-oriented runs, but new work should prefer `example-cli bridge audio-session`.
 
 ### Command shape
 
 You can invoke the audio pipeline in either of these forms:
 
-* `engine audio ...` or `engine bridge audio ...`
+* `example-cli audio ...` or `example-cli bridge audio ...`
 * Audio modes are always executed in audio-only runtime mode. A text `--model` GGUF is not required.
-* If `--model` is provided on `engine audio`, it is ignored for compatibility.
+* If `--model` is provided on `example-cli audio`, it is ignored for compatibility.
 * If `--gpu N` is set and no explicit `--whisper-gpu-device` / `--diarization-device` is provided, both follow the selected runtime device.
 * If no device is set, audio follows the same defaults as the rest of the runtime (Windows/Linux CPU-only, macOS first GPU).
 
@@ -449,7 +480,7 @@ You can also optionally set:
 
 ### Advanced audio knobs (CLI flags or `--body-json`)
 
-Advanced audio controls are available directly as `engine.exe audio` flags (including raw-bytes `--audio-file` runs), and can also be passed in request JSON via `--body-json`.
+Advanced audio controls are available directly as `example-cli.exe audio` flags (including raw-bytes `--audio-file` runs), and can also be passed in request JSON via `--body-json`.
 
 Whisper controls:
 
@@ -498,7 +529,7 @@ Recommended tuning flow:
 Example with a custom local Whisper model:
 
 ```powershell
-engine.exe audio `
+example-cli.exe audio `
   --audio-file ".\meeting.mp3" `
   --output-dir ".\outputs" `
   --mode transcript `
@@ -516,7 +547,7 @@ This is a straightforward "speech mode" transcription run (no diarization). Use 
 
 ```powershell
 # speech mode, default custom
-engine.exe audio `
+example-cli.exe audio `
   --audio-file ".\sample.mp3" `
   --output-dir ".\outputs" `
   --audio-format mp3 `
@@ -529,7 +560,7 @@ This produces subtitle-style output, where you can control the window size via `
 
 ```powershell
 # subtitle mode, 4.5-second windowing via custom
-engine.exe audio `
+example-cli.exe audio `
   --audio-file ".\sample.wav" `
   --output-dir ".\outputs" `
   --mode subtitle `
@@ -541,7 +572,7 @@ This generates a speaker-aware transcript by enabling diarization. With `--custo
 
 ```powershell
 # transcript mode, auto speaker count, local diarization models
-engine.exe audio `
+example-cli.exe audio `
   --audio-file ".\meeting.mp3" `
   --output-dir ".\outputs" `
   --mode transcript `
@@ -558,7 +589,7 @@ This example also runs a diarized transcript, but changes the ingress cadence fo
 
 ```powershell
 # transcript mode, lower-latency feed cadence
-engine.exe audio `
+example-cli.exe audio `
   --audio-file ".\meeting.mp3" `
   --output-dir ".\outputs" `
   --mode transcript `
@@ -574,7 +605,7 @@ If you prefer a JSON request payload, you can still pass the same advanced contr
 
 ```powershell
 # advanced audio knobs via body JSON
-engine.exe audio --body-json ".\audio_request.json"
+example-cli.exe audio --body-json ".\audio_request.json"
 ```
 
 ---
@@ -590,7 +621,7 @@ Fast digital PDF conversion:
 
 ```powershell
 # Fast digital PDF conversion
-engine.exe pdf extract --input ".\paper.pdf" --output ".\paper_fast.md" --overwrite
+example-cli.exe pdf extract --input ".\paper.pdf" --output ".\paper_fast.md" --overwrite
 ```
 
 VLM PDF conversion (PDF -> render -> VLM -> Markdown). Choose the option that matches how you ship the PDFium runtime library:
@@ -598,7 +629,7 @@ VLM PDF conversion (PDF -> render -> VLM -> Markdown). Choose the option that ma
 ```powershell
 # PDF VLM conversion
 # Option A: pass library path each call
-engine.exe pdfvlm `
+example-cli.exe pdfvlm `
   --pdf ".\paper.pdf" `
   --pdfium-lib ".\vendor\pdfium\pdfium.dll" `
   --model ".\models\vision.gguf" `
@@ -611,16 +642,16 @@ engine.exe pdfvlm `
   --main-gpu 0
 
 # Option B: bundled app - if PDFium is under vendor/pdfium next to engine(.exe), omit --pdfium-lib
-engine.exe pdfvlm --pdf ".\paper.pdf" --model ".\models\vision.gguf" --mmproj ".\models\mmproj.gguf" --out ".\paper_vlm.md"
+example-cli.exe pdfvlm --pdf ".\paper.pdf" --model ".\models\vision.gguf" --mmproj ".\models\mmproj.gguf" --out ".\paper_vlm.md"
 
 # Option C: set env var once (PDFIUM_DLL is still accepted for compatibility)
 $env:PDFIUM_LIB=".\vendor\pdfium\pdfium.dll"
-engine.exe pdfvlm --pdf ".\paper.pdf" --model ".\models\vision.gguf" --mmproj ".\models\mmproj.gguf" --out ".\paper_vlm.md"
+example-cli.exe pdfvlm --pdf ".\paper.pdf" --model ".\models\vision.gguf" --mmproj ".\models\mmproj.gguf" --out ".\paper_vlm.md"
 ```
 
 ```powershell
 # PDF VLM with reasoning disabled
-engine.exe pdfvlm `
+example-cli.exe pdfvlm `
   --pdf ".\paper.pdf" `
   --model ".\models\vision.gguf" `
   --mmproj ".\models\mmproj.gguf" `
@@ -631,7 +662,7 @@ engine.exe pdfvlm `
 
 ```powershell
 # PDF VLM with visible reasoning output
-engine.exe pdfvlm `
+example-cli.exe pdfvlm `
   --pdf ".\paper.pdf" `
   --model ".\models\vision.gguf" `
   --mmproj ".\models\mmproj.gguf" `
@@ -681,7 +712,7 @@ API-style batched request (single call, many input rows):
 ```powershell
 $payload = '{"input":["row 1 text","row 2 text","row 3 text","row 4 text"],"encoding_format":"float"}'
 
-engine.exe embed `
+example-cli.exe embed `
   --model ".\models\embedding.gguf" `
   --body-json $payload `
   --out ".\embed_response.json"
@@ -690,7 +721,7 @@ engine.exe embed `
 Markdown batching example (multiple embedding calls generated by CLI):
 
 ```powershell
-engine.exe embed `
+example-cli.exe embed `
   --model ".\models\embedding.gguf" `
   --markdown ".\corpus.md" `
   --batch-size 64 `
@@ -704,7 +735,7 @@ Minimal inline payload (no temp file):
 ```powershell
 $payload = '{"input":["row one text","row two text","row three text"],"encoding_format":"float"}'
 
-engine.exe embed `
+example-cli.exe embed `
   --model ".\models\embedding.gguf" `
   --body-json $payload
 ```
@@ -714,7 +745,7 @@ Save response to file:
 ```powershell
 $payload = '{"input":["row one text","row two text","row three text"],"encoding_format":"float"}'
 
-engine.exe embed `
+example-cli.exe embed `
   --model ".\models\embedding.gguf" `
   --body-json $payload `
   --out ".\embed_response.json"
@@ -730,7 +761,7 @@ File-based payload (if you prefer files):
 }
 '@ | Set-Content .\embed_request.json
 
-engine.exe embed `
+example-cli.exe embed `
   --model ".\models\embedding.gguf" `
   --body-json ".\embed_request.json" `
   --out ".\embed_response.json"
@@ -786,7 +817,7 @@ Minimal inline payload (no temp file):
 ```powershell
 $payload = '{"query":"table extraction quality","documents":["doc1","doc2","doc3"],"top_n":2}'
 
-engine.exe rerank `
+example-cli.exe rerank `
   --model ".\models\reranker.gguf" `
   --body-json $payload
 ```
@@ -796,7 +827,7 @@ Save response to file:
 ```powershell
 $payload = '{"query":"find adverse effects","documents":["row A text","row B text","row C text"],"top_n":3}'
 
-engine.exe rerank `
+example-cli.exe rerank `
   --model ".\models\reranker.gguf" `
   --body-json $payload `
   --out ".\rerank_response.json"
@@ -817,7 +848,7 @@ File-based payload (if you prefer files):
 }
 '@ | Set-Content .\rerank_request.json
 
-engine.exe rerank `
+example-cli.exe rerank `
   --model ".\models\reranker.gguf" `
   --body-json ".\rerank_request.json" `
   --out ".\rerank_response.json"
@@ -828,7 +859,7 @@ With multi-GPU split:
 ```powershell
 $payload = '{"query":"find adverse effects","documents":["row A text","row B text","row C text"],"top_n":3}'
 
-engine.exe rerank `
+example-cli.exe rerank `
   --model ".\models\reranker.gguf" `
   --body-json $payload `
   --devices 0,1 `
@@ -858,7 +889,7 @@ Openresearchtools-Engine is possible because of the open work done by these proj
 * `Docling`: practical references for VLM document-conversion behavior, including page rendering/scaling heuristics and Markdown-oriented extraction expectations for PDF-to-Markdown workflows.
 * `PDFium` and `pdfium-render`: PDF rasterization and page access primitives used for native page rendering/extraction in the PDF modules.
 * `FFmpeg` (LGPL shared builds): audio normalization and format conversion path used when input media needs conversion to inference-friendly audio format.
-* Rust ecosystem crates in `engine`, `pdf`, and `pdfvlm`: CLI plumbing, parsing, and runtime glue that make the native components usable as a cohesive application layer.
+* Rust ecosystem crates in `example-cli`, `pdf`, and `pdfvlm`: CLI plumbing, parsing, and runtime glue that make the native components usable as a cohesive application layer.
 
 For full notices, license types, and source provenance:
 

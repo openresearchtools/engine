@@ -18,8 +18,8 @@ use crate::llama_bridge_ffi::{
     llama_server_bridge_vlm_request, llama_server_bridge_vlm_result,
 };
 use image::imageops::FilterType;
-use image::ImageFormat;
 use image::GenericImageView;
+use image::ImageFormat;
 use pdfium_render::prelude::*;
 
 const DEFAULT_PROMPT: &str = "Convert this page to markdown. Do not miss any text and only output the bare markdown! Any graphs or figures found convert to markdown table. If figure is image without details, describe what you see in the image. For tables, pay attention to whitespace: some cells may be intentionally empty, so keep empty and filled cells in the correct columns. Ensure correct assignment of column headings and subheadings for tables.";
@@ -166,7 +166,8 @@ impl SharedBridge {
         let c_devices = devices.map(CString::new).transpose()?;
         let c_tensor_split = tensor_split.map(CString::new).transpose()?;
 
-        let mut params: llama_server_bridge_params = unsafe { llama_server_bridge_default_params() };
+        let mut params: llama_server_bridge_params =
+            unsafe { llama_server_bridge_default_params() };
         params.model_path = c_model.as_ptr();
         params.mmproj_path = c_mmproj.as_ptr();
         params.n_ctx = n_ctx_total as i32;
@@ -222,10 +223,7 @@ impl SharedBridge {
             .as_ref()
             .map(|value| CString::new(value.as_str()))
             .transpose()?;
-        let c_reasoning_format = reasoning
-            .effective_format()
-            .map(CString::new)
-            .transpose()?;
+        let c_reasoning_format = reasoning.effective_format().map(CString::new).transpose()?;
         let mut req: llama_server_bridge_vlm_request =
             unsafe { llama_server_bridge_default_vlm_request() };
         req.prompt = c_prompt.as_ptr();
@@ -277,7 +275,9 @@ impl SharedBridge {
             };
             Err::<VlmResponse, Box<dyn std::error::Error>>(message.into())
         } else if out.text.is_null() {
-            Err::<VlmResponse, Box<dyn std::error::Error>>("Bridge returned null output text".into())
+            Err::<VlmResponse, Box<dyn std::error::Error>>(
+                "Bridge returned null output text".into(),
+            )
         } else {
             Ok(VlmResponse {
                 markdown: sanitize_model_markdown(&c_ptr_to_string(out.text)),
@@ -846,14 +846,20 @@ fn parse_image_args(argv: &[String]) -> Result<ImageArgs, String> {
             }
             "-h" | "--help" => return Err(usage().to_string()),
             other => {
-                if let Some(value) = other.strip_prefix("gpu=").or_else(|| other.strip_prefix("--gpu=")) {
+                if let Some(value) = other
+                    .strip_prefix("gpu=")
+                    .or_else(|| other.strip_prefix("--gpu="))
+                {
                     gpu = Some(
                         value
                             .parse::<i32>()
                             .map_err(|_| format!("Invalid gpu= value: {value}"))?,
                     );
                 } else {
-                    return Err(format!("Unknown argument in --image mode: {other}\n\n{}", usage()));
+                    return Err(format!(
+                        "Unknown argument in --image mode: {other}\n\n{}",
+                        usage()
+                    ));
                 }
             }
         }
@@ -1275,7 +1281,10 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             }
             "-h" | "--help" => return Err(usage().to_string()),
             other => {
-                if let Some(value) = other.strip_prefix("gpu=").or_else(|| other.strip_prefix("--gpu=")) {
+                if let Some(value) = other
+                    .strip_prefix("gpu=")
+                    .or_else(|| other.strip_prefix("--gpu="))
+                {
                     gpu = Some(
                         value
                             .parse::<i32>()
@@ -1443,7 +1452,8 @@ fn render_pages_to_memory(args: &Args) -> Result<Vec<RenderedPage>, Box<dyn std:
         let render_config = PdfRenderConfig::new().set_fixed_size(temp_w, temp_h);
         let bitmap = page.render_with_config(&render_config)?;
         let temp_img = bitmap.as_image();
-        let final_img = temp_img.resize_exact(target_w as u32, target_h as u32, FilterType::CatmullRom);
+        let final_img =
+            temp_img.resize_exact(target_w as u32, target_h as u32, FilterType::CatmullRom);
 
         let mut cursor = Cursor::new(Vec::new());
         final_img.write_to(&mut cursor, ImageFormat::Png)?;
@@ -1575,9 +1585,7 @@ fn has_loop(text: &str) -> bool {
     detect_consecutive_line_loop(text, 6, 7) || detect_consecutive_word_span_loop(text, 6, 24, 7)
 }
 
-fn run_image_to_markdown_cli_from_args(
-    argv: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
+fn run_image_to_markdown_cli_from_args(argv: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let args =
         parse_image_args(argv).map_err(|msg| io::Error::new(io::ErrorKind::InvalidInput, msg))?;
 
@@ -1597,7 +1605,10 @@ fn run_image_to_markdown_cli_from_args(
     println!("starting conversion");
     println!("image: {}", args.image_path.display());
     println!("out_md: {}", args.output_md.display());
-    println!("render: scale={} oversample={}", args.scale, args.oversample);
+    println!(
+        "render: scale={} oversample={}",
+        args.scale, args.oversample
+    );
     println!(
         "inference: parallel=1 ctx={} batch={} n_predict={} retries={} threads={} threads_batch={} gpu={} devices={} n_gpu_layers={} main_gpu={} mmproj_use_gpu={} split_mode={} tensor_split={}",
         args.n_ctx_total,
@@ -1664,11 +1675,7 @@ fn run_image_to_markdown_cli_from_args(
                 if bad && attempts <= args.max_retries {
                     println!(
                         "image retry {}/{} (eos_reached={}, truncated={}, loop_detected={})",
-                        attempts,
-                        args.max_retries,
-                        r.eos_reached,
-                        r.truncated,
-                        loop_detected
+                        attempts, args.max_retries, r.eos_reached, r.truncated, loop_detected
                     );
                     continue;
                 }
@@ -1689,11 +1696,9 @@ fn run_image_to_markdown_cli_from_args(
                     );
                     continue;
                 }
-                return Err(format!(
-                    "inference failed after {} attempts: {}",
-                    attempts, err
-                )
-                .into());
+                return Err(
+                    format!("inference failed after {} attempts: {}", attempts, err).into(),
+                );
             }
         }
     };
@@ -1720,13 +1725,14 @@ fn run_image_to_markdown_cli_from_args(
     Ok(())
 }
 
-pub fn run_pdf_to_markdown_cli_from_args(argv: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_pdf_to_markdown_cli_from_args(
+    argv: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
     if has_flag(argv, "--image") {
         return run_image_to_markdown_cli_from_args(argv);
     }
 
-    let args =
-        parse_args(argv).map_err(|msg| io::Error::new(io::ErrorKind::InvalidInput, msg))?;
+    let args = parse_args(argv).map_err(|msg| io::Error::new(io::ErrorKind::InvalidInput, msg))?;
 
     if !args.model_path.exists() {
         return Err(format!("Model not found: {}", args.model_path.display()).into());
@@ -1744,7 +1750,10 @@ pub fn run_pdf_to_markdown_cli_from_args(argv: &[String]) -> Result<(), Box<dyn 
     println!("starting conversion");
     println!("pdf: {}", args.pdf_path.display());
     println!("out_md: {}", args.output_md.display());
-    println!("render: scale={} oversample={}", args.scale, args.oversample);
+    println!(
+        "render: scale={} oversample={}",
+        args.scale, args.oversample
+    );
     println!(
         "inference: parallel={} ctx={} batch={} n_predict={} retries={} threads={} threads_batch={} gpu={} devices={} n_gpu_layers={} main_gpu={} mmproj_use_gpu={} split_mode={} tensor_split={}",
         args.parallel,

@@ -156,7 +156,8 @@ struct voxtral_stream;
 voxtral_model * voxtral_model_load_from_file(
     const std::string    & path,
     voxtral_log_callback   logger = nullptr,
-    voxtral_gpu_backend    gpu = voxtral_gpu_backend::none);
+    voxtral_gpu_backend    gpu = voxtral_gpu_backend::none,
+    const std::string    & requested_backend_name = "");
 
 void voxtral_model_free(voxtral_model * model);
 

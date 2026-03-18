@@ -39,7 +39,7 @@ Not applicable for `pdf.dll`.
 
 ## Full supported arguments
 
-`pdf_run_from_argv` supports the same arguments as `engine pdf ...`.
+`pdf_run_from_argv` supports the same arguments as `example-cli pdf ...`.
 
 Global option:
 - `--pdfium-lib <path>`: PDFium library file or folder containing it.

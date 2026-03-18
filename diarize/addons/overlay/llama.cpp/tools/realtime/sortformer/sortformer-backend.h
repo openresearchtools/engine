@@ -42,6 +42,7 @@ private:
     const sortformer_model & model_ref() const;
     void process_ready_chunks(std::vector<event> & out_events);
     void append_chunk_predictions(uint64_t begin_frame, const sortformer_matrix_f32 & chunk_preds);
+    void emit_preview_spans(std::vector<event> & out_events);
     void emit_postprocessed_spans(std::vector<event> & out_events) const;
 
     std::shared_ptr<sortformer_loaded_model> loaded_model_;
@@ -52,6 +53,7 @@ private:
     sortformer_matrix_f32 all_chunk_preds_;
     bool capture_debug_ = false;
     std::vector<sortformer_backend_step_debug> debug_steps_;
+    std::vector<sortformer_speaker_span> last_preview_spans_;
 };
 
 } // namespace llama::realtime

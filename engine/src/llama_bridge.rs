@@ -27,6 +27,7 @@ pub struct llama_server_bridge_audio_session {
 pub struct llama_server_bridge_params {
     pub model_path: *const c_char,
     pub mmproj_path: *const c_char,
+    pub cluster_instance_name: *const c_char,
 
     pub n_ctx: i32,
     pub n_batch: i32,
@@ -45,6 +46,11 @@ pub struct llama_server_bridge_params {
     pub seed: i32,
     pub ctx_shift: i32,
     pub kv_unified: i32,
+    pub use_mmap: i32,
+    pub use_direct_io: i32,
+    pub use_mlock: i32,
+    pub no_host: i32,
+    pub no_extra_bufts: i32,
 
     pub devices: *const c_char,
     pub tensor_split: *const c_char,
@@ -240,6 +246,9 @@ pub const LLAMA_SERVER_BRIDGE_AUDIO_EVENT_ERROR: i32 = 13;
 
 pub const LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FINAL: u32 = 1u32 << 0;
 pub const LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FROM_BUFFER_REPLAY: u32 = 1u32 << 1;
+pub const LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_PREVIEW: u32 = 1u32 << 2;
+pub const LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_SNAPSHOT_START: u32 = 1u32 << 3;
+pub const LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_SNAPSHOT_END: u32 = 1u32 << 4;
 pub const LLAMA_SERVER_BRIDGE_AUDIO_TRANSCRIPTION_MODE_OFFLINE_ROUTE: i32 = 0;
 pub const LLAMA_SERVER_BRIDGE_AUDIO_TRANSCRIPTION_MODE_REALTIME_NATIVE: i32 = 1;
 
@@ -614,6 +623,7 @@ pub struct OwnedBridgeParams {
     raw: llama_server_bridge_params,
     model_path: Option<CString>,
     mmproj_path: Option<CString>,
+    cluster_instance_name: Option<CString>,
     devices: Option<CString>,
     tensor_split: Option<CString>,
 }
@@ -624,6 +634,7 @@ impl OwnedBridgeParams {
             raw: unsafe { llama_server_bridge_default_params() },
             model_path: None,
             mmproj_path: None,
+            cluster_instance_name: None,
             devices: None,
             tensor_split: None,
         }
@@ -644,6 +655,17 @@ impl OwnedBridgeParams {
             Some(v) => {
                 Some(CString::new(v).map_err(|_| "mmproj_path contains NUL byte".to_string())?)
             }
+            None => None,
+        };
+        Ok(self)
+    }
+
+    pub fn set_cluster_instance_name(&mut self, value: Option<&str>) -> Result<&mut Self, String> {
+        self.cluster_instance_name = match value {
+            Some(v) => Some(
+                CString::new(v)
+                    .map_err(|_| "cluster_instance_name contains NUL byte".to_string())?,
+            ),
             None => None,
         };
         Ok(self)
@@ -671,6 +693,10 @@ impl OwnedBridgeParams {
         self.raw.model_path = self.model_path.as_ref().map_or(ptr::null(), |v| v.as_ptr());
         self.raw.mmproj_path = self
             .mmproj_path
+            .as_ref()
+            .map_or(ptr::null(), |v| v.as_ptr());
+        self.raw.cluster_instance_name = self
+            .cluster_instance_name
             .as_ref()
             .map_or(ptr::null(), |v| v.as_ptr());
         self.raw.devices = self.devices.as_ref().map_or(ptr::null(), |v| v.as_ptr());
@@ -1608,8 +1634,12 @@ enum AudioSessionCliInput {
         audio_format: String,
         chunk_frames: usize,
     },
-    StdinPcmS16Le { chunk_frames: usize },
-    StdinPcmF32Le { chunk_frames: usize },
+    StdinPcmS16Le {
+        chunk_frames: usize,
+    },
+    StdinPcmF32Le {
+        chunk_frames: usize,
+    },
 }
 
 impl AudioSessionCliInput {
@@ -1637,7 +1667,11 @@ struct RollingAudioSessionReporter {
 }
 
 impl RollingAudioSessionReporter {
-    fn new(out_path: Option<String>, timeline_json_out: Option<String>, print_stdout: bool) -> Self {
+    fn new(
+        out_path: Option<String>,
+        timeline_json_out: Option<String>,
+        print_stdout: bool,
+    ) -> Self {
         Self {
             out_path,
             timeline_json_out,
@@ -1691,9 +1725,9 @@ impl RollingAudioSessionReporter {
                             .write_all(delta.as_bytes())
                             .map_err(|e| format!("failed to write rolling stdout update: {e}"))?;
                         if !delta.ends_with('\n') {
-                            stdout
-                                .write_all(b"\n")
-                                .map_err(|e| format!("failed to write rolling stdout newline: {e}"))?;
+                            stdout.write_all(b"\n").map_err(|e| {
+                                format!("failed to write rolling stdout newline: {e}")
+                            })?;
                         }
                     } else {
                         stdout
@@ -1701,9 +1735,9 @@ impl RollingAudioSessionReporter {
                             .and_then(|_| stdout.write_all(result.output_text.as_bytes()))
                             .map_err(|e| format!("failed to write rolling stdout snapshot: {e}"))?;
                         if !result.output_text.ends_with('\n') {
-                            stdout
-                                .write_all(b"\n")
-                                .map_err(|e| format!("failed to write rolling stdout newline: {e}"))?;
+                            stdout.write_all(b"\n").map_err(|e| {
+                                format!("failed to write rolling stdout newline: {e}")
+                            })?;
                         }
                     }
                 }
@@ -1803,7 +1837,10 @@ impl AudioSessionRunner {
         }
     }
 
-    fn start_transcription_if_needed_with_progress<F>(&mut self, on_update: &mut F) -> Result<(), String>
+    fn start_transcription_if_needed_with_progress<F>(
+        &mut self,
+        on_update: &mut F,
+    ) -> Result<(), String>
     where
         F: FnMut(&AudioSessionRunResult) -> Result<(), String>,
     {
@@ -1846,7 +1883,10 @@ impl AudioSessionRunner {
         }
         let orchestrator_changed = self.orchestrator.ingest_event(event);
         orchestrator_changed
-            || matches!(event.kind, LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_RESULT_JSON)
+            || matches!(
+                event.kind,
+                LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_RESULT_JSON
+            )
     }
 
     fn take_fatal_error(&self) -> Result<(), String> {
@@ -1891,11 +1931,7 @@ impl AudioSessionRunner {
         samples: &[i16],
         sample_rate_hz: u32,
     ) -> Result<(), String> {
-        self.push_audio_s16_with_sample_rate_and_progress(
-            samples,
-            sample_rate_hz,
-            &mut |_| Ok(()),
-        )
+        self.push_audio_s16_with_sample_rate_and_progress(samples, sample_rate_hz, &mut |_| Ok(()))
     }
 
     pub fn push_audio_s16_with_sample_rate_and_progress<F>(
@@ -1920,11 +1956,7 @@ impl AudioSessionRunner {
         samples: &[f32],
         sample_rate_hz: u32,
     ) -> Result<(), String> {
-        self.push_audio_f32_with_sample_rate_and_progress(
-            samples,
-            sample_rate_hz,
-            &mut |_| Ok(()),
-        )
+        self.push_audio_f32_with_sample_rate_and_progress(samples, sample_rate_hz, &mut |_| Ok(()))
     }
 
     pub fn push_audio_f32_with_sample_rate_and_progress<F>(
@@ -1976,7 +2008,10 @@ impl AudioSessionRunner {
         self.finish_with_progress(&mut |_| Ok(()))
     }
 
-    pub fn finish_with_progress<F>(mut self, on_update: &mut F) -> Result<AudioSessionRunResult, String>
+    pub fn finish_with_progress<F>(
+        mut self,
+        on_update: &mut F,
+    ) -> Result<AudioSessionRunResult, String>
     where
         F: FnMut(&AudioSessionRunResult) -> Result<(), String>,
     {
@@ -2031,16 +2066,23 @@ fn render_audio_session_output(
             .collect::<Vec<_>>()
             .join(" ")
     } else {
-        snapshot.latest_transcription_json.clone().unwrap_or_default()
+        snapshot
+            .latest_transcription_json
+            .clone()
+            .unwrap_or_default()
     }
 }
 
-fn infer_audio_session_input(args: &[String], session_sample_rate_hz: u32) -> Result<AudioSessionCliInput, String> {
+fn infer_audio_session_input(
+    args: &[String],
+    session_sample_rate_hz: u32,
+) -> Result<AudioSessionCliInput, String> {
     let audio_file = arg_value(args, "--audio-file");
     let stdin_pcm_s16le = has_arg(args, "--stdin-pcm-s16le");
     let stdin_pcm_f32le = has_arg(args, "--stdin-pcm-f32le");
-    let input_count =
-        usize::from(audio_file.is_some()) + usize::from(stdin_pcm_s16le) + usize::from(stdin_pcm_f32le);
+    let input_count = usize::from(audio_file.is_some())
+        + usize::from(stdin_pcm_s16le)
+        + usize::from(stdin_pcm_f32le);
     if input_count == 0 {
         return Err(
             "audio-session requires exactly one input source: --audio-file, --stdin-pcm-s16le, or --stdin-pcm-f32le"
@@ -2105,7 +2147,11 @@ fn ingest_audio_session_stdin_s16le(
         for chunk in carry[..aligned_len].chunks_exact(2) {
             samples.push(i16::from_le_bytes([chunk[0], chunk[1]]));
         }
-        runner.push_audio_s16_with_sample_rate_and_progress(&samples, runner.sample_rate_hz, on_update)?;
+        runner.push_audio_s16_with_sample_rate_and_progress(
+            &samples,
+            runner.sample_rate_hz,
+            on_update,
+        )?;
         carry.drain(..aligned_len);
     }
 
@@ -2147,7 +2193,11 @@ fn ingest_audio_session_stdin_f32le(
         for chunk in carry[..aligned_len].chunks_exact(4) {
             samples.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         }
-        runner.push_audio_f32_with_sample_rate_and_progress(&samples, runner.sample_rate_hz, on_update)?;
+        runner.push_audio_f32_with_sample_rate_and_progress(
+            &samples,
+            runner.sample_rate_hz,
+            on_update,
+        )?;
         carry.drain(..aligned_len);
     }
 
@@ -2909,8 +2959,11 @@ fn run_audio_session(args: &[String]) -> Result<(), String> {
     )?;
     let rolling_stdout =
         out_path.is_none() && !matches!(&input, AudioSessionCliInput::AudioFile { .. });
-    let mut reporter =
-        RollingAudioSessionReporter::new(out_path.clone(), timeline_json_out.clone(), rolling_stdout);
+    let mut reporter = RollingAudioSessionReporter::new(
+        out_path.clone(),
+        timeline_json_out.clone(),
+        rolling_stdout,
+    );
 
     let audio_format_summary = input.summary_audio_format().to_string();
     let ingest_mode = match &input {
@@ -2919,23 +2972,21 @@ fn run_audio_session(args: &[String]) -> Result<(), String> {
             audio_format,
             chunk_frames,
         } => {
-            let audio_bytes = fs::read(&path)
-                .map_err(|e| format!("failed to read audio file '{path}': {e}"))?;
+            let audio_bytes =
+                fs::read(&path).map_err(|e| format!("failed to read audio file '{path}': {e}"))?;
             if audio_bytes.is_empty() {
                 return Err("audio file is empty".to_string());
             }
             if audio_format == "wav" {
                 match try_parse_wav_mono_s16le(&audio_bytes)? {
-                    Some((samples, sample_rate_hz)) => {
-                        ingest_audio_session_s16_chunks(
-                            &mut runner,
-                            &samples,
-                            sample_rate_hz,
-                            *chunk_frames,
-                            &mut |result| reporter.emit(result),
-                        )?
-                        .to_string()
-                    }
+                    Some((samples, sample_rate_hz)) => ingest_audio_session_s16_chunks(
+                        &mut runner,
+                        &samples,
+                        sample_rate_hz,
+                        *chunk_frames,
+                        &mut |result| reporter.emit(result),
+                    )?
+                    .to_string(),
                     None => {
                         runner.push_encoded_with_progress(
                             &audio_bytes,
@@ -2946,28 +2997,22 @@ fn run_audio_session(args: &[String]) -> Result<(), String> {
                     }
                 }
             } else {
-                runner.push_encoded_with_progress(
-                    &audio_bytes,
-                    &audio_format,
-                    &mut |result| reporter.emit(result),
-                )?;
+                runner.push_encoded_with_progress(&audio_bytes, &audio_format, &mut |result| {
+                    reporter.emit(result)
+                })?;
                 "encoded".to_string()
             }
         }
         AudioSessionCliInput::StdinPcmS16Le { chunk_frames } => {
-            ingest_audio_session_stdin_s16le(
-                &mut runner,
-                *chunk_frames,
-                &mut |result| reporter.emit(result),
-            )?
+            ingest_audio_session_stdin_s16le(&mut runner, *chunk_frames, &mut |result| {
+                reporter.emit(result)
+            })?
             .to_string()
         }
         AudioSessionCliInput::StdinPcmF32Le { chunk_frames } => {
-            ingest_audio_session_stdin_f32le(
-                &mut runner,
-                *chunk_frames,
-                &mut |result| reporter.emit(result),
-            )?
+            ingest_audio_session_stdin_f32le(&mut runner, *chunk_frames, &mut |result| {
+                reporter.emit(result)
+            })?
             .to_string()
         }
     };

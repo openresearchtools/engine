@@ -95,8 +95,9 @@ std::shared_ptr<voxtral_loaded_model> voxtral_loaded_model::load_from_gguf(
     const auto gpu_backend = parse_voxtral_gpu_backend_name(backend_name);
     voxtral_model * model = voxtral_model_load_from_file(
         gguf_path,
-        nullptr,
-        gpu_backend);
+        emit_voxtral_backend_log,
+        gpu_backend,
+        backend_name);
     if (model == nullptr) {
         throw std::runtime_error("failed to load Voxtral GGUF model");
     }

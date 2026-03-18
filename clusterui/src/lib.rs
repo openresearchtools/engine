@@ -1,0 +1,12 @@
+pub mod app_icon;
+pub mod agent;
+pub mod catalog;
+pub mod cluster_api;
+pub mod instance_presets;
+pub mod model_metadata;
+pub mod model_store;
+pub mod node_host;
+pub mod protocol;
+pub mod public_server;
+pub mod settings;
+pub mod tray;

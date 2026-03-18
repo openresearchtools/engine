@@ -127,6 +127,7 @@ def main() -> None:
     llama_repo = repo_root / "third_party" / "llama.cpp"
     whisper_repo = repo_root / "third_party" / "whisper.cpp"
     bridge_src = repo_root / "bridge"
+    multi_node_server_src = repo_root / "multi_node_server"
     overlay_root = repo_root / "diarize" / "addons" / "overlay" / "llama.cpp" / "tools"
     patch_dir = repo_root / "diarize" / "addons" / "patches"
     patch_files = sorted(patch_dir.glob("*.patch"))
@@ -141,6 +142,8 @@ def main() -> None:
             fail(f"Required repo source not found: {whisper_repo}")
     if not bridge_src.is_dir():
         fail(f"Bridge source dir not found: {bridge_src}")
+    if not multi_node_server_src.is_dir():
+        fail(f"Multi-node server source dir not found: {multi_node_server_src}")
     if not patch_dir.is_dir():
         fail(f"Required patch directory not found: {patch_dir}")
     if not patch_files:
@@ -181,6 +184,9 @@ def main() -> None:
 
     bridge_dst = out_dir / "MARKDOWN" / "bridge"
     copy_tree_replace(bridge_src, bridge_dst)
+
+    multi_node_server_dst = out_dir / "MARKDOWN" / "multi_node_server"
+    copy_tree_replace(multi_node_server_src, multi_node_server_dst)
 
     ensure_bridge_hooks(out_dir / "CMakeLists.txt")
 
@@ -228,6 +234,7 @@ def main() -> None:
     print(f"  OutDir: {out_dir}")
     print(f"  Whisper sibling: {whisper_sibling}")
     print(f"  Bridge source staged at: {bridge_dst}")
+    print(f"  Multi-node server source staged at: {multi_node_server_dst}")
     if args.skip_patch:
         print("  Patches: <skipped>")
     else:

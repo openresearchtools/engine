@@ -1,4 +1,5 @@
 #include "llama_server_bridge.h"
+#include "llama_server_cluster.h"
 
 #include "common.h"
 #include "server-common.h"
@@ -18,10 +19,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <iomanip>
 #include <memory>
 #include <mutex>
+#include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -35,7 +39,15 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
+#else
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <dlfcn.h>
 #endif
 
 #ifdef LLAMA_SERVER_BRIDGE_USE_FFMPEG
@@ -62,6 +74,12 @@ struct llama_server_bridge {
     std::string last_error;
 
     std::string model_name;
+    std::string cluster_instance_name;
+    llama_server_cluster * shared_cluster = nullptr;
+    bool cluster_via_agent = false;
+    std::string cluster_agent_control_addr;
+    std::string cluster_owner_control_addr;
+    int64_t cluster_owner_instance_id = 0;
     int32_t primary_device_index = -1;
     std::string primary_device_name;
     bool primary_device_is_gpu = false;
@@ -107,6 +125,7 @@ struct owned_bridge_params {
     llama_server_bridge_params raw = {};
     std::string model_path;
     std::string mmproj_path;
+    std::string cluster_instance_name;
     std::string devices;
     std::string tensor_split;
 
@@ -122,6 +141,7 @@ struct owned_bridge_params {
         raw = *params;
         model_path = params->model_path != nullptr ? params->model_path : "";
         mmproj_path = params->mmproj_path != nullptr ? params->mmproj_path : "";
+        cluster_instance_name = params->cluster_instance_name != nullptr ? params->cluster_instance_name : "";
         devices = params->devices != nullptr ? params->devices : "";
         tensor_split = params->tensor_split != nullptr ? params->tensor_split : "";
     }
@@ -130,6 +150,7 @@ struct owned_bridge_params {
         auto out = raw;
         out.model_path = model_path.empty() ? nullptr : model_path.c_str();
         out.mmproj_path = mmproj_path.empty() ? nullptr : mmproj_path.c_str();
+        out.cluster_instance_name = cluster_instance_name.empty() ? nullptr : cluster_instance_name.c_str();
         out.devices = devices.empty() ? nullptr : devices.c_str();
         out.tensor_split = tensor_split.empty() ? nullptr : tensor_split.c_str();
         return out;
@@ -208,7 +229,737 @@ struct llama_server_bridge_audio_session {
     bool transcription_stop_requested = false;
     bool transcription_native_realtime = false;
     std::thread transcription_thread;
+
+    struct speaker_span {
+        std::string speaker;
+        uint64_t start_sample = 0;
+        uint64_t end_sample = 0;
+
+        bool operator==(const speaker_span & other) const {
+            return speaker == other.speaker
+                && start_sample == other.start_sample
+                && end_sample == other.end_sample;
+        }
+    };
+
+    struct transcript_piece {
+        uint64_t start_sample = 0;
+        uint64_t end_sample = 0;
+        std::string text;
+
+        bool operator==(const transcript_piece & other) const {
+            return start_sample == other.start_sample
+                && end_sample == other.end_sample
+                && text == other.text;
+        }
+    };
+
+    struct assigned_piece {
+        std::optional<std::string> speaker;
+        uint64_t start_sample = 0;
+        uint64_t end_sample = 0;
+        std::string text;
+    };
+
+    struct speaker_turn {
+        std::string speaker;
+        uint64_t start_sample = 0;
+        uint64_t end_sample = 0;
+        std::string text;
+    };
+
+    struct assemble_options {
+        uint64_t nearest_tolerance_samples = 1600;
+        int64_t alignment_offset_samples = 0;
+    };
+
+    struct transcript_state {
+        assemble_options options = {};
+        std::vector<speaker_span> final_spans;
+        std::vector<speaker_span> preview_spans;
+        std::vector<speaker_span> pending_preview_spans;
+        std::vector<transcript_piece> pieces;
+        std::vector<transcript_piece> words;
+        std::string markdown;
+        std::string last_emitted_markdown;
+    } diarized_transcript_state;
 };
+
+static uint32_t next_audio_session_item_id_locked(llama_server_bridge_audio_session * session);
+static std::string audio_session_speaker_label(int32_t speaker_id);
+static void push_audio_session_event_locked(
+    llama_server_bridge_audio_session * session,
+    audio_session_event_record event);
+
+static const std::vector<llama_server_bridge_audio_session::speaker_span> &
+audio_session_active_spans(const llama_server_bridge_audio_session::transcript_state & state) {
+    return state.final_spans.empty() ? state.preview_spans : state.final_spans;
+}
+
+static uint64_t audio_session_overlap_len(
+    uint64_t a_start,
+    uint64_t a_end,
+    uint64_t b_start,
+    uint64_t b_end) {
+    const uint64_t start = std::max(a_start, b_start);
+    const uint64_t end = std::min(a_end, b_end);
+    return end > start ? end - start : 0;
+}
+
+static uint64_t audio_session_distance_to_span(
+    const llama_server_bridge_audio_session::transcript_piece & piece,
+    const llama_server_bridge_audio_session::speaker_span & span) {
+    if (piece.end_sample <= span.start_sample) {
+        return span.start_sample - piece.end_sample;
+    }
+    if (span.end_sample <= piece.start_sample) {
+        return piece.start_sample - span.end_sample;
+    }
+    return 0;
+}
+
+static uint64_t audio_session_shift_sample(uint64_t sample, int64_t offset_samples) {
+    if (offset_samples >= 0) {
+        const uint64_t delta = static_cast<uint64_t>(offset_samples);
+        const uint64_t max = std::numeric_limits<uint64_t>::max();
+        return sample > max - delta ? max : sample + delta;
+    }
+    const uint64_t abs_offset = static_cast<uint64_t>(-offset_samples);
+    return sample > abs_offset ? sample - abs_offset : 0;
+}
+
+static llama_server_bridge_audio_session::transcript_piece audio_session_shift_piece(
+    const llama_server_bridge_audio_session::transcript_piece & piece,
+    int64_t offset_samples) {
+    return {
+        audio_session_shift_sample(piece.start_sample, offset_samples),
+        audio_session_shift_sample(piece.end_sample, offset_samples),
+        piece.text,
+    };
+}
+
+static std::string audio_session_trim_copy(const std::string & text) {
+    size_t start = 0;
+    while (start < text.size() && std::isspace(static_cast<unsigned char>(text[start])) != 0) {
+        ++start;
+    }
+    size_t end = text.size();
+    while (end > start && std::isspace(static_cast<unsigned char>(text[end - 1])) != 0) {
+        --end;
+    }
+    return text.substr(start, end - start);
+}
+
+static std::string_view audio_session_trim_leading_view(std::string_view text) {
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front())) != 0) {
+        text.remove_prefix(1);
+    }
+    return text;
+}
+
+static std::string audio_session_first_token(const std::string & text) {
+    std::string_view trimmed = audio_session_trim_leading_view(text);
+    size_t end = 0;
+    while (end < trimmed.size() && std::isspace(static_cast<unsigned char>(trimmed[end])) == 0) {
+        ++end;
+    }
+    return std::string(trimmed.substr(0, end));
+}
+
+static bool audio_session_starts_with_continuation(const std::string & text) {
+    const std::string_view trimmed = audio_session_trim_leading_view(text);
+    if (trimmed.empty()) {
+        return false;
+    }
+    const unsigned char first = static_cast<unsigned char>(trimmed.front());
+    if (std::islower(first) != 0) {
+        return true;
+    }
+    return trimmed.front() == ','
+        || trimmed.front() == '\''
+        || trimmed.front() == '"'
+        || trimmed.front() == '-'
+        || trimmed.front() == ')'
+        || trimmed.front() == ']'
+        || trimmed.front() == ':';
+}
+
+static bool audio_session_starts_with_sentence_start(const std::string & text) {
+    const std::string_view trimmed = audio_session_trim_leading_view(text);
+    return !trimmed.empty() && std::isupper(static_cast<unsigned char>(trimmed.front())) != 0;
+}
+
+static bool audio_session_ends_sentence(const std::string & text) {
+    std::string_view trimmed = text;
+    while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.back())) != 0) {
+        trimmed.remove_suffix(1);
+    }
+    if (trimmed.empty()) {
+        return false;
+    }
+    const char last = trimmed.back();
+    return last == '.' || last == ';' || last == '?' || last == '!';
+}
+
+static bool audio_session_word_ends_sentence(const std::string & text) {
+    return audio_session_ends_sentence(text);
+}
+
+static bool audio_session_next_piece_looks_like_continuation(const std::string & next_text) {
+    return audio_session_starts_with_continuation(next_text)
+        || audio_session_first_token(next_text) == "I";
+}
+
+static std::optional<size_t> audio_session_first_sentence_boundary(const std::string & text) {
+    const std::string trimmed = audio_session_trim_copy(text);
+    if (trimmed.empty()) {
+        return std::nullopt;
+    }
+    const size_t offset = text.find(trimmed);
+    if (offset == std::string::npos) {
+        return std::nullopt;
+    }
+    for (size_t idx = 0; idx < trimmed.size(); ++idx) {
+        const char ch = trimmed[idx];
+        if (ch != '.' && ch != ';' && ch != '?' && ch != '!') {
+            continue;
+        }
+        const size_t split = offset + idx + 1;
+        if (!audio_session_trim_copy(text.substr(split)).empty()) {
+            return split;
+        }
+    }
+    return std::nullopt;
+}
+
+static std::optional<std::pair<
+    llama_server_bridge_audio_session::assigned_piece,
+    llama_server_bridge_audio_session::assigned_piece>>
+audio_session_split_piece_at(
+    const llama_server_bridge_audio_session::assigned_piece & piece,
+    size_t split_index) {
+    if (split_index == 0 || split_index >= piece.text.size()) {
+        return std::nullopt;
+    }
+
+    const std::string left_text = audio_session_trim_copy(piece.text.substr(0, split_index));
+    const std::string right_text = audio_session_trim_copy(piece.text.substr(split_index));
+    if (left_text.empty() || right_text.empty()) {
+        return std::nullopt;
+    }
+
+    const size_t total_len = left_text.size() + right_text.size();
+    if (total_len == 0) {
+        return std::nullopt;
+    }
+
+    const uint64_t duration = piece.end_sample > piece.start_sample
+        ? piece.end_sample - piece.start_sample
+        : 0;
+    const uint64_t left_duration = duration * static_cast<uint64_t>(left_text.size())
+        / static_cast<uint64_t>(total_len);
+    const uint64_t mid = piece.start_sample + left_duration;
+
+    return std::make_pair(
+        llama_server_bridge_audio_session::assigned_piece{
+            piece.speaker,
+            piece.start_sample,
+            std::max(mid, piece.start_sample),
+            left_text,
+        },
+        llama_server_bridge_audio_session::assigned_piece{
+            piece.speaker,
+            std::max(mid, piece.start_sample),
+            std::max(piece.end_sample, mid),
+            right_text,
+        });
+}
+
+static std::optional<std::pair<
+    llama_server_bridge_audio_session::assigned_piece,
+    llama_server_bridge_audio_session::assigned_piece>>
+audio_session_split_piece_at_sentence_boundary_with_words(
+    const llama_server_bridge_audio_session::assigned_piece & piece,
+    const std::vector<llama_server_bridge_audio_session::transcript_piece> & words) {
+    std::vector<const llama_server_bridge_audio_session::transcript_piece *> overlapping;
+    for (const auto & word : words) {
+        if (audio_session_overlap_len(
+                piece.start_sample,
+                piece.end_sample,
+                word.start_sample,
+                word.end_sample) > 0) {
+            overlapping.push_back(&word);
+        }
+    }
+    if (overlapping.size() < 2) {
+        return std::nullopt;
+    }
+
+    std::optional<size_t> boundary_index;
+    for (size_t idx = 0; idx + 1 < overlapping.size(); ++idx) {
+        if (audio_session_word_ends_sentence(overlapping[idx]->text)) {
+            boundary_index = idx;
+            break;
+        }
+    }
+    if (!boundary_index.has_value()) {
+        return std::nullopt;
+    }
+
+    std::string left_text;
+    for (size_t idx = 0; idx <= *boundary_index; ++idx) {
+        const std::string trimmed = audio_session_trim_copy(overlapping[idx]->text);
+        if (trimmed.empty()) {
+            continue;
+        }
+        if (!left_text.empty()) {
+            left_text.push_back(' ');
+        }
+        left_text.append(trimmed);
+    }
+
+    std::string right_text;
+    for (size_t idx = *boundary_index + 1; idx < overlapping.size(); ++idx) {
+        const std::string trimmed = audio_session_trim_copy(overlapping[idx]->text);
+        if (trimmed.empty()) {
+            continue;
+        }
+        if (!right_text.empty()) {
+            right_text.push_back(' ');
+        }
+        right_text.append(trimmed);
+    }
+    if (left_text.empty() || right_text.empty()) {
+        return std::nullopt;
+    }
+
+    const uint64_t split_sample = overlapping[*boundary_index]->end_sample;
+    return std::make_pair(
+        llama_server_bridge_audio_session::assigned_piece{
+            piece.speaker,
+            piece.start_sample,
+            std::max(split_sample, piece.start_sample),
+            left_text,
+        },
+        llama_server_bridge_audio_session::assigned_piece{
+            piece.speaker,
+            std::max(split_sample, piece.start_sample),
+            std::max(piece.end_sample, split_sample),
+            right_text,
+        });
+}
+
+static std::optional<std::string> audio_session_previous_confirmed_speaker(
+    const std::vector<llama_server_bridge_audio_session::assigned_piece> & pieces) {
+    for (auto it = pieces.rbegin(); it != pieces.rend(); ++it) {
+        if (it->speaker.has_value()) {
+            return it->speaker;
+        }
+    }
+    return std::nullopt;
+}
+
+static const llama_server_bridge_audio_session::assigned_piece * audio_session_previous_confirmed_piece(
+    const std::vector<llama_server_bridge_audio_session::assigned_piece> & pieces) {
+    for (auto it = pieces.rbegin(); it != pieces.rend(); ++it) {
+        if (it->speaker.has_value()) {
+            return &*it;
+        }
+    }
+    return nullptr;
+}
+
+static const llama_server_bridge_audio_session::assigned_piece * audio_session_next_confirmed_piece(
+    const std::vector<llama_server_bridge_audio_session::assigned_piece> & pieces,
+    size_t start_index) {
+    for (size_t idx = start_index + 1; idx < pieces.size(); ++idx) {
+        if (pieces[idx].speaker.has_value()) {
+            return &pieces[idx];
+        }
+    }
+    return nullptr;
+}
+
+static std::optional<std::string> audio_session_dominant_speaker_for_piece(
+    const llama_server_bridge_audio_session::transcript_piece & piece,
+    const std::vector<llama_server_bridge_audio_session::speaker_span> & spans,
+    const llama_server_bridge_audio_session::assemble_options & options) {
+    const auto shifted_piece = audio_session_shift_piece(piece, options.alignment_offset_samples);
+    uint64_t best_overlap = 0;
+    const char * best_speaker = nullptr;
+    for (const auto & span : spans) {
+        const uint64_t overlap = audio_session_overlap_len(
+            shifted_piece.start_sample,
+            shifted_piece.end_sample,
+            span.start_sample,
+            span.end_sample);
+        if (overlap > best_overlap) {
+            best_overlap = overlap;
+            best_speaker = span.speaker.c_str();
+        }
+    }
+    if (best_overlap > 0 && best_speaker != nullptr) {
+        return std::string(best_speaker);
+    }
+
+    const llama_server_bridge_audio_session::speaker_span * nearest = nullptr;
+    uint64_t nearest_gap = 0;
+    for (const auto & span : spans) {
+        const uint64_t gap = audio_session_distance_to_span(shifted_piece, span);
+        if (gap > options.nearest_tolerance_samples) {
+            continue;
+        }
+        if (nearest == nullptr || gap < nearest_gap) {
+            nearest = &span;
+            nearest_gap = gap;
+        }
+    }
+    if (nearest != nullptr) {
+        return nearest->speaker;
+    }
+    return std::nullopt;
+}
+
+static std::vector<llama_server_bridge_audio_session::assigned_piece> audio_session_assign_pieces(
+    const std::vector<llama_server_bridge_audio_session::speaker_span> & spans,
+    const std::vector<llama_server_bridge_audio_session::transcript_piece> & pieces,
+    const llama_server_bridge_audio_session::assemble_options & options) {
+    std::vector<llama_server_bridge_audio_session::assigned_piece> out;
+    out.reserve(pieces.size());
+    for (const auto & piece : pieces) {
+        out.push_back({
+            audio_session_dominant_speaker_for_piece(piece, spans, options),
+            piece.start_sample,
+            piece.end_sample,
+            piece.text,
+        });
+    }
+    return out;
+}
+
+static void audio_session_repair_unassigned_boundaries_with_words(
+    std::vector<llama_server_bridge_audio_session::assigned_piece> & pieces,
+    const std::vector<llama_server_bridge_audio_session::transcript_piece> & words) {
+    const auto source = pieces;
+    std::vector<llama_server_bridge_audio_session::assigned_piece> repaired;
+    repaired.reserve(source.size() + 2);
+
+    for (size_t index = 0; index < source.size(); ++index) {
+        const auto & piece = source[index];
+        if (piece.speaker.has_value()) {
+            repaired.push_back(piece);
+            continue;
+        }
+
+        const auto prev_speaker = audio_session_previous_confirmed_speaker(repaired);
+        const auto * prev_piece = audio_session_previous_confirmed_piece(repaired);
+        const auto * next_piece = audio_session_next_confirmed_piece(source, index);
+        const auto next_speaker = next_piece != nullptr ? next_piece->speaker : std::nullopt;
+
+        if (prev_speaker.has_value() && next_speaker.has_value() && prev_speaker == next_speaker) {
+            auto reassigned = piece;
+            reassigned.speaker = prev_speaker;
+            repaired.push_back(std::move(reassigned));
+            continue;
+        }
+
+        if (prev_speaker.has_value() && audio_session_starts_with_continuation(piece.text)) {
+            if (const auto split_index = audio_session_first_sentence_boundary(piece.text);
+                split_index.has_value()) {
+                auto split = audio_session_split_piece_at_sentence_boundary_with_words(piece, words);
+                if (!split.has_value()) {
+                    split = audio_session_split_piece_at(piece, *split_index);
+                }
+                if (split.has_value()) {
+                    auto [left, right] = *split;
+                    left.speaker = prev_speaker;
+                    if (next_speaker.has_value()) {
+                        right.speaker = audio_session_starts_with_sentence_start(right.text)
+                            ? next_speaker
+                            : prev_speaker;
+                    } else {
+                        right.speaker = prev_speaker;
+                    }
+                    repaired.push_back(std::move(left));
+                    repaired.push_back(std::move(right));
+                    continue;
+                }
+            }
+
+            auto reassigned = piece;
+            reassigned.speaker = prev_speaker;
+            repaired.push_back(std::move(reassigned));
+            continue;
+        }
+
+        if (next_speaker.has_value()) {
+            const bool prev_ended_sentence = prev_piece == nullptr
+                ? true
+                : audio_session_ends_sentence(prev_piece->text);
+            if (prev_ended_sentence
+                && audio_session_starts_with_sentence_start(piece.text)
+                && audio_session_first_token(piece.text) != "I") {
+                auto reassigned = piece;
+                reassigned.speaker = next_speaker;
+                repaired.push_back(std::move(reassigned));
+                continue;
+            }
+        }
+
+        if (next_speaker.has_value()) {
+            const std::string next_text = next_piece != nullptr ? next_piece->text : std::string();
+            if (!audio_session_ends_sentence(piece.text)
+                && audio_session_next_piece_looks_like_continuation(next_text)) {
+                auto reassigned = piece;
+                reassigned.speaker = next_speaker;
+                repaired.push_back(std::move(reassigned));
+                continue;
+            }
+        }
+
+        repaired.push_back(piece);
+    }
+
+    pieces = std::move(repaired);
+}
+
+static bool audio_session_should_insert_space_between(
+    const std::string & left,
+    const std::string & right) {
+    if (left.empty() || right.empty()) {
+        return false;
+    }
+    const std::string_view trimmed = audio_session_trim_leading_view(right);
+    if (trimmed.empty()) {
+        return false;
+    }
+    const char first = trimmed.front();
+    return first != '.'
+        && first != ','
+        && first != ';'
+        && first != '?'
+        && first != '!'
+        && first != '\''
+        && first != '"'
+        && first != ':'
+        && first != ')'
+        && first != ']'
+        && first != '}';
+}
+
+static std::vector<llama_server_bridge_audio_session::speaker_turn> audio_session_merge_turns(
+    const std::vector<llama_server_bridge_audio_session::assigned_piece> & pieces) {
+    std::vector<llama_server_bridge_audio_session::speaker_turn> turns;
+    for (const auto & piece : pieces) {
+        const std::string speaker = piece.speaker.value_or("UNASSIGNED");
+        const std::string text = audio_session_trim_copy(piece.text);
+        if (text.empty()) {
+            continue;
+        }
+
+        if (!turns.empty() && turns.back().speaker == speaker) {
+            auto & last = turns.back();
+            if (!last.text.empty()
+                && !std::isspace(static_cast<unsigned char>(last.text.back()))
+                && audio_session_should_insert_space_between(last.text, text)) {
+                last.text.push_back(' ');
+            }
+            last.text.append(text);
+            last.end_sample = std::max(last.end_sample, piece.end_sample);
+            continue;
+        }
+
+        turns.push_back({speaker, piece.start_sample, piece.end_sample, text});
+    }
+    return turns;
+}
+
+static std::string audio_session_turns_to_markdown(
+    const std::vector<llama_server_bridge_audio_session::speaker_turn> & turns,
+    uint32_t sample_rate_hz) {
+    auto fmt_time = [sample_rate_hz](uint64_t sample) -> std::string {
+        if (sample_rate_hz == 0) {
+            return "00:00.000";
+        }
+        const uint64_t total_ms = sample * 1000 / static_cast<uint64_t>(sample_rate_hz);
+        const uint64_t minutes = total_ms / 60000;
+        const uint64_t seconds = (total_ms % 60000) / 1000;
+        const uint64_t millis = total_ms % 1000;
+        std::ostringstream out;
+        out << std::setw(2) << std::setfill('0') << minutes
+            << ':'
+            << std::setw(2) << std::setfill('0') << seconds
+            << '.'
+            << std::setw(3) << std::setfill('0') << millis;
+        return out.str();
+    };
+
+    std::string out;
+    for (const auto & turn : turns) {
+        if (!out.empty()) {
+            out.append("\n\n");
+        }
+        out.append("### ");
+        out.append(turn.speaker);
+        out.append(" [");
+        out.append(fmt_time(turn.start_sample));
+        out.append(" - ");
+        out.append(fmt_time(turn.end_sample));
+        out.append("]\n");
+        out.append(audio_session_trim_copy(turn.text));
+    }
+    return out;
+}
+
+static bool audio_session_insert_unique_span(
+    std::vector<llama_server_bridge_audio_session::speaker_span> & spans,
+    const llama_server_bridge_audio_session::speaker_span & span) {
+    if (std::find(spans.begin(), spans.end(), span) != spans.end()) {
+        return false;
+    }
+    spans.push_back(span);
+    std::sort(spans.begin(), spans.end(), [](const auto & lhs, const auto & rhs) {
+        if (lhs.start_sample != rhs.start_sample) {
+            return lhs.start_sample < rhs.start_sample;
+        }
+        if (lhs.end_sample != rhs.end_sample) {
+            return lhs.end_sample < rhs.end_sample;
+        }
+        return lhs.speaker < rhs.speaker;
+    });
+    return true;
+}
+
+static bool audio_session_insert_unique_piece(
+    std::vector<llama_server_bridge_audio_session::transcript_piece> & pieces,
+    const llama_server_bridge_audio_session::transcript_piece & piece) {
+    if (std::find(pieces.begin(), pieces.end(), piece) != pieces.end()) {
+        return false;
+    }
+    pieces.push_back(piece);
+    std::sort(pieces.begin(), pieces.end(), [](const auto & lhs, const auto & rhs) {
+        if (lhs.start_sample != rhs.start_sample) {
+            return lhs.start_sample < rhs.start_sample;
+        }
+        if (lhs.end_sample != rhs.end_sample) {
+            return lhs.end_sample < rhs.end_sample;
+        }
+        return lhs.text < rhs.text;
+    });
+    return true;
+}
+
+static bool audio_session_recompute_transcript_markdown_locked(
+    llama_server_bridge_audio_session * session) {
+    if (session == nullptr) {
+        return false;
+    }
+    auto & state = session->diarized_transcript_state;
+    if (state.pieces.empty()) {
+        if (state.markdown.empty()) {
+            return false;
+        }
+        state.markdown.clear();
+        return true;
+    }
+
+    auto assigned = audio_session_assign_pieces(
+        audio_session_active_spans(state),
+        state.pieces,
+        state.options);
+    audio_session_repair_unassigned_boundaries_with_words(assigned, state.words);
+    const auto turns = audio_session_merge_turns(assigned);
+    const std::string markdown =
+        audio_session_turns_to_markdown(turns, session->params.expected_input_sample_rate_hz);
+    if (markdown == state.markdown) {
+        return false;
+    }
+    state.markdown = markdown;
+    return true;
+}
+
+static bool audio_session_ingest_transcript_event_locked(
+    llama_server_bridge_audio_session * session,
+    const audio_session_event_record & event) {
+    if (session == nullptr) {
+        return false;
+    }
+
+    auto & state = session->diarized_transcript_state;
+    bool changed = false;
+    switch (event.kind) {
+        case LLAMA_SERVER_BRIDGE_AUDIO_EVENT_DIARIZATION_SPAN_COMMIT: {
+            const std::string speaker = !audio_session_trim_copy(event.text).empty()
+                ? audio_session_trim_copy(event.text)
+                : (event.speaker_id >= 0
+                    ? audio_session_speaker_label(event.speaker_id)
+                    : std::string("UNASSIGNED"));
+            const llama_server_bridge_audio_session::speaker_span span{
+                speaker,
+                event.start_sample,
+                event.end_sample,
+            };
+            if ((event.flags & LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_PREVIEW) != 0u) {
+                if ((event.flags & LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_SNAPSHOT_START) != 0u) {
+                    state.pending_preview_spans.clear();
+                }
+                audio_session_insert_unique_span(state.pending_preview_spans, span);
+                if ((event.flags & LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_SNAPSHOT_END) != 0u
+                    && state.preview_spans != state.pending_preview_spans) {
+                    state.preview_spans = state.pending_preview_spans;
+                    changed = state.final_spans.empty();
+                }
+            } else {
+                changed = audio_session_insert_unique_span(state.final_spans, span) || changed;
+            }
+            break;
+        }
+        case LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT:
+            changed = audio_session_insert_unique_piece(
+                state.pieces,
+                {event.start_sample, event.end_sample, event.text}) || changed;
+            break;
+        case LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_WORD_COMMIT:
+            changed = audio_session_insert_unique_piece(
+                state.words,
+                {event.start_sample, event.end_sample, event.text}) || changed;
+            break;
+        default:
+            break;
+    }
+
+    return changed ? audio_session_recompute_transcript_markdown_locked(session) : false;
+}
+
+static void audio_session_maybe_emit_transcript_commit_locked(
+    llama_server_bridge_audio_session * session,
+    uint32_t base_flags) {
+    if (session == nullptr || !session->diarization_started) {
+        return;
+    }
+
+    auto & state = session->diarized_transcript_state;
+    if (state.markdown.empty() || state.markdown == state.last_emitted_markdown) {
+        return;
+    }
+
+    audio_session_event_record out = {};
+    out.kind = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_DIARIZATION_TRANSCRIPT_COMMIT;
+    out.flags = base_flags;
+    if (state.final_spans.empty()) {
+        out.flags |= LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_PREVIEW;
+    } else {
+        out.flags |= LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FINAL;
+    }
+    out.item_id = next_audio_session_item_id_locked(session);
+    out.text = state.markdown;
+    if (!state.pieces.empty()) {
+        out.start_sample = state.pieces.front().start_sample;
+        out.end_sample = state.pieces.back().end_sample;
+    }
+    state.last_emitted_markdown = state.markdown;
+    push_audio_session_event_locked(session, std::move(out));
+}
 
 static std::mutex g_backend_mutex;
 static int g_backend_refcount = 0;
@@ -219,8 +970,63 @@ struct cached_realtime_model_entry {
 };
 static std::unordered_map<std::string, std::shared_ptr<cached_realtime_model_entry>> g_realtime_model_cache;
 
+static std::filesystem::path bridge_module_directory() {
+#if defined(_WIN32)
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(&bridge_module_directory),
+            &module) || module == nullptr) {
+        return {};
+    }
+
+    std::array<char, MAX_PATH> path_buf = {};
+    const DWORD len = GetModuleFileNameA(module, path_buf.data(), static_cast<DWORD>(path_buf.size()));
+    if (len == 0 || len >= path_buf.size()) {
+        return {};
+    }
+    return std::filesystem::path(std::string(path_buf.data(), len)).parent_path();
+#else
+    Dl_info info = {};
+    if (dladdr(reinterpret_cast<const void *>(&bridge_module_directory), &info) == 0 || info.dli_fname == nullptr) {
+        return {};
+    }
+    return std::filesystem::path(info.dli_fname).parent_path();
+#endif
+}
+
+static void load_optional_rpc_backend_from_runtime_dir() {
+    if (ggml_backend_reg_by_name("RPC") != nullptr) {
+        return;
+    }
+
+    const std::filesystem::path module_dir = bridge_module_directory();
+    if (module_dir.empty()) {
+        return;
+    }
+
+#if defined(_WIN32)
+    const std::filesystem::path rpc_backend = module_dir / "ggml-rpc.dll";
+#elif defined(__APPLE__)
+    const std::filesystem::path rpc_backend = module_dir / "libggml-rpc.dylib";
+#else
+    const std::filesystem::path rpc_backend = module_dir / "libggml-rpc.so";
+#endif
+
+    if (!std::filesystem::exists(rpc_backend)) {
+        return;
+    }
+
+    ggml_backend_reg_t reg = ggml_backend_load(rpc_backend.string().c_str());
+    if (reg != nullptr) {
+        ggml_backend_register(reg);
+    }
+}
+
 static void acquire_backend(const common_params & params);
 static void release_backend();
+static void clear_realtime_model_cache_now();
+static void ensure_realtime_model_cache_exit_cleanup_registered();
 
 static bool realtime_trace_enabled(void) {
     static int enabled = -1;
@@ -259,6 +1065,8 @@ static std::shared_ptr<llama::realtime::loaded_backend_model> load_backend_model
     if (out_cache_hit != nullptr) {
         *out_cache_hit = false;
     }
+
+    ensure_realtime_model_cache_exit_cleanup_registered();
 
     if (!llama::realtime::backend_supports_model_preload(params.kind)) {
         RT_TRACE("rt_load_model: preload unsupported kind=%d", static_cast<int>(params.kind));
@@ -384,6 +1192,269 @@ static char * copy_to_c_string(const std::string & s) {
     }
     std::memcpy(out, s.c_str(), s.size() + 1);
     return out;
+}
+
+#if defined(_WIN32)
+using bridge_socket_t = SOCKET;
+constexpr bridge_socket_t kInvalidBridgeSocket = INVALID_SOCKET;
+#else
+using bridge_socket_t = int;
+constexpr bridge_socket_t kInvalidBridgeSocket = -1;
+#endif
+
+static void close_bridge_socket(bridge_socket_t sock) {
+#if defined(_WIN32)
+    if (sock != kInvalidBridgeSocket) {
+        closesocket(sock);
+    }
+#else
+    if (sock != kInvalidBridgeSocket) {
+        close(sock);
+    }
+#endif
+}
+
+static bool ensure_bridge_socket_runtime(std::string * error_out) {
+#if defined(_WIN32)
+    static std::once_flag once;
+    static int init_result = 0;
+    std::call_once(once, []() {
+        WSADATA data{};
+        init_result = WSAStartup(MAKEWORD(2, 2), &data);
+    });
+    if (init_result != 0) {
+        if (error_out != nullptr) {
+            *error_out = "WSAStartup failed";
+        }
+        return false;
+    }
+#else
+    (void) error_out;
+#endif
+    return true;
+}
+
+static bool bridge_socket_send_all(
+    bridge_socket_t sock,
+    const void * data,
+    size_t size,
+    std::string * error_out) {
+    const char * ptr = static_cast<const char *>(data);
+    size_t sent_total = 0;
+    while (sent_total < size) {
+#if defined(_WIN32)
+        const int sent = send(sock, ptr + sent_total, static_cast<int>(size - sent_total), 0);
+#else
+        const ssize_t sent = send(sock, ptr + sent_total, size - sent_total, 0);
+#endif
+        if (sent <= 0) {
+            if (error_out != nullptr) {
+                *error_out = "failed to write socket payload";
+            }
+            return false;
+        }
+        sent_total += static_cast<size_t>(sent);
+    }
+    return true;
+}
+
+static bool bridge_socket_recv_all(
+    bridge_socket_t sock,
+    void * data,
+    size_t size,
+    std::string * error_out) {
+    char * ptr = static_cast<char *>(data);
+    size_t read_total = 0;
+    while (read_total < size) {
+#if defined(_WIN32)
+        const int received = recv(sock, ptr + read_total, static_cast<int>(size - read_total), 0);
+#else
+        const ssize_t received = recv(sock, ptr + read_total, size - read_total, 0);
+#endif
+        if (received <= 0) {
+            if (error_out != nullptr) {
+                *error_out = "failed to read socket payload";
+            }
+            return false;
+        }
+        read_total += static_cast<size_t>(received);
+    }
+    return true;
+}
+
+static bool connect_bridge_socket(
+    const std::string & control_addr,
+    bridge_socket_t * out_sock,
+    std::string * error_out) {
+    if (out_sock == nullptr) {
+        if (error_out != nullptr) {
+            *error_out = "output socket pointer is null";
+        }
+        return false;
+    }
+    *out_sock = kInvalidBridgeSocket;
+    if (!ensure_bridge_socket_runtime(error_out)) {
+        return false;
+    }
+
+    const size_t colon = control_addr.rfind(':');
+    if (colon == std::string::npos) {
+        if (error_out != nullptr) {
+            *error_out = "invalid control address";
+        }
+        return false;
+    }
+    const std::string host = control_addr.substr(0, colon);
+    const std::string port = control_addr.substr(colon + 1);
+    if (host.empty() || port.empty()) {
+        if (error_out != nullptr) {
+            *error_out = "invalid control address";
+        }
+        return false;
+    }
+
+    addrinfo hints{};
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_family = AF_UNSPEC;
+
+    addrinfo * result = nullptr;
+    if (getaddrinfo(host.c_str(), port.c_str(), &hints, &result) != 0 || result == nullptr) {
+        if (error_out != nullptr) {
+            *error_out = "failed to resolve control address";
+        }
+        return false;
+    }
+
+    bool connected = false;
+    for (addrinfo * current = result; current != nullptr; current = current->ai_next) {
+        bridge_socket_t sock = socket(current->ai_family, current->ai_socktype, current->ai_protocol);
+        if (sock == kInvalidBridgeSocket) {
+            continue;
+        }
+#if defined(_WIN32)
+        DWORD timeout_ms = 600000;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&timeout_ms), sizeof(timeout_ms));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char *>(&timeout_ms), sizeof(timeout_ms));
+#else
+        timeval timeout{};
+        timeout.tv_sec = 600;
+        timeout.tv_usec = 0;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+#endif
+        if (connect(sock, current->ai_addr, static_cast<int>(current->ai_addrlen)) == 0) {
+            *out_sock = sock;
+            connected = true;
+            break;
+        }
+        close_bridge_socket(sock);
+    }
+    freeaddrinfo(result);
+
+    if (!connected && error_out != nullptr) {
+        *error_out = "failed to connect to control address";
+    }
+    return connected;
+}
+
+static bool send_agent_request_json(
+    const std::string & control_addr,
+    const json & request,
+    json * response_out,
+    std::string * error_out) {
+    bridge_socket_t sock = kInvalidBridgeSocket;
+    if (!connect_bridge_socket(control_addr, &sock, error_out)) {
+        return false;
+    }
+
+    const std::string payload = request.dump();
+    const uint32_t len = static_cast<uint32_t>(payload.size());
+    const std::array<uint8_t, 4> len_bytes = {
+        static_cast<uint8_t>(len & 0xffu),
+        static_cast<uint8_t>((len >> 8) & 0xffu),
+        static_cast<uint8_t>((len >> 16) & 0xffu),
+        static_cast<uint8_t>((len >> 24) & 0xffu),
+    };
+
+    bool ok = bridge_socket_send_all(sock, len_bytes.data(), len_bytes.size(), error_out)
+        && bridge_socket_send_all(sock, payload.data(), payload.size(), error_out);
+    if (!ok) {
+        close_bridge_socket(sock);
+        return false;
+    }
+
+    std::array<uint8_t, 4> response_len_bytes{};
+    if (!bridge_socket_recv_all(sock, response_len_bytes.data(), response_len_bytes.size(), error_out)) {
+        close_bridge_socket(sock);
+        return false;
+    }
+    const uint32_t response_len = static_cast<uint32_t>(response_len_bytes[0])
+        | (static_cast<uint32_t>(response_len_bytes[1]) << 8u)
+        | (static_cast<uint32_t>(response_len_bytes[2]) << 16u)
+        | (static_cast<uint32_t>(response_len_bytes[3]) << 24u);
+    std::string response_payload(response_len, '\0');
+    if (!bridge_socket_recv_all(sock, response_payload.data(), response_payload.size(), error_out)) {
+        close_bridge_socket(sock);
+        return false;
+    }
+    close_bridge_socket(sock);
+
+    try {
+        if (response_out != nullptr) {
+            *response_out = json::parse(response_payload);
+        }
+        return true;
+    } catch (const std::exception & ex) {
+        if (error_out != nullptr) {
+            *error_out = ex.what();
+        }
+        return false;
+    }
+}
+
+static std::string default_cluster_agent_control_addr(void) {
+    const char * env_value = std::getenv("ENGINE_CLUSTER_AGENT_ADDR");
+    if (env_value != nullptr && env_value[0] != '\0') {
+        return std::string(env_value);
+    }
+    return "127.0.0.1:46211";
+}
+
+static bool agent_response_to_error(const json & response, std::string * error_out) {
+    const auto it = response.find("Error");
+    if (it == response.end() || !it->is_object()) {
+        return false;
+    }
+    if (error_out != nullptr) {
+        *error_out = it->value("message", "agent request failed");
+    }
+    return true;
+}
+
+static const json * agent_response_variant_payload(
+    const json & response,
+    const char * variant_name,
+    const char * field_name,
+    std::string * error_out) {
+    const auto it = response.find(variant_name);
+    if (it == response.end() || !it->is_object()) {
+        if (error_out != nullptr) {
+            *error_out = std::string("unexpected agent response variant for ") + variant_name;
+        }
+        return nullptr;
+    }
+    if (field_name == nullptr || field_name[0] == '\0') {
+        return &(*it);
+    }
+    const auto field_it = it->find(field_name);
+    if (field_it == it->end() || !field_it->is_object()) {
+        if (error_out != nullptr) {
+            *error_out = std::string("agent response '") + variant_name
+                + "' is missing object field '" + field_name + "'";
+        }
+        return nullptr;
+    }
+    return &(*field_it);
 }
 
 static std::string trim_copy(const std::string & s) {
@@ -590,6 +1661,35 @@ static bool is_gpu_device_type(enum ggml_backend_dev_type type) {
     return type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU;
 }
 
+static std::string lowercase_ascii(std::string value) {
+    for (char & ch : value) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return value;
+}
+
+static bool is_rpc_backend_device(ggml_backend_dev_t dev) {
+    if (dev == nullptr) {
+        return false;
+    }
+    auto * reg = ggml_backend_dev_backend_reg(dev);
+    const char * backend_name = reg != nullptr ? ggml_backend_reg_name(reg) : nullptr;
+    if (backend_name != nullptr) {
+        std::string backend = lowercase_ascii(backend_name);
+        if (backend.find("rpc") != std::string::npos) {
+            return true;
+        }
+    }
+    const char * dev_name = ggml_backend_dev_name(dev);
+    if (dev_name != nullptr) {
+        std::string name = lowercase_ascii(dev_name);
+        if (name.find("rpc") != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static int32_t find_backend_device_index(ggml_backend_dev_t target) {
     if (target == nullptr) {
         return -1;
@@ -761,6 +1861,11 @@ static bool looks_like_zero_initialized_params(const llama_server_bridge_params 
         && p->seed == 0
         && p->ctx_shift == 0
         && p->kv_unified == 0
+        && p->use_mmap == 0
+        && p->use_direct_io == 0
+        && p->use_mlock == 0
+        && p->no_host == 0
+        && p->no_extra_bufts == 0
         && p->split_mode == 0
         && p->embedding == 0
         && p->reranking == 0
@@ -821,6 +1926,7 @@ static void acquire_backend(const common_params & params) {
     if (g_backend_refcount == 0) {
         common_init();
         ggml_backend_load_all();
+        load_optional_rpc_backend_from_runtime_dir();
         llama_backend_init();
         llama_numa_init(params.numa);
     }
@@ -1594,7 +2700,15 @@ static bool prepare_audio_raw_payload(
         ? std::string(req->audio_format)
         : std::string("wav");
 
-    if (req->ffmpeg_convert != 0) {
+    std::string normalized_format = out_format;
+    std::transform(
+        normalized_format.begin(),
+        normalized_format.end(),
+        normalized_format.begin(),
+        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    const bool format_is_wav = normalized_format == "wav" || normalized_format == "wave";
+
+    if (req->ffmpeg_convert != 0 && !format_is_wav) {
         std::vector<uint8_t> converted;
         if (!ffmpeg_convert_to_wav_pcm16_mono_16k(
                 out_audio.data(),
@@ -1624,6 +2738,143 @@ static std::string build_audio_body_with_base64(
     metadata["audio"]["format"] = format;
     metadata["audio"]["data"] = base64_encode_bytes(audio.data(), audio.size());
     return metadata.dump();
+}
+
+static const std::string k_base64_chars =
+             "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+             "abcdefghijklmnopqrstuvwxyz"
+             "0123456789+/";
+
+static bool is_base64_char(uint8_t c) {
+    return std::isalnum(c) != 0 || c == '+' || c == '/';
+}
+
+static std::vector<uint8_t> decode_base64_bytes(const std::string & encoded_string) {
+    int i = 0;
+    int j = 0;
+    int in_ = 0;
+
+    int in_len = static_cast<int>(encoded_string.size());
+    uint8_t char_array_4[4];
+    uint8_t char_array_3[3];
+    std::vector<uint8_t> ret;
+
+    while (in_len-- && encoded_string[in_] != '=' && is_base64_char(static_cast<uint8_t>(encoded_string[in_]))) {
+        char_array_4[i++] = static_cast<uint8_t>(encoded_string[in_]);
+        ++in_;
+        if (i == 4) {
+            for (i = 0; i < 4; ++i) {
+                char_array_4[i] = static_cast<uint8_t>(k_base64_chars.find(char_array_4[i]));
+            }
+
+            char_array_3[0] = static_cast<uint8_t>(((char_array_4[0]) << 2) + ((char_array_4[1] & 0x30) >> 4));
+            char_array_3[1] = static_cast<uint8_t>(((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2));
+            char_array_3[2] = static_cast<uint8_t>(((char_array_4[2] & 0x3) << 6) + char_array_4[3]);
+
+            for (i = 0; i < 3; ++i) {
+                ret.push_back(char_array_3[i]);
+            }
+
+            i = 0;
+        }
+    }
+
+    if (i != 0) {
+        for (j = i; j < 4; ++j) {
+            char_array_4[j] = 0;
+        }
+        for (j = 0; j < 4; ++j) {
+            char_array_4[j] = static_cast<uint8_t>(k_base64_chars.find(char_array_4[j]));
+        }
+
+        char_array_3[0] = static_cast<uint8_t>(((char_array_4[0]) << 2) + ((char_array_4[1] & 0x30) >> 4));
+        char_array_3[1] = static_cast<uint8_t>(((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2));
+        char_array_3[2] = static_cast<uint8_t>(((char_array_4[2] & 0x3) << 6) + char_array_4[3]);
+
+        for (j = 0; j < i - 1; ++j) {
+            ret.push_back(char_array_3[j]);
+        }
+    }
+
+    return ret;
+}
+
+static bool extract_audio_body_for_cluster(
+    json body,
+    std::vector<uint8_t> & out_audio,
+    std::string & out_format,
+    std::string & out_metadata_json,
+    std::string & error) {
+
+    out_audio.clear();
+    out_format.clear();
+    out_metadata_json.clear();
+    error.clear();
+
+    if (!body.is_object()) {
+        error = "audio transcriptions body_json must be a JSON object";
+        return false;
+    }
+    if (!body.contains("audio") || !body["audio"].is_object()) {
+        error = "audio transcriptions body_json must contain an 'audio' object";
+        return false;
+    }
+
+    const json & audio = body["audio"];
+    const std::string format = json_value(audio, "format", std::string());
+    const std::string data_b64 = json_value(audio, "data", std::string());
+    if (format.empty()) {
+        error = "audio.format is required for cluster audio routing";
+        return false;
+    }
+    if (data_b64.empty()) {
+        error = "audio.data is required for cluster audio routing";
+        return false;
+    }
+
+    out_format = format;
+    out_audio = decode_base64_bytes(data_b64);
+    if (out_audio.empty()) {
+        error = "audio.data base64 payload is empty or invalid";
+        return false;
+    }
+
+    body.erase("audio");
+    out_metadata_json = body.dump();
+    return true;
+}
+
+static void extract_audio_cluster_diarization_request(
+    const std::string & metadata_json,
+    bool & out_enable_diarization,
+    std::string & out_diarization_model_path) {
+
+    out_enable_diarization = false;
+    out_diarization_model_path.clear();
+    if (metadata_json.empty()) {
+        return;
+    }
+
+    try {
+        const json metadata = json::parse(metadata_json);
+        if (!metadata.is_object()) {
+            return;
+        }
+
+        std::string mode = json_value(metadata, "mode", std::string());
+        std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+        const std::string diarization_model_path =
+            json_value(metadata, "diarization_model_path", std::string());
+        const bool explicit_enable = json_value(metadata, "enable_diarization", false);
+        const bool transcript_mode = mode == "transcript";
+        if (explicit_enable || (!diarization_model_path.empty() && transcript_mode)) {
+            out_enable_diarization = true;
+            out_diarization_model_path = diarization_model_path;
+        }
+    } catch (...) {
+    }
 }
 
 static constexpr int32_t LLAMA_SERVER_BRIDGE_REASONING_BUDGET_UNSET = INT32_MIN;
@@ -1707,6 +2958,7 @@ struct llama_server_bridge_params llama_server_bridge_default_params(void) {
     llama_server_bridge_params p = {};
     p.model_path = nullptr;
     p.mmproj_path = nullptr;
+    p.cluster_instance_name = nullptr;
     p.n_ctx = 32768;
     p.n_batch = 2048;
     p.n_ubatch = 2048;
@@ -1718,10 +2970,15 @@ struct llama_server_bridge_params llama_server_bridge_default_params(void) {
     p.gpu = -1;
     p.no_kv_offload = 0;
     p.mmproj_use_gpu = -1;
-    p.cache_ram_mib = -1;
+    p.cache_ram_mib = 0;
     p.seed = -1;
     p.ctx_shift = 1;
     p.kv_unified = 1;
+    p.use_mmap = 1;
+    p.use_direct_io = 0;
+    p.use_mlock = 0;
+    p.no_host = 0;
+    p.no_extra_bufts = 0;
 #if defined(__APPLE__)
     // On macOS/Metal, use "unset devices" as the default so create()
     // can auto-select the first GPU when the caller does not pass a device.
@@ -2029,13 +3286,24 @@ int32_t llama_server_bridge_realtime_model_cache_entry_count(void) {
     return count > static_cast<size_t>(INT32_MAX) ? INT32_MAX : static_cast<int32_t>(count);
 }
 
-void llama_server_bridge_realtime_model_cache_clear(void) {
+static void clear_realtime_model_cache_now() {
     decltype(g_realtime_model_cache) cleared;
     {
         std::lock_guard<std::mutex> lock(g_realtime_model_cache_mutex);
         g_realtime_model_cache.swap(cleared);
     }
     cleared.clear();
+}
+
+void llama_server_bridge_realtime_model_cache_clear(void) {
+    clear_realtime_model_cache_now();
+}
+
+static void ensure_realtime_model_cache_exit_cleanup_registered() {
+    static std::once_flag once;
+    std::call_once(once, []() {
+        std::atexit(clear_realtime_model_cache_now);
+    });
 }
 
 void llama_server_bridge_result_free(struct llama_server_bridge_vlm_result * out) {
@@ -2228,17 +3496,23 @@ static bool translate_realtime_session_params_from_loaded_model(
     return true;
 }
 
+static bool try_attach_cluster_agent_instance(
+    llama_server_bridge * bridge,
+    std::string * error_out);
+
 struct llama_server_bridge * llama_server_bridge_create(const struct llama_server_bridge_params * params) {
     if (params == nullptr) {
         std::fprintf(stderr, "llama_server_bridge_create: params is null\n");
         return nullptr;
     }
 
+    const bool has_cluster_instance_name =
+        params->cluster_instance_name != nullptr && params->cluster_instance_name[0] != '\0';
     const bool has_model_path = params->model_path != nullptr && params->model_path[0] != '\0';
     const char * env_audio_only = std::getenv("LLAMA_SERVER_AUDIO_ONLY");
     // Default to audio-only mode when model_path is omitted. This keeps
     // transcriptions working even if the caller does not set an env flag.
-    bool audio_only = !has_model_path;
+    bool audio_only = !has_model_path && !has_cluster_instance_name;
     if (env_audio_only != nullptr && env_audio_only[0] != '\0') {
         const std::string v = trim_copy(env_audio_only);
         if (v == "1" || v == "true" || v == "TRUE" || v == "on" || v == "ON") {
@@ -2247,12 +3521,38 @@ struct llama_server_bridge * llama_server_bridge_create(const struct llama_serve
             audio_only = false;
         }
     }
-    if (!has_model_path && !audio_only) {
+    if (!has_model_path && !has_cluster_instance_name && !audio_only) {
         std::fprintf(stderr, "llama_server_bridge_create: missing model_path and audio-only mode is disabled\n");
         return nullptr;
     }
 
     std::unique_ptr<llama_server_bridge> bridge = std::make_unique<llama_server_bridge>();
+    if (has_cluster_instance_name) {
+        bridge->cluster_instance_name = params->cluster_instance_name;
+        std::string attach_error;
+        if (try_attach_cluster_agent_instance(bridge.get(), &attach_error)) {
+            bridge->model_name = bridge->cluster_instance_name;
+            return bridge.release();
+        }
+        bridge->shared_cluster = llama_server_cluster_create();
+        if (bridge->shared_cluster == nullptr) {
+            set_bridge_error(
+                bridge.get(),
+                !attach_error.empty() ? attach_error : "failed to acquire shared cluster runtime");
+            return nullptr;
+        }
+        if (llama_server_cluster_find_instance_by_name(bridge->shared_cluster, params->cluster_instance_name) <= 0) {
+            const char * cluster_error = llama_server_cluster_last_error(bridge->shared_cluster);
+            set_bridge_error(
+                bridge.get(),
+                cluster_error != nullptr && cluster_error[0] != '\0'
+                    ? cluster_error
+                    : (!attach_error.empty() ? attach_error : "unknown cluster instance name"));
+            return nullptr;
+        }
+        bridge->model_name = bridge->cluster_instance_name;
+        return bridge.release();
+    }
     if (has_model_path) {
         bridge->params.model.path = params->model_path;
     }
@@ -2285,6 +3585,11 @@ struct llama_server_bridge * llama_server_bridge_create(const struct llama_serve
     const int32_t requested_seed = choose_i32(params->seed, defaults.seed);
     const int32_t requested_ctx_shift = choose_i32(params->ctx_shift, defaults.ctx_shift);
     const int32_t requested_kv_unified = choose_i32(params->kv_unified, defaults.kv_unified);
+    const int32_t requested_use_mmap = choose_i32(params->use_mmap, defaults.use_mmap);
+    const int32_t requested_use_direct_io = choose_i32(params->use_direct_io, defaults.use_direct_io);
+    const int32_t requested_use_mlock = choose_i32(params->use_mlock, defaults.use_mlock);
+    const int32_t requested_no_host = choose_i32(params->no_host, defaults.no_host);
+    const int32_t requested_no_extra_bufts = choose_i32(params->no_extra_bufts, defaults.no_extra_bufts);
     const int32_t requested_split_mode = choose_i32(params->split_mode, defaults.split_mode);
     const int32_t requested_pooling_type = choose_i32(params->pooling_type, defaults.pooling_type);
 
@@ -2320,6 +3625,11 @@ struct llama_server_bridge * llama_server_bridge_create(const struct llama_serve
     bridge->params.cache_ram_mib = requested_cache_ram_mib;
     bridge->params.ctx_shift = requested_ctx_shift != 0;
     bridge->params.kv_unified = requested_kv_unified != 0;
+    bridge->params.use_mmap = requested_use_mmap != 0;
+    bridge->params.use_direct_io = requested_use_direct_io != 0;
+    bridge->params.use_mlock = requested_use_mlock != 0;
+    bridge->params.no_host = requested_no_host != 0;
+    bridge->params.no_extra_bufts = requested_no_extra_bufts != 0;
     bridge->params.embedding = params->embedding != 0;
     // Default to single-device mode unless explicitly overridden by split_mode.
     bridge->params.split_mode = LLAMA_SPLIT_MODE_NONE;
@@ -2407,6 +3717,22 @@ struct llama_server_bridge * llama_server_bridge_create(const struct llama_serve
         return nullptr;
     }
 
+    if (bridge->params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO &&
+        bridge->params.split_mode != LLAMA_SPLIT_MODE_NONE &&
+        bridge->params.devices.size() > 2) {
+        bool has_rpc_backend = false;
+        for (auto * dev : bridge->params.devices) {
+            if (is_rpc_backend_device(dev)) {
+                has_rpc_backend = true;
+                break;
+            }
+        }
+        if (has_rpc_backend) {
+            bridge->params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+            bridge->params.warmup = false;
+        }
+    }
+
     ggml_backend_dev_t primary_dev = nullptr;
     for (auto * dev : bridge->params.devices) {
         if (dev != nullptr) {
@@ -2484,6 +3810,8 @@ void llama_server_bridge_destroy(struct llama_server_bridge * bridge) {
         bridge->loop_thread.join();
     }
     bridge->routes.reset();
+    // Drop cached realtime models before backend/DLL teardown to avoid late CUDA cleanup aborts.
+    clear_realtime_model_cache_now();
     if (bridge->backend_acquired) {
         release_backend();
         bridge->backend_acquired = false;
@@ -2871,14 +4199,27 @@ static void translate_realtime_events_locked(
         return;
     }
 
+    bool transcript_changed = false;
     for (const auto & ev : events) {
         audio_session_event_record out = {};
-        out.flags = extra_flags | LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FINAL;
+        out.flags = extra_flags;
         out.start_sample = seconds_to_samples(ev.begin_sec, session->params.expected_input_sample_rate_hz);
         out.end_sample = seconds_to_samples(ev.end_sec, session->params.expected_input_sample_rate_hz);
         out.speaker_id = ev.speaker_id;
         out.text = ev.text;
         out.detail = ev.detail;
+
+        if ((ev.flags & llama::realtime::event_flag_preview) != 0u) {
+            out.flags |= LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_PREVIEW;
+        } else {
+            out.flags |= LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_FINAL;
+        }
+        if ((ev.flags & llama::realtime::event_flag_snapshot_start) != 0u) {
+            out.flags |= LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_SNAPSHOT_START;
+        }
+        if ((ev.flags & llama::realtime::event_flag_snapshot_end) != 0u) {
+            out.flags |= LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_SNAPSHOT_END;
+        }
 
         using llama::realtime::event_type;
         switch (ev.type) {
@@ -2923,7 +4264,14 @@ static void translate_realtime_events_locked(
                 out.item_id = 0;
                 break;
         }
+        const auto ingest_record = out;
         push_audio_session_event_locked(session, std::move(out));
+        transcript_changed = audio_session_ingest_transcript_event_locked(session, ingest_record)
+            || transcript_changed;
+    }
+
+    if (transcript_changed) {
+        audio_session_maybe_emit_transcript_commit_locked(session, extra_flags);
     }
 }
 
@@ -3445,6 +4793,8 @@ void llama_server_bridge_audio_session_destroy(
 
     join_audio_session_transcription_thread(session);
     delete session;
+    // Mirror the explicit public cache-clear workaround after full session teardown.
+    clear_realtime_model_cache_now();
 }
 
 int32_t llama_server_bridge_audio_session_push_audio(
@@ -3646,6 +4996,11 @@ int32_t llama_server_bridge_audio_session_start_diarization(
             session->diarization_bridge = bridge;
             session->diarization_started = true;
             session->diarization_stopped = false;
+            session->diarized_transcript_state.final_spans.clear();
+            session->diarized_transcript_state.preview_spans.clear();
+            session->diarized_transcript_state.pending_preview_spans.clear();
+            session->diarized_transcript_state.markdown.clear();
+            session->diarized_transcript_state.last_emitted_markdown.clear();
 
             audio_session_event_record started = {};
             started.kind = LLAMA_SERVER_BRIDGE_AUDIO_EVENT_DIARIZATION_STARTED;
@@ -3993,6 +5348,22 @@ static int32_t run_json_route(
     }
 }
 
+static int32_t run_cluster_instance_embeddings(
+    llama_server_bridge * bridge,
+    const llama_server_bridge_embeddings_request * req,
+    llama_server_bridge_json_result * out);
+static int32_t run_cluster_instance_rerank(
+    llama_server_bridge * bridge,
+    const llama_server_bridge_rerank_request * req,
+    llama_server_bridge_json_result * out);
+static int32_t run_cluster_instance_audio_raw(
+    llama_server_bridge * bridge,
+    const std::vector<uint8_t> & audio,
+    const std::string & format,
+    const std::string & metadata_json,
+    int32_t ffmpeg_convert,
+    llama_server_bridge_json_result * out);
+
 int32_t llama_server_bridge_embeddings(
     struct llama_server_bridge * bridge,
     const struct llama_server_bridge_embeddings_request * req,
@@ -4002,15 +5373,17 @@ int32_t llama_server_bridge_embeddings(
         return -1;
     }
     *out = llama_server_bridge_empty_json_result();
-
-    if (bridge->routes == nullptr) {
-        const std::string msg = "server routes are not initialized";
+    if (req->body_json == nullptr || req->body_json[0] == '\0') {
+        const std::string msg = "embeddings body_json is empty";
         set_bridge_error(bridge, msg);
         out->error_json = copy_to_c_string(msg);
         return -1;
     }
-    if (req->body_json == nullptr || req->body_json[0] == '\0') {
-        const std::string msg = "embeddings body_json is empty";
+    if (!bridge->cluster_instance_name.empty()) {
+        return run_cluster_instance_embeddings(bridge, req, out);
+    }
+    if (bridge->routes == nullptr) {
+        const std::string msg = "server routes are not initialized";
         set_bridge_error(bridge, msg);
         out->error_json = copy_to_c_string(msg);
         return -1;
@@ -4034,15 +5407,17 @@ int32_t llama_server_bridge_rerank(
         return -1;
     }
     *out = llama_server_bridge_empty_json_result();
-
-    if (bridge->routes == nullptr) {
-        const std::string msg = "server routes are not initialized";
+    if (req->body_json == nullptr || req->body_json[0] == '\0') {
+        const std::string msg = "rerank body_json is empty";
         set_bridge_error(bridge, msg);
         out->error_json = copy_to_c_string(msg);
         return -1;
     }
-    if (req->body_json == nullptr || req->body_json[0] == '\0') {
-        const std::string msg = "rerank body_json is empty";
+    if (!bridge->cluster_instance_name.empty()) {
+        return run_cluster_instance_rerank(bridge, req, out);
+    }
+    if (bridge->routes == nullptr) {
+        const std::string msg = "server routes are not initialized";
         set_bridge_error(bridge, msg);
         out->error_json = copy_to_c_string(msg);
         return -1;
@@ -4065,24 +5440,8 @@ int32_t llama_server_bridge_audio_transcriptions(
         return -1;
     }
     *out = llama_server_bridge_empty_json_result();
-
-    if (bridge->routes == nullptr) {
-        const std::string msg = "server routes are not initialized";
-        set_bridge_error(bridge, msg);
-        out->error_json = copy_to_c_string(msg);
-        return -1;
-    }
     if (req->body_json == nullptr || req->body_json[0] == '\0') {
         const std::string msg = "audio transcriptions body_json is empty";
-        set_bridge_error(bridge, msg);
-        out->error_json = copy_to_c_string(msg);
-        return -1;
-    }
-
-    const auto handler = resolve_audio_transcriptions_handler(bridge->routes.get());
-    if (!handler) {
-        const std::string msg =
-            "audio transcriptions route is unavailable in this llama.cpp build (missing server audio patch)";
         set_bridge_error(bridge, msg);
         out->error_json = copy_to_c_string(msg);
         return -1;
@@ -4104,6 +5463,38 @@ int32_t llama_server_bridge_audio_transcriptions(
         return -1;
     }
     apply_audio_runtime_device_defaults(bridge, body);
+    if (!bridge->cluster_instance_name.empty()) {
+        std::vector<uint8_t> audio;
+        std::string format;
+        std::string metadata_json;
+        std::string decode_error;
+        if (!extract_audio_body_for_cluster(body, audio, format, metadata_json, decode_error)) {
+            set_bridge_error(bridge, decode_error);
+            out->error_json = copy_to_c_string(decode_error);
+            return -1;
+        }
+        return run_cluster_instance_audio_raw(
+            bridge,
+            audio,
+            format,
+            metadata_json,
+            0,
+            out);
+    }
+    if (bridge->routes == nullptr) {
+        const std::string msg = "server routes are not initialized";
+        set_bridge_error(bridge, msg);
+        out->error_json = copy_to_c_string(msg);
+        return -1;
+    }
+    const auto handler = resolve_audio_transcriptions_handler(bridge->routes.get());
+    if (!handler) {
+        const std::string msg =
+            "audio transcriptions route is unavailable in this llama.cpp build (missing server audio patch)";
+        set_bridge_error(bridge, msg);
+        out->error_json = copy_to_c_string(msg);
+        return -1;
+    }
     const std::string body_json = body.dump();
 
     return run_json_route(
@@ -4124,13 +5515,6 @@ int32_t llama_server_bridge_audio_transcriptions_raw(
     }
     *out = llama_server_bridge_empty_json_result();
 
-    if (bridge->routes == nullptr) {
-        const std::string msg = "server routes are not initialized";
-        set_bridge_error(bridge, msg);
-        out->error_json = copy_to_c_string(msg);
-        return -1;
-    }
-
     json metadata = json::object();
     std::vector<uint8_t> audio;
     std::string format;
@@ -4141,6 +5525,21 @@ int32_t llama_server_bridge_audio_transcriptions_raw(
         return -1;
     }
     apply_audio_runtime_device_defaults(bridge, metadata);
+    if (!bridge->cluster_instance_name.empty()) {
+        return run_cluster_instance_audio_raw(
+            bridge,
+            audio,
+            format,
+            metadata.dump(),
+            req->ffmpeg_convert,
+            out);
+    }
+    if (bridge->routes == nullptr) {
+        const std::string msg = "server routes are not initialized";
+        set_bridge_error(bridge, msg);
+        out->error_json = copy_to_c_string(msg);
+        return -1;
+    }
 
     const auto raw_handler = resolve_audio_transcriptions_raw_handler(bridge->routes.get());
     if (raw_handler) {
@@ -4218,7 +5617,8 @@ int32_t llama_server_bridge_audio_transcriptions_raw(
         out);
 }
 
-int32_t llama_server_bridge_list_devices(
+static int32_t llama_server_bridge_list_devices_impl(
+    bool include_rpc_backends,
     struct llama_server_bridge_device_info ** out_devices,
     size_t * out_count) {
 
@@ -4238,26 +5638,40 @@ int32_t llama_server_bridge_list_devices(
         return 0;
     }
 
+    std::vector<ggml_backend_dev_t> visible_devices;
+    visible_devices.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        auto * dev = ggml_backend_dev_get(i);
+        if (dev == nullptr) {
+            continue;
+        }
+        if (!include_rpc_backends && is_rpc_backend_device(dev)) {
+            continue;
+        }
+        visible_devices.push_back(dev);
+    }
+
+    if (visible_devices.empty()) {
+        release_backend();
+        return 0;
+    }
+
     auto * devices = static_cast<llama_server_bridge_device_info *>(
-        std::calloc(n, sizeof(llama_server_bridge_device_info)));
+        std::calloc(visible_devices.size(), sizeof(llama_server_bridge_device_info)));
     if (devices == nullptr) {
         release_backend();
         return -1;
     }
 
     bool ok = true;
-    for (size_t i = 0; i < n; ++i) {
-        auto * dev = ggml_backend_dev_get(i);
-        if (dev == nullptr) {
-            continue;
-        }
-
+    for (size_t i = 0; i < visible_devices.size(); ++i) {
+        auto * dev = visible_devices[i];
         size_t mem_free = 0;
         size_t mem_total = 0;
         ggml_backend_dev_memory(dev, &mem_free, &mem_total);
 
         auto reg = ggml_backend_dev_backend_reg(dev);
-        devices[i].index = static_cast<int32_t>(i);
+        devices[i].index = find_backend_device_index(dev);
         devices[i].type = static_cast<int32_t>(ggml_backend_dev_type(dev));
         devices[i].memory_free = static_cast<uint64_t>(mem_free);
         devices[i].memory_total = static_cast<uint64_t>(mem_total);
@@ -4272,16 +5686,32 @@ int32_t llama_server_bridge_list_devices(
     }
 
     if (!ok) {
-        llama_server_bridge_free_devices(devices, n);
+        llama_server_bridge_free_devices(devices, visible_devices.size());
         release_backend();
         return -1;
     }
 
     *out_devices = devices;
-    *out_count = n;
+    *out_count = visible_devices.size();
 
     release_backend();
     return 0;
+}
+
+int32_t llama_server_bridge_list_devices(
+    struct llama_server_bridge_device_info ** out_devices,
+    size_t * out_count) {
+    return llama_server_bridge_list_devices_impl(false, out_devices, out_count);
+}
+
+int32_t llama_server_bridge_list_devices_ex(
+    int32_t include_rpc_backends,
+    struct llama_server_bridge_device_info ** out_devices,
+    size_t * out_count) {
+    return llama_server_bridge_list_devices_impl(
+        include_rpc_backends != 0,
+        out_devices,
+        out_count);
 }
 
 void llama_server_bridge_free_devices(
@@ -4311,8 +5741,34 @@ static std::string extract_markdown_from_oai_chat(const json & response) {
         const json & c0 = response["choices"][0];
         if (c0.contains("message") && c0["message"].is_object()) {
             const json & msg = c0["message"];
-            if (msg.contains("content") && msg["content"].is_string()) {
-                return msg["content"].get<std::string>();
+            if (msg.contains("content")) {
+                const json & content = msg["content"];
+                if (content.is_string()) {
+                    return content.get<std::string>();
+                }
+                if (content.is_array()) {
+                    std::string joined;
+                    for (const auto & part : content) {
+                        if (!part.is_object()) {
+                            continue;
+                        }
+                        const std::string type = json_value(part, "type", std::string());
+                        if (type != "text" && type != "output_text") {
+                            continue;
+                        }
+                        const std::string text = json_value(part, "text", std::string());
+                        if (text.empty()) {
+                            continue;
+                        }
+                        if (!joined.empty()) {
+                            joined.push_back('\n');
+                        }
+                        joined += text;
+                    }
+                    if (!joined.empty()) {
+                        return joined;
+                    }
+                }
             }
         }
         if (c0.contains("text") && c0["text"].is_string()) {
@@ -4325,6 +5781,796 @@ static std::string extract_markdown_from_oai_chat(const json & response) {
     return "";
 }
 
+static std::string guess_image_mime_type(const uint8_t * data, size_t len) {
+    if (data == nullptr || len == 0) {
+        return "application/octet-stream";
+    }
+
+    if (len >= 8 &&
+        data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47 &&
+        data[4] == 0x0D && data[5] == 0x0A && data[6] == 0x1A && data[7] == 0x0A) {
+        return "image/png";
+    }
+    if (len >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF) {
+        return "image/jpeg";
+    }
+    if (len >= 6 && std::memcmp(data, "GIF87a", 6) == 0) {
+        return "image/gif";
+    }
+    if (len >= 6 && std::memcmp(data, "GIF89a", 6) == 0) {
+        return "image/gif";
+    }
+    if (len >= 12 &&
+        std::memcmp(data, "RIFF", 4) == 0 &&
+        std::memcmp(data + 8, "WEBP", 4) == 0) {
+        return "image/webp";
+    }
+    if (len >= 2 && data[0] == 0x42 && data[1] == 0x4D) {
+        return "image/bmp";
+    }
+
+    return "application/octet-stream";
+}
+
+static std::string build_image_data_url(const uint8_t * data, size_t len) {
+    const std::string mime = guess_image_mime_type(data, len);
+    return "data:" + mime + ";base64," + base64_encode_bytes(data, len);
+}
+
+static int32_t fill_chat_result_from_oai_response(
+    llama_server_bridge * bridge,
+    const json & response,
+    struct llama_server_bridge_vlm_result * out) {
+
+    const json & choices = response.contains("choices") && response["choices"].is_array()
+        ? response["choices"]
+        : json::array();
+    const json & choice0 = !choices.empty() ? choices[0] : json::object();
+    const std::string finish_reason = json_value(choice0, "finish_reason", std::string());
+    const std::string text = extract_markdown_from_oai_chat(response);
+
+    if (text.empty()) {
+        const json & message = choice0.contains("message") && choice0["message"].is_object()
+            ? choice0["message"]
+            : json::object();
+        const std::string reasoning = json_value(message, "reasoning_content", std::string());
+        const std::string err = !reasoning.empty()
+            ? "chat response ended in reasoning without assistant content"
+            : "chat response missing content";
+        set_bridge_error(bridge, err);
+        out->error_json = copy_to_c_string(err);
+        return -1;
+    }
+
+    const json & usage = response.contains("usage") && response["usage"].is_object()
+        ? response["usage"]
+        : json::object();
+    const json & timings = response.contains("timings") && response["timings"].is_object()
+        ? response["timings"]
+        : json::object();
+
+    out->ok = 1;
+    out->truncated = finish_reason == "length" ? 1 : 0;
+    out->stop = finish_reason == "stop"
+        ? static_cast<int32_t>(STOP_TYPE_EOS)
+        : (finish_reason == "tool_calls"
+            ? static_cast<int32_t>(STOP_TYPE_WORD)
+            : static_cast<int32_t>(STOP_TYPE_NONE));
+    out->n_decoded = usage.value("completion_tokens", timings.value("predicted_n", 0));
+    out->n_prompt_tokens = usage.value("prompt_tokens", timings.value("prompt_n", 0));
+    out->n_tokens_cached = timings.value("cache_n", 0);
+    out->eos_reached = finish_reason == "stop" ? 1 : 0;
+    out->prompt_ms = timings.value("prompt_ms", 0.0);
+    out->predicted_ms = timings.value("predicted_ms", 0.0);
+    out->text = copy_to_c_string(text);
+    if (out->text == nullptr) {
+        const std::string err = "failed to allocate output text";
+        set_bridge_error(bridge, err);
+        out->ok = 0;
+        out->error_json = copy_to_c_string(err);
+        return -1;
+    }
+
+    set_bridge_error(bridge, "");
+    return 0;
+}
+
+static bool try_attach_cluster_agent_instance(
+    llama_server_bridge * bridge,
+    std::string * error_out) {
+    if (bridge == nullptr || bridge->cluster_instance_name.empty()) {
+        if (error_out != nullptr) {
+            *error_out = "cluster instance name is required";
+        }
+        return false;
+    }
+
+    json response;
+    const std::string control_addr = default_cluster_agent_control_addr();
+    const json request = {
+        {"ResolveClusterInstance", {
+            {"name", bridge->cluster_instance_name},
+            {"load_if_managed", true},
+        }},
+    };
+    if (!send_agent_request_json(control_addr, request, &response, error_out)) {
+        return false;
+    }
+    if (agent_response_to_error(response, error_out)) {
+        return false;
+    }
+    const json * resolved = agent_response_variant_payload(
+        response,
+        "ResolvedClusterInstance",
+        "resolved",
+        error_out);
+    if (resolved == nullptr) {
+        return false;
+    }
+
+    bridge->cluster_via_agent = true;
+    bridge->cluster_agent_control_addr = control_addr;
+    bridge->cluster_owner_control_addr = resolved->value("owner_control_addr", "");
+    bridge->cluster_owner_instance_id = resolved->value("instance_id", int64_t(0));
+    if (bridge->cluster_owner_control_addr.empty() || bridge->cluster_owner_instance_id <= 0) {
+        if (error_out != nullptr) {
+            *error_out = "resolved cluster instance is missing owner routing info";
+        }
+        bridge->cluster_via_agent = false;
+        bridge->cluster_agent_control_addr.clear();
+        bridge->cluster_owner_control_addr.clear();
+        bridge->cluster_owner_instance_id = 0;
+        return false;
+    }
+    if (error_out != nullptr) {
+        error_out->clear();
+    }
+    return true;
+}
+
+static bool bridge_routes_cluster_via_agent(const llama_server_bridge * bridge) {
+    return bridge != nullptr
+        && bridge->cluster_via_agent
+        && !bridge->cluster_owner_control_addr.empty()
+        && bridge->cluster_owner_instance_id > 0;
+}
+
+static int64_t resolve_named_cluster_instance_id(
+    llama_server_bridge * bridge,
+    std::string * error_out) {
+
+    if (error_out != nullptr) {
+        error_out->clear();
+    }
+    if (bridge_routes_cluster_via_agent(bridge)) {
+        return bridge->cluster_owner_instance_id;
+    }
+    if (bridge->shared_cluster == nullptr || bridge->cluster_instance_name.empty()) {
+        if (error_out != nullptr) {
+            *error_out = "shared cluster instance routing is not configured";
+        }
+        return -1;
+    }
+
+    const int64_t instance_id = llama_server_cluster_find_instance_by_name(
+        bridge->shared_cluster,
+        bridge->cluster_instance_name.c_str());
+    if (instance_id > 0) {
+        return instance_id;
+    }
+
+    if (error_out != nullptr) {
+        const char * cluster_error = llama_server_cluster_last_error(bridge->shared_cluster);
+        *error_out =
+            (cluster_error != nullptr && cluster_error[0] != '\0')
+                ? cluster_error
+                : "unknown cluster instance name";
+    }
+    return -1;
+}
+
+static bool resolve_owner_managed_audio_companion_paths(
+    const llama_server_bridge * bridge,
+    std::string * diarization_model_path_out,
+    std::string * error_out) {
+
+    if (diarization_model_path_out != nullptr) {
+        diarization_model_path_out->clear();
+    }
+    if (error_out != nullptr) {
+        error_out->clear();
+    }
+    if (bridge == nullptr || bridge->cluster_instance_name.empty()) {
+        if (error_out != nullptr) {
+            *error_out = "cluster instance name is required";
+        }
+        return false;
+    }
+
+    const std::string control_addr =
+        !bridge->cluster_owner_control_addr.empty()
+            ? bridge->cluster_owner_control_addr
+            : (!bridge->cluster_agent_control_addr.empty()
+                ? bridge->cluster_agent_control_addr
+                : default_cluster_agent_control_addr());
+    const bool use_cluster_lookup = control_addr == bridge->cluster_agent_control_addr
+        || control_addr == default_cluster_agent_control_addr();
+    const json request = use_cluster_lookup
+        ? json{
+            {"ResolveClusterManagedModel", {
+                {"model_id", bridge->cluster_instance_name},
+            }},
+        }
+        : json{
+            {"ResolveManagedModel", {
+                {"model_id", bridge->cluster_instance_name},
+            }},
+        };
+
+    json response;
+    if (!send_agent_request_json(control_addr, request, &response, error_out)) {
+        return false;
+    }
+    if (agent_response_to_error(response, error_out)) {
+        return false;
+    }
+
+    const auto variant_it = response.find("ManagedModel");
+    if (variant_it == response.end() || !variant_it->is_object()) {
+        if (error_out != nullptr) {
+            *error_out = "unexpected agent response variant for ManagedModel";
+        }
+        return false;
+    }
+    const auto model_it = variant_it->find("model");
+    if (model_it == variant_it->end() || model_it->is_null()) {
+        if (error_out != nullptr && error_out->empty()) {
+            *error_out = "managed model metadata is not available";
+        }
+        return false;
+    }
+    if (!model_it->is_object()) {
+        if (error_out != nullptr) {
+            *error_out = "agent response 'ManagedModel' is missing object field 'model'";
+        }
+        return false;
+    }
+    const json & model = *model_it;
+
+    if (diarization_model_path_out != nullptr) {
+        const auto it = model.find("diarization_model_path");
+        if (it != model.end() && it->is_string()) {
+            *diarization_model_path_out = it->get<std::string>();
+        }
+    }
+    if (error_out != nullptr) {
+        error_out->clear();
+    }
+    return true;
+}
+
+static int32_t run_cluster_instance_chat(
+    llama_server_bridge * bridge,
+    const llama_server_bridge_chat_request * req,
+    llama_server_bridge_vlm_result * out) {
+
+    std::string msg;
+    const int64_t instance_id = resolve_named_cluster_instance_id(bridge, &msg);
+    if (instance_id <= 0) {
+        set_bridge_error(bridge, msg);
+        out->error_json = copy_to_c_string(msg);
+        return -1;
+    }
+
+    if (bridge_routes_cluster_via_agent(bridge)) {
+        json response;
+        const json request = {
+            {"ChatComplete", {
+                {"request", {
+                    {"instance_id", instance_id},
+                    {"prompt", req->prompt != nullptr ? req->prompt : ""},
+                    {"n_predict", req->n_predict},
+                    {"temperature", req->temperature},
+                    {"top_p", req->top_p},
+                    {"top_k", req->top_k},
+                    {"min_p", req->min_p},
+                    {"repeat_last_n", req->repeat_last_n},
+                    {"repeat_penalty", req->repeat_penalty},
+                    {"reasoning", req->reasoning != nullptr ? json(req->reasoning) : json(nullptr)},
+                    {"reasoning_budget", req->reasoning_budget},
+                    {"reasoning_format", req->reasoning_format != nullptr ? json(req->reasoning_format) : json(nullptr)},
+                }},
+            }},
+        };
+        if (!send_agent_request_json(bridge->cluster_owner_control_addr, request, &response, &msg)
+            || agent_response_to_error(response, &msg)) {
+            set_bridge_error(bridge, msg);
+            out->error_json = copy_to_c_string(msg);
+            return -1;
+        }
+        const json * result = agent_response_variant_payload(
+            response,
+            "ChatResult",
+            "result",
+            &msg);
+        if (result == nullptr) {
+            const std::string error_msg = msg.empty() ? "unexpected agent chat response" : msg;
+            set_bridge_error(bridge, error_msg);
+            out->error_json = copy_to_c_string(error_msg);
+            return -1;
+        }
+        out->ok = 1;
+        out->text = copy_to_c_string(result->value("text", ""));
+        const json metrics = result->value("metrics", json::object());
+        out->n_prompt_tokens = metrics.value("prompt_tokens", 0);
+        out->n_decoded = metrics.value("decoded_tokens", 0);
+        out->prompt_ms = metrics.value("prompt_ms", 0.0);
+        out->predicted_ms = metrics.value("predicted_ms", 0.0);
+        set_bridge_error(bridge, "");
+        return out->text != nullptr ? 0 : -1;
+    }
+
+    llama_server_cluster_chat_request cluster_req = llama_server_cluster_default_chat_request();
+    cluster_req.instance_id = instance_id;
+    cluster_req.prompt = req->prompt;
+    cluster_req.n_predict = req->n_predict;
+    cluster_req.temperature = req->temperature;
+    cluster_req.top_p = req->top_p;
+    cluster_req.top_k = req->top_k;
+    cluster_req.min_p = req->min_p;
+    cluster_req.repeat_last_n = req->repeat_last_n;
+    cluster_req.repeat_penalty = req->repeat_penalty;
+    cluster_req.reasoning = req->reasoning;
+    cluster_req.reasoning_budget = req->reasoning_budget;
+    cluster_req.reasoning_format = req->reasoning_format;
+
+    llama_server_cluster_chat_result cluster_out = llama_server_cluster_empty_chat_result();
+    const int32_t rc = llama_server_cluster_chat_complete(
+        bridge->shared_cluster,
+        &cluster_req,
+        &cluster_out);
+    if (rc != 0 || cluster_out.ok == 0) {
+        const std::string msg =
+            cluster_out.error != nullptr && cluster_out.error[0] != '\0'
+                ? cluster_out.error
+                : (llama_server_cluster_last_error(bridge->shared_cluster) != nullptr
+                    ? llama_server_cluster_last_error(bridge->shared_cluster)
+                    : "cluster chat failed");
+        set_bridge_error(bridge, msg);
+        out->error_json = copy_to_c_string(msg);
+        llama_server_cluster_chat_result_free(&cluster_out);
+        return -1;
+    }
+
+    out->ok = 1;
+    out->text = copy_to_c_string(cluster_out.text != nullptr ? cluster_out.text : "");
+    out->n_prompt_tokens = cluster_out.metrics.prompt_tokens;
+    out->n_decoded = cluster_out.metrics.decoded_tokens;
+    out->prompt_ms = cluster_out.metrics.prompt_ms;
+    out->predicted_ms = cluster_out.metrics.predicted_ms;
+    llama_server_cluster_chat_result_free(&cluster_out);
+    if (out->text == nullptr) {
+        const std::string msg = "failed to allocate output text";
+        set_bridge_error(bridge, msg);
+        out->ok = 0;
+        out->error_json = copy_to_c_string(msg);
+        return -1;
+    }
+
+    set_bridge_error(bridge, "");
+    return 0;
+}
+
+static int32_t run_cluster_instance_vlm(
+    llama_server_bridge * bridge,
+    const llama_server_bridge_vlm_request * req,
+    llama_server_bridge_vlm_result * out) {
+
+    std::string msg;
+    const int64_t instance_id = resolve_named_cluster_instance_id(bridge, &msg);
+    if (instance_id <= 0) {
+        set_bridge_error(bridge, msg);
+        out->error_json = copy_to_c_string(msg);
+        return -1;
+    }
+
+    if (bridge_routes_cluster_via_agent(bridge)) {
+        json response;
+        const std::vector<uint8_t> image_bytes(
+            req->image_bytes,
+            req->image_bytes + req->image_bytes_len);
+        const json request = {
+            {"VlmComplete", {
+                {"request", {
+                    {"instance_id", instance_id},
+                    {"prompt", req->prompt != nullptr ? req->prompt : ""},
+                    {"image_bytes", image_bytes},
+                    {"n_predict", req->n_predict},
+                    {"temperature", req->temperature},
+                    {"top_p", req->top_p},
+                    {"top_k", req->top_k},
+                    {"min_p", req->min_p},
+                    {"repeat_last_n", req->repeat_last_n},
+                    {"repeat_penalty", req->repeat_penalty},
+                    {"reasoning", req->reasoning != nullptr ? json(req->reasoning) : json(nullptr)},
+                    {"reasoning_budget", req->reasoning_budget},
+                    {"reasoning_format", req->reasoning_format != nullptr ? json(req->reasoning_format) : json(nullptr)},
+                }},
+            }},
+        };
+        if (!send_agent_request_json(bridge->cluster_owner_control_addr, request, &response, &msg)
+            || agent_response_to_error(response, &msg)) {
+            set_bridge_error(bridge, msg);
+            out->error_json = copy_to_c_string(msg);
+            return -1;
+        }
+        const json * result = agent_response_variant_payload(
+            response,
+            "VlmResult",
+            "result",
+            &msg);
+        if (result == nullptr) {
+            const std::string error_msg = msg.empty() ? "unexpected agent VLM response" : msg;
+            set_bridge_error(bridge, error_msg);
+            out->error_json = copy_to_c_string(error_msg);
+            return -1;
+        }
+        out->ok = 1;
+        out->text = copy_to_c_string(result->value("text", ""));
+        const json metrics = result->value("metrics", json::object());
+        out->n_prompt_tokens = metrics.value("prompt_tokens", 0);
+        out->n_decoded = metrics.value("decoded_tokens", 0);
+        out->prompt_ms = metrics.value("prompt_ms", 0.0);
+        out->predicted_ms = metrics.value("predicted_ms", 0.0);
+        set_bridge_error(bridge, "");
+        return out->text != nullptr ? 0 : -1;
+    }
+
+    llama_server_cluster_vlm_request cluster_req = llama_server_cluster_default_vlm_request();
+    cluster_req.instance_id = instance_id;
+    cluster_req.prompt = req->prompt;
+    cluster_req.image_bytes = req->image_bytes;
+    cluster_req.image_bytes_len = req->image_bytes_len;
+    cluster_req.n_predict = req->n_predict;
+    cluster_req.temperature = req->temperature;
+    cluster_req.top_p = req->top_p;
+    cluster_req.top_k = req->top_k;
+    cluster_req.min_p = req->min_p;
+    cluster_req.repeat_last_n = req->repeat_last_n;
+    cluster_req.repeat_penalty = req->repeat_penalty;
+    cluster_req.reasoning = req->reasoning;
+    cluster_req.reasoning_budget = req->reasoning_budget;
+    cluster_req.reasoning_format = req->reasoning_format;
+
+    llama_server_cluster_vlm_result cluster_out = llama_server_cluster_empty_vlm_result();
+    const int32_t rc = llama_server_cluster_vlm_complete(
+        bridge->shared_cluster,
+        &cluster_req,
+        &cluster_out);
+    if (rc != 0 || cluster_out.ok == 0) {
+        const std::string error_msg =
+            cluster_out.error != nullptr && cluster_out.error[0] != '\0'
+                ? cluster_out.error
+                : (llama_server_cluster_last_error(bridge->shared_cluster) != nullptr
+                    ? llama_server_cluster_last_error(bridge->shared_cluster)
+                    : "cluster vlm failed");
+        set_bridge_error(bridge, error_msg);
+        out->error_json = copy_to_c_string(error_msg);
+        llama_server_cluster_vlm_result_free(&cluster_out);
+        return -1;
+    }
+
+    out->ok = 1;
+    out->text = copy_to_c_string(cluster_out.text != nullptr ? cluster_out.text : "");
+    out->n_prompt_tokens = cluster_out.metrics.prompt_tokens;
+    out->n_decoded = cluster_out.metrics.decoded_tokens;
+    out->prompt_ms = cluster_out.metrics.prompt_ms;
+    out->predicted_ms = cluster_out.metrics.predicted_ms;
+    llama_server_cluster_vlm_result_free(&cluster_out);
+    if (out->text == nullptr) {
+        const std::string error_msg = "failed to allocate output text";
+        set_bridge_error(bridge, error_msg);
+        out->ok = 0;
+        out->error_json = copy_to_c_string(error_msg);
+        return -1;
+    }
+
+    set_bridge_error(bridge, "");
+    return 0;
+}
+
+static int32_t run_cluster_instance_embeddings(
+    llama_server_bridge * bridge,
+    const llama_server_bridge_embeddings_request * req,
+    llama_server_bridge_json_result * out) {
+
+    std::string msg;
+    const int64_t instance_id = resolve_named_cluster_instance_id(bridge, &msg);
+    if (instance_id <= 0) {
+        set_bridge_error(bridge, msg);
+        out->error_json = copy_to_c_string(msg);
+        return -1;
+    }
+
+    if (bridge_routes_cluster_via_agent(bridge)) {
+        json response;
+        const json request = {
+            {"Embeddings", {
+                {"request", {
+                    {"instance_id", instance_id},
+                    {"body_json", req->body_json != nullptr ? req->body_json : ""},
+                    {"oai_compat", req->oai_compat != 0},
+                }},
+            }},
+        };
+        if (!send_agent_request_json(bridge->cluster_owner_control_addr, request, &response, &msg)
+            || agent_response_to_error(response, &msg)) {
+            set_bridge_error(bridge, msg);
+            out->error_json = copy_to_c_string(msg);
+            return -1;
+        }
+        const json * result = agent_response_variant_payload(
+            response,
+            "JsonResult",
+            "result",
+            &msg);
+        if (result == nullptr) {
+            const std::string error_msg = msg.empty() ? "unexpected agent embeddings response" : msg;
+            set_bridge_error(bridge, error_msg);
+            out->error_json = copy_to_c_string(error_msg);
+            return -1;
+        }
+        out->ok = 1;
+        out->status = result->value("status", 0);
+        out->json = copy_to_c_string(result->value("json", ""));
+        set_bridge_error(bridge, "");
+        return out->json != nullptr ? 0 : -1;
+    }
+
+    llama_server_cluster_embeddings_request cluster_req = llama_server_cluster_default_embeddings_request();
+    cluster_req.instance_id = instance_id;
+    cluster_req.body_json = req->body_json;
+    cluster_req.oai_compat = req->oai_compat;
+
+    llama_server_cluster_json_result cluster_out = llama_server_cluster_empty_json_result();
+    const int32_t rc = llama_server_cluster_embeddings(
+        bridge->shared_cluster,
+        &cluster_req,
+        &cluster_out);
+    if (rc != 0 || cluster_out.ok == 0) {
+        const std::string error_msg =
+            cluster_out.error != nullptr && cluster_out.error[0] != '\0'
+                ? cluster_out.error
+                : (llama_server_cluster_last_error(bridge->shared_cluster) != nullptr
+                    ? llama_server_cluster_last_error(bridge->shared_cluster)
+                    : "cluster embeddings failed");
+        set_bridge_error(bridge, error_msg);
+        out->error_json = copy_to_c_string(error_msg);
+        llama_server_cluster_json_result_free(&cluster_out);
+        return -1;
+    }
+
+    out->ok = 1;
+    out->status = cluster_out.status;
+    out->json = copy_to_c_string(cluster_out.json != nullptr ? cluster_out.json : "");
+    llama_server_cluster_json_result_free(&cluster_out);
+    if (out->json == nullptr) {
+        const std::string error_msg = "failed to allocate output json";
+        set_bridge_error(bridge, error_msg);
+        out->ok = 0;
+        out->error_json = copy_to_c_string(error_msg);
+        return -1;
+    }
+
+    set_bridge_error(bridge, "");
+    return 0;
+}
+
+static int32_t run_cluster_instance_rerank(
+    llama_server_bridge * bridge,
+    const llama_server_bridge_rerank_request * req,
+    llama_server_bridge_json_result * out) {
+
+    std::string msg;
+    const int64_t instance_id = resolve_named_cluster_instance_id(bridge, &msg);
+    if (instance_id <= 0) {
+        set_bridge_error(bridge, msg);
+        out->error_json = copy_to_c_string(msg);
+        return -1;
+    }
+
+    if (bridge_routes_cluster_via_agent(bridge)) {
+        json response;
+        const json request = {
+            {"Rerank", {
+                {"request", {
+                    {"instance_id", instance_id},
+                    {"body_json", req->body_json != nullptr ? req->body_json : ""},
+                }},
+            }},
+        };
+        if (!send_agent_request_json(bridge->cluster_owner_control_addr, request, &response, &msg)
+            || agent_response_to_error(response, &msg)) {
+            set_bridge_error(bridge, msg);
+            out->error_json = copy_to_c_string(msg);
+            return -1;
+        }
+        const json * result = agent_response_variant_payload(
+            response,
+            "JsonResult",
+            "result",
+            &msg);
+        if (result == nullptr) {
+            const std::string error_msg = msg.empty() ? "unexpected agent rerank response" : msg;
+            set_bridge_error(bridge, error_msg);
+            out->error_json = copy_to_c_string(error_msg);
+            return -1;
+        }
+        out->ok = 1;
+        out->status = result->value("status", 0);
+        out->json = copy_to_c_string(result->value("json", ""));
+        set_bridge_error(bridge, "");
+        return out->json != nullptr ? 0 : -1;
+    }
+
+    llama_server_cluster_rerank_request cluster_req = llama_server_cluster_default_rerank_request();
+    cluster_req.instance_id = instance_id;
+    cluster_req.body_json = req->body_json;
+
+    llama_server_cluster_json_result cluster_out = llama_server_cluster_empty_json_result();
+    const int32_t rc = llama_server_cluster_rerank(
+        bridge->shared_cluster,
+        &cluster_req,
+        &cluster_out);
+    if (rc != 0 || cluster_out.ok == 0) {
+        const std::string error_msg =
+            cluster_out.error != nullptr && cluster_out.error[0] != '\0'
+                ? cluster_out.error
+                : (llama_server_cluster_last_error(bridge->shared_cluster) != nullptr
+                    ? llama_server_cluster_last_error(bridge->shared_cluster)
+                    : "cluster rerank failed");
+        set_bridge_error(bridge, error_msg);
+        out->error_json = copy_to_c_string(error_msg);
+        llama_server_cluster_json_result_free(&cluster_out);
+        return -1;
+    }
+
+    out->ok = 1;
+    out->status = cluster_out.status;
+    out->json = copy_to_c_string(cluster_out.json != nullptr ? cluster_out.json : "");
+    llama_server_cluster_json_result_free(&cluster_out);
+    if (out->json == nullptr) {
+        const std::string error_msg = "failed to allocate output json";
+        set_bridge_error(bridge, error_msg);
+        out->ok = 0;
+        out->error_json = copy_to_c_string(error_msg);
+        return -1;
+    }
+
+    set_bridge_error(bridge, "");
+    return 0;
+}
+
+static int32_t run_cluster_instance_audio_raw(
+    llama_server_bridge * bridge,
+    const std::vector<uint8_t> & audio,
+    const std::string & format,
+    const std::string & metadata_json,
+    int32_t ffmpeg_convert,
+    llama_server_bridge_json_result * out) {
+
+    std::string msg;
+    const int64_t instance_id = resolve_named_cluster_instance_id(bridge, &msg);
+    if (instance_id <= 0) {
+        set_bridge_error(bridge, msg);
+        out->error_json = copy_to_c_string(msg);
+        return -1;
+    }
+
+    bool enable_diarization = false;
+    std::string diarization_model_path;
+    extract_audio_cluster_diarization_request(
+        metadata_json,
+        enable_diarization,
+        diarization_model_path);
+    if (enable_diarization
+        && diarization_model_path.empty()
+        && bridge_routes_cluster_via_agent(bridge)) {
+        std::string resolve_error;
+        std::string owner_diarization_model_path;
+        if (resolve_owner_managed_audio_companion_paths(
+                bridge,
+                &owner_diarization_model_path,
+                &resolve_error)
+            && !owner_diarization_model_path.empty()) {
+            diarization_model_path = owner_diarization_model_path;
+        }
+    }
+
+    if (bridge_routes_cluster_via_agent(bridge)) {
+        json response;
+        const json request = {
+            {"AudioTranscriptionsRaw", {
+                {"request", {
+                    {"instance_id", instance_id},
+                    {"audio_bytes", audio},
+                    {"audio_format", format},
+                    {"metadata_json", metadata_json.empty() ? json(nullptr) : json(metadata_json)},
+                    {"ffmpeg_convert", ffmpeg_convert != 0},
+                    {"enable_diarization", enable_diarization},
+                    {"diarization_model_path", diarization_model_path.empty() ? json(nullptr) : json(diarization_model_path)},
+                }},
+            }},
+        };
+        if (!send_agent_request_json(bridge->cluster_owner_control_addr, request, &response, &msg)
+            || agent_response_to_error(response, &msg)) {
+            set_bridge_error(bridge, msg);
+            out->error_json = copy_to_c_string(msg);
+            return -1;
+        }
+        const json * result = agent_response_variant_payload(
+            response,
+            "JsonResult",
+            "result",
+            &msg);
+        if (result == nullptr) {
+            const std::string error_msg = msg.empty() ? "unexpected agent audio response" : msg;
+            set_bridge_error(bridge, error_msg);
+            out->error_json = copy_to_c_string(error_msg);
+            return -1;
+        }
+        out->ok = 1;
+        out->status = result->value("status", 0);
+        out->json = copy_to_c_string(result->value("json", ""));
+        set_bridge_error(bridge, "");
+        return out->json != nullptr ? 0 : -1;
+    }
+
+    llama_server_cluster_audio_raw_request cluster_req = llama_server_cluster_default_audio_raw_request();
+    cluster_req.instance_id = instance_id;
+    cluster_req.audio_bytes = audio.data();
+    cluster_req.audio_bytes_len = audio.size();
+    cluster_req.audio_format = format.c_str();
+    cluster_req.metadata_json = metadata_json.empty() ? nullptr : metadata_json.c_str();
+    cluster_req.ffmpeg_convert = ffmpeg_convert;
+    cluster_req.enable_diarization = enable_diarization ? 1 : 0;
+    cluster_req.diarization_model_path =
+        diarization_model_path.empty() ? nullptr : diarization_model_path.c_str();
+
+    llama_server_cluster_json_result cluster_out = llama_server_cluster_empty_json_result();
+    const int32_t rc = llama_server_cluster_audio_transcriptions_raw(
+        bridge->shared_cluster,
+        &cluster_req,
+        &cluster_out);
+    if (rc != 0 || cluster_out.ok == 0) {
+        const std::string error_msg =
+            cluster_out.error != nullptr && cluster_out.error[0] != '\0'
+                ? cluster_out.error
+                : (llama_server_cluster_last_error(bridge->shared_cluster) != nullptr
+                    ? llama_server_cluster_last_error(bridge->shared_cluster)
+                    : "cluster audio transcription failed");
+        set_bridge_error(bridge, error_msg);
+        out->error_json = copy_to_c_string(error_msg);
+        llama_server_cluster_json_result_free(&cluster_out);
+        return -1;
+    }
+
+    out->ok = 1;
+    out->status = cluster_out.status;
+    out->json = copy_to_c_string(cluster_out.json != nullptr ? cluster_out.json : "");
+    llama_server_cluster_json_result_free(&cluster_out);
+    if (out->json == nullptr) {
+        const std::string error_msg = "failed to allocate output json";
+        set_bridge_error(bridge, error_msg);
+        out->ok = 0;
+        out->error_json = copy_to_c_string(error_msg);
+        return -1;
+    }
+
+    set_bridge_error(bridge, "");
+    return 0;
+}
+
 int32_t llama_server_bridge_chat_complete(
     struct llama_server_bridge * bridge,
     const struct llama_server_bridge_chat_request * req,
@@ -4335,6 +6581,16 @@ int32_t llama_server_bridge_chat_complete(
     }
 
     *out = llama_server_bridge_empty_vlm_result();
+
+    if (!bridge->cluster_instance_name.empty()) {
+        if (req->prompt == nullptr || req->prompt[0] == '\0') {
+            const std::string msg = "prompt is empty";
+            set_bridge_error(bridge, msg);
+            out->error_json = copy_to_c_string(msg);
+            return -1;
+        }
+        return run_cluster_instance_chat(bridge, req, out);
+    }
 
     if (bridge->routes == nullptr) {
         const std::string msg = "server routes are not initialized";
@@ -4401,115 +6657,26 @@ int32_t llama_server_bridge_chat_complete(
         }
 
         apply_bridge_reasoning_options(req, body);
-
-        std::vector<raw_buffer> ignored_files;
-        json llama_params = oaicompat_chat_params_parse(body, meta.chat_params, ignored_files);
-
-        llama_context * lctx = bridge->ctx.get_llama_context();
-        if (lctx == nullptr) {
-            const std::string msg = "llama context is not available";
-            set_bridge_error(bridge, msg);
-            out->error_json = copy_to_c_string(msg);
-            return -1;
-        }
-        const llama_model * model = llama_get_model(lctx);
-        const llama_vocab * vocab = model != nullptr ? llama_model_get_vocab(model) : nullptr;
-        if (vocab == nullptr) {
-            const std::string msg = "failed to access llama vocab";
-            set_bridge_error(bridge, msg);
-            out->error_json = copy_to_c_string(msg);
-            return -1;
-        }
-
-        const std::string cli_prompt = json_value(llama_params, "prompt", std::string());
-        if (cli_prompt.empty()) {
-            const std::string msg = "chat template produced empty prompt";
-            set_bridge_error(bridge, msg);
-            out->error_json = copy_to_c_string(msg);
-            return -1;
-        }
-
-        server_response_reader rd = bridge->ctx.get_response_reader();
-
-        server_task task(SERVER_TASK_TYPE_COMPLETION);
-        task.id = rd.get_new_id();
-        task.index = 0;
-        task.params = server_task::params_from_json_cmpl(
-            vocab,
-            bridge->params,
-            meta.slot_n_ctx,
-            llama_params);
-        task.id_slot = json_value(llama_params, "id_slot", -1);
-
-        task.params.res_type = TASK_RESPONSE_TYPE_OAI_CHAT;
-        task.params.oaicompat_cmpl_id = gen_chatcmplid();
-        task.params.oaicompat_model = meta.model_name;
-
-        task.cli = true;
-        task.cli_prompt = cli_prompt;
-
-        rd.post_task(std::move(task));
-
-        const std::function<bool()> should_stop = []() -> bool { return false; };
-        server_task_result_ptr result = rd.next(should_stop);
-        server_task_result_cmpl_final * final_result = nullptr;
-        while (result != nullptr) {
-            if (result->is_error()) {
-                const std::string err = safe_json_to_str(result->to_json());
-                set_bridge_error(bridge, normalize_error(err));
-                out->error_json = copy_to_c_string(err);
-                return -1;
-            }
-            if (auto * r_final = dynamic_cast<server_task_result_cmpl_final *>(result.get())) {
-                final_result = r_final;
-                break;
-            }
-            result = rd.next(should_stop);
-        }
-
-        if (final_result == nullptr) {
-            const std::string msg = "no final completion result received";
-            set_bridge_error(bridge, msg);
-            out->error_json = copy_to_c_string(msg);
-            return -1;
-        }
-
-        std::string text = final_result->oaicompat_msg.content;
-        if (text.empty()) {
-            text = final_result->content;
-        }
-        if (text.empty()) {
-            const json response_json = final_result->to_json();
-            text = extract_markdown_from_oai_chat(response_json);
-        }
-        if (text.empty()) {
-            const std::string err = "chat response missing content";
-            set_bridge_error(bridge, err);
+        llama_server_bridge_json_result route_out = llama_server_bridge_empty_json_result();
+        const std::string body_json = body.dump();
+        const int32_t rc = run_json_route(
+            bridge,
+            bridge->routes->post_chat_completions,
+            "/v1/chat/completions",
+            body_json,
+            &route_out);
+        if (rc != 0 || route_out.ok == 0) {
+            const std::string err = route_out.error_json != nullptr
+                ? route_out.error_json
+                : "chat route failed";
             out->error_json = copy_to_c_string(err);
+            llama_server_bridge_json_result_free(&route_out);
             return -1;
         }
 
-        out->ok = 1;
-        out->truncated = final_result->truncated ? 1 : 0;
-        out->stop = static_cast<int32_t>(final_result->stop);
-        out->n_decoded = final_result->n_decoded;
-        out->n_prompt_tokens = final_result->n_prompt_tokens;
-        out->n_tokens_cached = final_result->n_tokens_cached;
-        out->eos_reached = final_result->stop == STOP_TYPE_EOS ? 1 : 0;
-        out->prompt_ms = final_result->timings.prompt_ms;
-        out->predicted_ms = final_result->timings.predicted_ms;
-
-        out->text = copy_to_c_string(text);
-        if (out->text == nullptr) {
-            const std::string msg = "failed to allocate output text";
-            set_bridge_error(bridge, msg);
-            out->ok = 0;
-            out->error_json = copy_to_c_string(msg);
-            return -1;
-        }
-
-        set_bridge_error(bridge, "");
-        return 0;
+        json response = json::parse(route_out.json != nullptr ? route_out.json : "{}");
+        llama_server_bridge_json_result_free(&route_out);
+        return fill_chat_result_from_oai_response(bridge, response, out);
     } catch (const std::exception & e) {
         const std::string msg = normalize_error(e.what());
         set_bridge_error(bridge, msg);
@@ -4533,13 +6700,6 @@ int32_t llama_server_bridge_vlm_complete(
     }
 
     *out = llama_server_bridge_empty_vlm_result();
-
-    if (bridge->routes == nullptr) {
-        const std::string msg = "server routes are not initialized";
-        set_bridge_error(bridge, msg);
-        out->error_json = copy_to_c_string(msg);
-        return -1;
-    }
     if (req->prompt == nullptr || req->prompt[0] == '\0') {
         const std::string msg = "prompt is empty";
         set_bridge_error(bridge, msg);
@@ -4552,9 +6712,19 @@ int32_t llama_server_bridge_vlm_complete(
         out->error_json = copy_to_c_string(msg);
         return -1;
     }
+    if (!bridge->cluster_instance_name.empty()) {
+        return run_cluster_instance_vlm(bridge, req, out);
+    }
+    if (bridge->routes == nullptr) {
+        const std::string msg = "server routes are not initialized";
+        set_bridge_error(bridge, msg);
+        out->error_json = copy_to_c_string(msg);
+        return -1;
+    }
 
     try {
         const auto meta = bridge->ctx.get_meta();
+        const std::string image_url = build_image_data_url(req->image_bytes, req->image_bytes_len);
 
         json body = {
             {"model", meta.model_name},
@@ -4571,8 +6741,10 @@ int32_t llama_server_bridge_vlm_complete(
                             {"text", req->prompt}
                         },
                         json{
-                            {"type", "text"},
-                            {"text", mtmd_default_marker()}
+                            {"type", "image_url"},
+                            {"image_url", json{
+                                {"url", image_url}
+                            }}
                         }
                     })}
                 }
@@ -4614,118 +6786,26 @@ int32_t llama_server_bridge_vlm_complete(
         }
 
         apply_bridge_reasoning_options(req, body);
-
-        std::vector<raw_buffer> ignored_files;
-        json llama_params = oaicompat_chat_params_parse(body, meta.chat_params, ignored_files);
-
-        llama_context * lctx = bridge->ctx.get_llama_context();
-        if (lctx == nullptr) {
-            const std::string msg = "llama context is not available";
-            set_bridge_error(bridge, msg);
-            out->error_json = copy_to_c_string(msg);
-            return -1;
-        }
-        const llama_model * model = llama_get_model(lctx);
-        const llama_vocab * vocab = model != nullptr ? llama_model_get_vocab(model) : nullptr;
-        if (vocab == nullptr) {
-            const std::string msg = "failed to access llama vocab";
-            set_bridge_error(bridge, msg);
-            out->error_json = copy_to_c_string(msg);
-            return -1;
-        }
-
-        const std::string cli_prompt = json_value(llama_params, "prompt", std::string());
-        if (cli_prompt.empty()) {
-            const std::string msg = "chat template produced empty prompt";
-            set_bridge_error(bridge, msg);
-            out->error_json = copy_to_c_string(msg);
-            return -1;
-        }
-
-        raw_buffer image_file(req->image_bytes, req->image_bytes + req->image_bytes_len);
-
-        server_response_reader rd = bridge->ctx.get_response_reader();
-
-        server_task task(SERVER_TASK_TYPE_COMPLETION);
-        task.id = rd.get_new_id();
-        task.index = 0;
-        task.params = server_task::params_from_json_cmpl(
-            vocab,
-            bridge->params,
-            meta.slot_n_ctx,
-            llama_params);
-        task.id_slot = json_value(llama_params, "id_slot", -1);
-
-        task.params.res_type = TASK_RESPONSE_TYPE_OAI_CHAT;
-        task.params.oaicompat_cmpl_id = gen_chatcmplid();
-        task.params.oaicompat_model = meta.model_name;
-
-        task.cli = true;
-        task.cli_prompt = cli_prompt;
-        task.cli_files.push_back(std::move(image_file));
-
-        rd.post_task(std::move(task));
-
-        const std::function<bool()> should_stop = []() -> bool { return false; };
-        server_task_result_ptr result = rd.next(should_stop);
-        server_task_result_cmpl_final * final_result = nullptr;
-        while (result != nullptr) {
-            if (result->is_error()) {
-                const std::string err = safe_json_to_str(result->to_json());
-                set_bridge_error(bridge, normalize_error(err));
-                out->error_json = copy_to_c_string(err);
-                return -1;
-            }
-            if (auto * r_final = dynamic_cast<server_task_result_cmpl_final *>(result.get())) {
-                final_result = r_final;
-                break;
-            }
-            result = rd.next(should_stop);
-        }
-
-        if (final_result == nullptr) {
-            const std::string msg = "no final completion result received";
-            set_bridge_error(bridge, msg);
-            out->error_json = copy_to_c_string(msg);
-            return -1;
-        }
-
-        std::string markdown = final_result->oaicompat_msg.content;
-        if (markdown.empty()) {
-            markdown = final_result->content;
-        }
-        if (markdown.empty()) {
-            const json response_json = final_result->to_json();
-            markdown = extract_markdown_from_oai_chat(response_json);
-        }
-        if (markdown.empty()) {
-            const std::string err = "chat response missing markdown content";
-            set_bridge_error(bridge, err);
+        llama_server_bridge_json_result route_out = llama_server_bridge_empty_json_result();
+        const std::string body_json = body.dump();
+        const int32_t rc = run_json_route(
+            bridge,
+            bridge->routes->post_chat_completions,
+            "/v1/chat/completions",
+            body_json,
+            &route_out);
+        if (rc != 0 || route_out.ok == 0) {
+            const std::string err = route_out.error_json != nullptr
+                ? route_out.error_json
+                : "vlm route failed";
             out->error_json = copy_to_c_string(err);
+            llama_server_bridge_json_result_free(&route_out);
             return -1;
         }
 
-        out->ok = 1;
-        out->truncated = final_result->truncated ? 1 : 0;
-        out->stop = static_cast<int32_t>(final_result->stop);
-        out->n_decoded = final_result->n_decoded;
-        out->n_prompt_tokens = final_result->n_prompt_tokens;
-        out->n_tokens_cached = final_result->n_tokens_cached;
-        out->eos_reached = final_result->stop == STOP_TYPE_EOS ? 1 : 0;
-        out->prompt_ms = final_result->timings.prompt_ms;
-        out->predicted_ms = final_result->timings.predicted_ms;
-
-        out->text = copy_to_c_string(markdown);
-        if (out->text == nullptr) {
-            const std::string msg = "failed to allocate output text";
-            set_bridge_error(bridge, msg);
-            out->ok = 0;
-            out->error_json = copy_to_c_string(msg);
-            return -1;
-        }
-
-        set_bridge_error(bridge, "");
-        return 0;
+        json response = json::parse(route_out.json != nullptr ? route_out.json : "{}");
+        llama_server_bridge_json_result_free(&route_out);
+        return fill_chat_result_from_oai_response(bridge, response, out);
     } catch (const std::exception & e) {
         const std::string msg = normalize_error(e.what());
         set_bridge_error(bridge, msg);

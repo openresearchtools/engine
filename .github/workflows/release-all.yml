@@ -106,7 +106,7 @@ jobs:
     uses: ./.github/workflows/ubuntu-x64.yml
     secrets: inherit
 
-  publish-release:
+  prepare-runtime-release-assets:
     if: ${{ always() && needs.resolve-release-meta.result == 'success' && needs.build-windows-vulkan.result == 'success' && needs.build-macos-metal.result == 'success' && needs.build-ubuntu-vulkan.result == 'success' && (needs.build-windows-cuda.result == 'success' || needs.build-windows-cuda.result == 'skipped') }}
     needs:
       - resolve-release-meta
@@ -117,20 +117,17 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RELEASE_TAG: ${{ needs.resolve-release-meta.outputs.tag }}
-      RELEASE_TITLE: ${{ needs.resolve-release-meta.outputs.title }}
-      RELEASE_PRERELEASE: ${{ inputs.prerelease }}
       INCLUDE_CUDA: ${{ inputs.include_cuda }}
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
     steps:
-      - name: Download Build Artifacts
+      - name: Download Runtime Build Artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: engine-*
           path: dist
           merge-multiple: false
 
-      - name: Validate Downloaded Artifacts
+      - name: Validate Downloaded Runtime Artifacts
         shell: bash
         run: |
           set -euo pipefail
@@ -150,7 +147,7 @@ jobs:
             fi
           done
 
-      - name: Collect Release Assets
+      - name: Collect Runtime Release Assets
         shell: bash
         run: |
           set -euo pipefail
@@ -169,7 +166,19 @@ jobs:
           (cd dist/engine-macos-arm64-metal && zip -r "../../release-assets/${macos_metal_asset}" .)
           tar -C dist/engine-ubuntu-x64-vulkan -czf "release-assets/${ubuntu_vulkan_asset}" .
 
-          sha256sum release-assets/* > release-assets/SHA256SUMS.txt
+      - name: Verify Runtime Zip Methods
+        shell: bash
+        run: |
+          set -euo pipefail
+          zip_paths=()
+          while IFS= read -r -d '' zip_file; do
+            zip_paths+=("$zip_file")
+          done < <(find release-assets -maxdepth 1 -type f -name '*.zip' -print0)
+          if [[ ${#zip_paths[@]} -eq 0 ]]; then
+            echo "No runtime zip assets found to verify."
+            exit 0
+          fi
+          python3 build/verify_runtime_zip_methods.py "${zip_paths[@]}"
 
       - name: Generate Runtime Manifest
         shell: bash
@@ -182,6 +191,7 @@ jobs:
           ubuntu_vulkan_asset="${release_prefix}-ubuntu-x64-vulkan.tar.gz"
           win_cuda_asset="${release_prefix}-windows-x64-cuda.zip"
           generated_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          sha256sum release-assets/* > release-assets/.runtime-SHA256SUMS.txt
 
           RELEASE_TAG="$RELEASE_TAG" \
           GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
@@ -201,7 +211,7 @@ jobs:
           include_cuda = os.environ.get("INCLUDE_CUDA", "").lower() == "true"
           generated_at = os.environ["GENERATED_AT"]
           dist_dir = Path("release-assets")
-          sha_file = dist_dir / "SHA256SUMS.txt"
+          sha_file = dist_dir / ".runtime-SHA256SUMS.txt"
           sha = {}
           if sha_file.exists():
               for line in sha_file.read_text(encoding="utf-8").splitlines():
@@ -278,6 +288,133 @@ jobs:
           )
           PY
 
+      - name: Upload Runtime Release Assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-release-runtime-assets
+          path: release-assets
+          if-no-files-found: error
+
+  build-controller-windows:
+    if: ${{ always() && needs.prepare-runtime-release-assets.result == 'success' }}
+    needs:
+      - resolve-release-meta
+      - prepare-runtime-release-assets
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download Runtime Manifest Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: engine-release-runtime-assets
+          path: release-runtime-assets
+
+      - name: Inject Release Manifest Into Controller Build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path runtime-manifests | Out-Null
+          Copy-Item -Force release-runtime-assets\engine-manifest.json runtime-manifests\engine-manifest.json
+
+      - name: Package Standalone Controller (Windows)
+        shell: pwsh
+        run: |
+          .\build\package_cluster_controller_win.ps1 -BundleDir ..\ENGINEbuilds\gha-controller-win-x64-bundle -CargoTargetDir ..\ENGINEbuilds\gha-controller-win-x64-target
+
+      - name: Upload Controller Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-controller-win-x64
+          path: ../ENGINEbuilds/gha-controller-win-x64-bundle/Engine.exe
+          if-no-files-found: error
+
+  build-controller-macos:
+    if: ${{ always() && needs.prepare-runtime-release-assets.result == 'success' }}
+    needs:
+      - resolve-release-meta
+      - prepare-runtime-release-assets
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download Runtime Manifest Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: engine-release-runtime-assets
+          path: release-runtime-assets
+
+      - name: Inject Release Manifest Into Controller Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p runtime-manifests
+          cp release-runtime-assets/engine-manifest.json runtime-manifests/engine-manifest.json
+
+      - name: Package Standalone Controller (macOS)
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ./build/package_cluster_controller_macos.sh --bundle-dir ../ENGINEbuilds/gha-controller-macos-arm64-bundle --cargo-target-dir ../ENGINEbuilds/gha-controller-macos-arm64-target
+
+      - name: Upload Controller Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-controller-macos-arm64
+          path: ../ENGINEbuilds/gha-controller-macos-arm64-bundle/Engine.dmg
+          if-no-files-found: error
+
+  publish-release:
+    if: ${{ always() && needs.resolve-release-meta.result == 'success' && needs.prepare-runtime-release-assets.result == 'success' && needs.build-controller-windows.result == 'success' && needs.build-controller-macos.result == 'success' }}
+    needs:
+      - resolve-release-meta
+      - prepare-runtime-release-assets
+      - build-controller-windows
+      - build-controller-macos
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ needs.resolve-release-meta.outputs.tag }}
+      RELEASE_TITLE: ${{ needs.resolve-release-meta.outputs.title }}
+      RELEASE_PRERELEASE: ${{ inputs.prerelease }}
+      INCLUDE_CUDA: ${{ inputs.include_cuda }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download Runtime Release Assets
+        uses: actions/download-artifact@v4
+        with:
+          name: engine-release-runtime-assets
+          path: dist/runtime-assets
+
+      - name: Download Windows Controller Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: engine-controller-win-x64
+          path: dist/controller-win
+
+      - name: Download macOS Controller Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: engine-controller-macos-arm64
+          path: dist/controller-macos
+
+      - name: Collect Final Release Assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          cp dist/runtime-assets/* release-assets/
+          cp dist/controller-win/Engine.exe release-assets/
+          cp dist/controller-macos/Engine.dmg release-assets/
+          sha256sum release-assets/* > release-assets/SHA256SUMS.txt
+
       - name: Generate Release Notes
         shell: bash
         run: |
@@ -289,6 +426,8 @@ jobs:
           macos_metal_asset="${release_prefix}-macos-arm64-metal.zip"
           ubuntu_vulkan_asset="${release_prefix}-ubuntu-x64-vulkan.tar.gz"
           win_cuda_asset="${release_prefix}-windows-x64-cuda.zip"
+          controller_win_asset="Engine.exe"
+          controller_macos_asset="Engine.dmg"
           {
             echo "# ${RELEASE_TITLE}"
             echo
@@ -302,6 +441,8 @@ jobs:
             echo "| Windows x64 | Vulkan + CPU | \`${win_vulkan_asset}\` | [Download](${base_url}/${win_vulkan_asset}) |"
             echo "| macOS arm64 (Apple Silicon) | Metal (GPU) | \`${macos_metal_asset}\` | [Download](${base_url}/${macos_metal_asset}) |"
             echo "| Ubuntu x64 | Vulkan + CPU | \`${ubuntu_vulkan_asset}\` | [Download](${base_url}/${ubuntu_vulkan_asset}) |"
+            echo "| Windows x64 | Engine controller app | \`${controller_win_asset}\` | [Download](${base_url}/${controller_win_asset}) |"
+            echo "| macOS arm64 (Apple Silicon) | Engine controller app | \`${controller_macos_asset}\` | [Download](${base_url}/${controller_macos_asset}) |"
             echo "| Runtime manifest | Metadata JSON | \`engine-manifest.json\` | [Download](${base_url}/engine-manifest.json) |"
             echo "| Checksums | SHA256 | \`SHA256SUMS.txt\` | [Download](${base_url}/SHA256SUMS.txt) |"
             echo
@@ -313,6 +454,13 @@ jobs:
             fi
             echo "- macOS build supports Apple Silicon only (M1, M2, M3, M4 and newer Arm-based Macs) and is distributed as a Metal-focused GPU build that leverages unified memory."
             echo "- Vulkan builds are GPU vendor-agnostic and can be a better fallback across mixed hardware."
+            echo "- \`Engine.exe\` on Windows and \`Engine.dmg\` on macOS are the multi-node controller app builds."
+            echo "- The macOS controller download contains \`Engine.app\` inside the DMG."
+            echo "- Any connected node can act as initiator, runtime owner, or worker node."
+            echo "- Cluster participation is backend-agnostic across machines: Windows nodes can use Vulkan or CUDA, while macOS nodes use Metal."
+            echo "- Direct Thunderbolt / USB4 link-local connections are strongly preferred for large model transfer and multi-node traffic when available."
+            echo "- CPU device usage is optional, but clustered tensor-model placement on CPU is generally not recommended because it is dramatically slower than GPU-backed placement."
+            echo "- The standalone controller downloads Engine runtime assets during setup so the UI app can stay smaller."
           } > release-notes.md
 
       - name: Create or Update GitHub Release

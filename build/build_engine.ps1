@@ -9,13 +9,16 @@ param(
     [string]$BridgeLibDir = "",
     [string]$PdfiumDll = "",
     [string]$FfmpegBinDir = "",
+    [string]$WebRtcRoot = "",
     [string]$CudaBinDir = "",
     [bool]$StageCmakeRuntime = $true,
+    [bool]$StageAudioRuntime = $true,
     [bool]$StageFfmpegRuntime = $true,
     [bool]$StageCudaRuntime = $true,
     [bool]$StageRepoLicenseFiles = $true,
     [ValidateSet("default", "cuda", "vulkan")]
-    [string]$LicenseProfile = "default"
+    [string]$LicenseProfile = "default",
+    [int]$Jobs = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -216,6 +219,10 @@ function Stage-RepoLicenseFiles {
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $buildsRoot = Join-Path (Split-Path -Parent $repoRoot) "ENGINEbuilds"
 $targetProfile = if ($Profile -eq "Release") { "release" } else { "debug" }
+$logicalCpuCount = [Environment]::ProcessorCount
+if ($Jobs -le 0) {
+    $Jobs = $logicalCpuCount
+}
 
 if ([string]::IsNullOrWhiteSpace($CargoTargetDir)) {
     $CargoTargetDir = Join-Path $buildsRoot "cargo-target"
@@ -244,11 +251,19 @@ if ([string]::IsNullOrWhiteSpace($FfmpegBinDir)) {
 }
 $FfmpegBinDir = Resolve-AbsolutePath -PathValue $FfmpegBinDir -RepoRoot $repoRoot
 
+if ([string]::IsNullOrWhiteSpace($WebRtcRoot)) {
+    $WebRtcRoot = Join-Path $buildsRoot "runtime-deps\\webrtc-audio-processing"
+}
+$WebRtcRoot = Resolve-AbsolutePath -PathValue $WebRtcRoot -RepoRoot $repoRoot
+
 if (Test-IsUnderPath -PathValue $PdfiumDll -BasePath $repoRoot) {
     throw "PdfiumDll must be outside the repo. Use a path under ..\\ENGINEbuilds\\runtime-deps. Current: $PdfiumDll"
 }
 if (Test-IsUnderPath -PathValue $FfmpegBinDir -BasePath $repoRoot) {
     throw "FfmpegBinDir must be outside the repo. Use a path under ..\\ENGINEbuilds\\runtime-deps. Current: $FfmpegBinDir"
+}
+if (Test-IsUnderPath -PathValue $WebRtcRoot -BasePath $repoRoot) {
+    throw "WebRtcRoot must be outside the repo. Use a path under ..\\ENGINEbuilds\\runtime-deps. Current: $WebRtcRoot"
 }
 
 if (-not [string]::IsNullOrWhiteSpace($CudaBinDir)) {
@@ -307,6 +322,8 @@ $vendorRoot = Join-Path $OutDir "vendor"
 $pdfiumVendorDir = Join-Path $vendorRoot "pdfium"
 $ffmpegVendorDir = Join-Path $vendorRoot "ffmpeg"
 $ffmpegVendorBinDir = Join-Path $ffmpegVendorDir "bin"
+$miniaudioVendorDir = Join-Path $vendorRoot "miniaudio"
+$webrtcVendorDir = Join-Path $vendorRoot "webrtc-audio-processing"
 New-Item -ItemType Directory -Force -Path $vendorRoot | Out-Null
 
 $legacyLicenseDir = Join-Path $OutDir "licenses"
@@ -354,7 +371,8 @@ try {
     if ($Profile -eq "Release") {
         $cargoArgs += "--release"
     }
-    $cargoArgs += @("-p", "pdfvlm", "-p", "pdf", "-p", "engine")
+    $cargoArgs += @("--jobs", $Jobs)
+    $cargoArgs += @("-p", "pdfvlm", "-p", "pdf", "-p", "engine", "-p", "clusterui")
 
     $oldErrorActionPreference = $ErrorActionPreference
     try {
@@ -374,12 +392,15 @@ finally {
 }
 
 $profileDir = Join-Path $CargoTargetDir $targetProfile
-$engineExe = Join-Path $profileDir "engine.exe"
+$exampleCliExe = Join-Path $profileDir "example-cli.exe"
+$controllerExe = Join-Path $profileDir "Engine.exe"
 $pdfDll = Join-Path $profileDir "pdf.dll"
 $pdfvlmDll = Join-Path $profileDir "pdfvlm.dll"
-
-if (-not (Copy-IfExists -SourcePath $engineExe -DestPath (Join-Path $OutDir "engine.exe"))) {
-    throw "engine.exe not found at expected path: $engineExe"
+if (-not (Copy-IfExists -SourcePath $exampleCliExe -DestPath (Join-Path $OutDir "example-cli.exe"))) {
+    throw "example-cli.exe not found at expected path: $exampleCliExe"
+}
+if (-not (Copy-IfExists -SourcePath $controllerExe -DestPath (Join-Path $OutDir "Engine.exe"))) {
+    Write-Warning "Engine.exe not found at expected path: $controllerExe"
 }
 if (-not (Copy-IfExists -SourcePath $pdfDll -DestPath (Join-Path $OutDir "pdf.dll"))) {
     Write-Warning "pdf.dll not found at expected path: $pdfDll"
@@ -476,7 +497,9 @@ if ($StageFfmpegRuntime) {
 
 if ($StageCmakeRuntime -and -not [string]::IsNullOrWhiteSpace($BridgeBinDir) -and (Test-Path -LiteralPath $BridgeBinDir)) {
     $patterns = @(
+        "multi-node-server.dll",
         "llama-server-bridge.dll",
+        "llama-server-audio.dll",
         "llama.dll",
         "ggml*.dll",
         "mtmd.dll"
@@ -486,6 +509,34 @@ if ($StageCmakeRuntime -and -not [string]::IsNullOrWhiteSpace($BridgeBinDir) -an
         foreach ($item in $matches) {
             Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $OutDir $item.Name) -Force
         }
+    }
+}
+
+if ($StageAudioRuntime) {
+    New-Item -ItemType Directory -Force -Path $miniaudioVendorDir | Out-Null
+    $miniaudioLicense = Join-Path $repoRoot "third_party\\licenses\\miniaudio-LICENSE.txt"
+    if (-not (Test-Path -LiteralPath $miniaudioLicense)) {
+        throw "Required miniaudio license file is missing from repo: $miniaudioLicense"
+    }
+    Copy-Item -LiteralPath $miniaudioLicense -Destination (Join-Path $miniaudioVendorDir "miniaudio-LICENSE.txt") -Force
+
+    $webrtcSourceRoot = $WebRtcRoot
+    $sourceCandidate = Join-Path $WebRtcRoot "src"
+    if (Test-Path -LiteralPath $sourceCandidate) {
+        $webrtcSourceRoot = $sourceCandidate
+    }
+
+    New-Item -ItemType Directory -Force -Path $webrtcVendorDir | Out-Null
+    $webrtcLicense = Join-Path $repoRoot "third_party\\licenses\\webrtc-audio-processing-LICENSE.txt"
+    if (-not (Test-Path -LiteralPath $webrtcLicense)) {
+        throw "Required WebRTC AudioProcessing license file is missing from repo: $webrtcLicense"
+    }
+    Copy-Item -LiteralPath $webrtcLicense -Destination (Join-Path $webrtcVendorDir "webrtc-audio-processing-LICENSE.txt") -Force
+
+    if (Test-Path -LiteralPath $webrtcSourceRoot) {
+        $null = Copy-LicenseFiles -SourceRoot $webrtcSourceRoot -DestinationRoot $webrtcVendorDir -ComponentName "WebRTC AudioProcessing"
+    } else {
+        Write-Warning "WebRTC AudioProcessing source root not found at '$webrtcSourceRoot' (skipping runtime-sourced notice copy)"
     }
 }
 
@@ -529,6 +580,13 @@ if ($StageCudaRuntime) {
     } else {
         Write-Warning "CUDA runtime notice file not found at '$cudaNoticeSource' (skipping root CUDA notice staging)"
     }
+
+    $cudaEulaSource = Join-Path $repoRoot "third_party\\licenses\\nvidia-cuda-EULA.txt"
+    if (Test-Path -LiteralPath $cudaEulaSource) {
+        Copy-Item -LiteralPath $cudaEulaSource -Destination (Join-Path $OutDir "NVIDIA-CUDA-EULA.txt") -Force
+    } else {
+        Write-Warning "CUDA EULA file not found at '$cudaEulaSource' (skipping root CUDA EULA staging)"
+    }
 }
 
 Write-Host "Engine build and bundle staging completed."
@@ -536,3 +594,4 @@ Write-Host "Cargo target dir: $CargoTargetDir"
 Write-Host "Bundle dir: $OutDir"
 Write-Host "Bundle root license files: $(Join-Path $OutDir 'LICENSES.md'), $(Join-Path $OutDir 'Third-Party-Notices.md')"
 Write-Host "Bundle component license locations: $(Join-Path $OutDir 'vendor')"
+Write-Host "Parallel jobs: $Jobs"

@@ -4,6 +4,9 @@ use crate::audio_assembler::{
 };
 use crate::llama_bridge::{
     AudioSessionEventOwned, LLAMA_SERVER_BRIDGE_AUDIO_EVENT_DIARIZATION_SPAN_COMMIT,
+    LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_PREVIEW,
+    LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_SNAPSHOT_END,
+    LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_SNAPSHOT_START,
     LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT,
     LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_RESULT_JSON,
     LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_WORD_COMMIT,
@@ -22,7 +25,9 @@ pub struct OrchestratorSnapshot {
 pub struct DiarizedTranscriptOrchestrator {
     sample_rate_hz: u32,
     options: AssembleOptions,
-    spans: Vec<SpeakerSpan>,
+    final_spans: Vec<SpeakerSpan>,
+    preview_spans: Vec<SpeakerSpan>,
+    pending_preview_spans: Vec<SpeakerSpan>,
     pieces: Vec<TranscriptPiece>,
     words: Vec<TranscriptPiece>,
     turns: Vec<SpeakerTurn>,
@@ -35,7 +40,9 @@ impl DiarizedTranscriptOrchestrator {
         Self {
             sample_rate_hz,
             options: AssembleOptions::default(),
-            spans: Vec::new(),
+            final_spans: Vec::new(),
+            preview_spans: Vec::new(),
+            pending_preview_spans: Vec::new(),
             pieces: Vec::new(),
             words: Vec::new(),
             turns: Vec::new(),
@@ -61,14 +68,25 @@ impl DiarizedTranscriptOrchestrator {
                 } else {
                     "UNASSIGNED".to_string()
                 };
-                changed |= insert_unique_span(
-                    &mut self.spans,
-                    SpeakerSpan {
-                        speaker,
-                        start_sample: event.start_sample,
-                        end_sample: event.end_sample,
-                    },
-                );
+                let span = SpeakerSpan {
+                    speaker,
+                    start_sample: event.start_sample,
+                    end_sample: event.end_sample,
+                };
+                if (event.flags & LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_PREVIEW) != 0 {
+                    if (event.flags & LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_SNAPSHOT_START) != 0 {
+                        self.pending_preview_spans.clear();
+                    }
+                    insert_unique_span(&mut self.pending_preview_spans, span);
+                    if (event.flags & LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_SNAPSHOT_END) != 0
+                        && self.preview_spans != self.pending_preview_spans
+                    {
+                        self.preview_spans = self.pending_preview_spans.clone();
+                        changed = self.final_spans.is_empty();
+                    }
+                } else {
+                    changed |= insert_unique_span(&mut self.final_spans, span);
+                }
             }
             LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT => {
                 changed |= insert_unique_piece(
@@ -96,9 +114,13 @@ impl DiarizedTranscriptOrchestrator {
             _ => {}
         }
 
-        if changed && !self.spans.is_empty() && !self.pieces.is_empty() {
-            self.turns =
-                assemble_turns_with_words(&self.spans, &self.pieces, &self.words, &self.options);
+        if changed && !self.active_spans().is_empty() && !self.pieces.is_empty() {
+            self.turns = assemble_turns_with_words(
+                self.active_spans(),
+                &self.pieces,
+                &self.words,
+                &self.options,
+            );
             self.markdown = turns_to_markdown(&self.turns, self.sample_rate_hz);
         }
 
@@ -107,7 +129,7 @@ impl DiarizedTranscriptOrchestrator {
 
     pub fn snapshot(&self) -> OrchestratorSnapshot {
         OrchestratorSnapshot {
-            spans: self.spans.clone(),
+            spans: self.active_spans().to_vec(),
             pieces: self.pieces.clone(),
             words: self.words.clone(),
             turns: self.turns.clone(),
@@ -117,7 +139,7 @@ impl DiarizedTranscriptOrchestrator {
     }
 
     pub fn spans(&self) -> &[SpeakerSpan] {
-        &self.spans
+        self.active_spans()
     }
 
     pub fn pieces(&self) -> &[TranscriptPiece] {
@@ -134,6 +156,14 @@ impl DiarizedTranscriptOrchestrator {
 
     pub fn markdown(&self) -> &str {
         &self.markdown
+    }
+
+    fn active_spans(&self) -> &[SpeakerSpan] {
+        if !self.final_spans.is_empty() {
+            &self.final_spans
+        } else {
+            &self.preview_spans
+        }
     }
 }
 
@@ -168,6 +198,9 @@ mod tests {
     use super::*;
     use crate::llama_bridge::{
         LLAMA_SERVER_BRIDGE_AUDIO_EVENT_DIARIZATION_SPAN_COMMIT,
+        LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_PREVIEW,
+        LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_SNAPSHOT_END,
+        LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_SNAPSHOT_START,
         LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT,
         LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_RESULT_JSON,
         LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_WORD_COMMIT,
@@ -175,6 +208,7 @@ mod tests {
 
     fn ev(
         kind: i32,
+        flags: u32,
         start_sample: u64,
         end_sample: u64,
         speaker_id: i32,
@@ -183,7 +217,7 @@ mod tests {
         AudioSessionEventOwned {
             seq_no: 0,
             kind,
-            flags: 0,
+            flags,
             start_sample,
             end_sample,
             speaker_id,
@@ -199,12 +233,14 @@ mod tests {
         orch.ingest_event(&ev(
             LLAMA_SERVER_BRIDGE_AUDIO_EVENT_DIARIZATION_SPAN_COMMIT,
             0,
+            0,
             16000,
             1,
             "SPEAKER_01",
         ));
         orch.ingest_event(&ev(
             LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT,
+            0,
             0,
             16000,
             -1,
@@ -220,6 +256,7 @@ mod tests {
         assert!(orch.ingest_event(&ev(
             LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_WORD_COMMIT,
             0,
+            0,
             100,
             -1,
             "hello",
@@ -230,6 +267,7 @@ mod tests {
             LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_RESULT_JSON,
             0,
             0,
+            0,
             -1,
             "{\"mode\":\"timeline\"}",
         );
@@ -238,5 +276,78 @@ mod tests {
             orch.snapshot().latest_transcription_json.as_deref(),
             Some("{\"mode\":\"timeline\"}")
         );
+    }
+
+    #[test]
+    fn preview_snapshot_replaces_previous_spans() {
+        let mut orch = DiarizedTranscriptOrchestrator::new(16000);
+        orch.ingest_event(&ev(
+            LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT,
+            0,
+            0,
+            16000,
+            -1,
+            "Hello there",
+        ));
+        orch.ingest_event(&ev(
+            LLAMA_SERVER_BRIDGE_AUDIO_EVENT_DIARIZATION_SPAN_COMMIT,
+            LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_PREVIEW
+                | LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_SNAPSHOT_START
+                | LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_SNAPSHOT_END,
+            0,
+            16000,
+            1,
+            "SPEAKER_01",
+        ));
+        assert!(orch.markdown().contains("### SPEAKER_01"));
+
+        orch.ingest_event(&ev(
+            LLAMA_SERVER_BRIDGE_AUDIO_EVENT_DIARIZATION_SPAN_COMMIT,
+            LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_PREVIEW
+                | LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_SNAPSHOT_START
+                | LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_SNAPSHOT_END,
+            0,
+            16000,
+            2,
+            "SPEAKER_02",
+        ));
+        assert!(orch.markdown().contains("### SPEAKER_02"));
+        assert!(!orch.markdown().contains("### SPEAKER_01"));
+        assert_eq!(orch.snapshot().spans.len(), 1);
+    }
+
+    #[test]
+    fn final_spans_override_preview_spans() {
+        let mut orch = DiarizedTranscriptOrchestrator::new(16000);
+        orch.ingest_event(&ev(
+            LLAMA_SERVER_BRIDGE_AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT,
+            0,
+            0,
+            16000,
+            -1,
+            "Hello there",
+        ));
+        orch.ingest_event(&ev(
+            LLAMA_SERVER_BRIDGE_AUDIO_EVENT_DIARIZATION_SPAN_COMMIT,
+            LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_PREVIEW
+                | LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_SNAPSHOT_START
+                | LLAMA_SERVER_BRIDGE_AUDIO_EVENT_FLAG_SNAPSHOT_END,
+            0,
+            16000,
+            1,
+            "SPEAKER_01",
+        ));
+        orch.ingest_event(&ev(
+            LLAMA_SERVER_BRIDGE_AUDIO_EVENT_DIARIZATION_SPAN_COMMIT,
+            0,
+            0,
+            16000,
+            2,
+            "SPEAKER_02",
+        ));
+
+        assert!(orch.markdown().contains("### SPEAKER_02"));
+        assert!(!orch.markdown().contains("### SPEAKER_01"));
+        assert_eq!(orch.snapshot().spans[0].speaker, "SPEAKER_02");
     }
 }

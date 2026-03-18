@@ -105,7 +105,13 @@ The Voxtral converter is adapted from `voxtral-cpp/tools/convert_voxtral_to_gguf
 
 ## License bundle maintenance
 
-Regenerate the consolidated bundle license file after updating `third_party/README.md`, `third_party/licenses/rust-full/`, or the top-level license set:
+Refresh the checked-in Rust license snapshot first when the workspace Rust dependency graph changes, especially after `clusterui` UI/HTTP/tray dependency changes:
+
+```powershell
+.\build\refresh_rust_license_snapshot.ps1
+```
+
+Then regenerate the consolidated bundle license file after updating `third_party/README.md`, `third_party/licenses/rust-full/`, or the top-level license set:
 
 ```powershell
 .\build\generate_license_bundles.ps1
@@ -115,9 +121,19 @@ Regenerate the consolidated bundle license file after updating `third_party/READ
 
 ## One-command full backend flow (CUDA or Vulkan)
 
-This builds patched llama+bridge for the selected backend, fetches runtime deps, then builds/stages engine bundle.
-By default it does not build extra CLI binaries (only `engine.exe` is staged).
+This builds patched llama+bridge for the selected backend, fetches runtime deps, then builds/stages the ENGINE bundle.
+By default it stages the reference CLI as `example-cli.exe` and the controller app as `Engine.exe`.
 For `-Backend cuda`, CUDA runtime DLLs are staged into the bundle root by default.
+
+Controller app naming and role:
+
+- Windows controller app: `Engine.exe`
+- macOS controller app: `Engine.dmg` containing `Engine.app`
+- `Engine` is the multi-node controller/orchestration app for ENGINE runtimes.
+- Any connected node can act as initiator, runtime owner, or worker.
+- Mixed-backend clusters are supported at the product level: Windows nodes can run Vulkan or CUDA, and macOS nodes can run Metal in the same cluster.
+- Direct Thunderbolt / USB4 link-local connections are preferred for large model transfer and multi-node runtime traffic when available.
+- CPU device usage remains optional, but clustered tensor-model placement on CPU is discouraged because it is substantially slower than GPU-backed placement.
 
 ```powershell
 .\build\build_full_stack_cuda.ps1 `
@@ -182,19 +198,21 @@ Default outputs:
 
 ## Outputs in bundle
 
-- `engine.exe`
+- `example-cli.exe`
+- `Engine.exe`
 - `pdf.dll`
 - `pdfvlm.dll`
 - `vendor/pdfium/pdfium.dll` (if found)
 - `llama-server-bridge.dll` and related llama/ggml runtime DLLs (if found, kept in bundle root)
 - `cublas64_*.dll`, `cublasLt64_*.dll`, `cudart64_*.dll` (CUDA backend when CUDA runtime staging is enabled)
+- `NVIDIA-CUDA-EULA.txt` in bundle root (CUDA backend)
 - `NVIDIA-CUDA-RUNTIME-NOTICE.txt` in bundle root (CUDA backend)
 - `vendor/ffmpeg/bin/*.dll` runtime files required by bridge audio conversion (if enabled)
 - `vendor/pdfium/*` license/notice files copied from PDFium runtime source (with repo fallback files when needed)
 - `vendor/ffmpeg/*` license/notice files copied from FFmpeg runtime source (with repo fallback files when needed)
 - `LICENSE-ENGINE.txt` (project license)
 - `LICENSES.md` (single overinclusive bundle license file copied from `third_party/LICENSES.md`)
-- `Third-Party-Notices.md` (bundle-level notice/provenance file copied from `third_party/licenses/README.md`)
+- `Third-Party-Notices.md` (bundle-level notice/provenance file copied from `third_party/README.md`)
 
 ## GitHub Actions: Windows x64 (CUDA or Vulkan)
 
@@ -294,7 +312,8 @@ popd
 
 Bundle layout on macOS arm64:
 
-- `engine`
+- `example-cli`
+- `Engine`
 - `libpdf.dylib`
 - `libpdfvlm.dylib`
 - `libllama-server-bridge*.dylib` and `libggml*.dylib` in bundle root
@@ -331,7 +350,7 @@ gh workflow run ubuntu-x64.yml --ref main
 
 Bundle layout on Ubuntu x64:
 
-- `engine`
+- `example-cli`
 - `libpdf.so`
 - `libpdfvlm.so`
 - `libllama-server-bridge*.so` and `libggml*.so` in bundle root

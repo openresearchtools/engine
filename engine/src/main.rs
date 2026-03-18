@@ -7,12 +7,12 @@ mod llama_bridge;
 use std::env;
 
 fn usage() -> &'static str {
-    "engine usage:
-  engine <bridge_subcommand> [bridge args...]
-  engine bridge <bridge_subcommand> [bridge args...]
-  engine pdf [pdf args...]
-  engine pdfvlm [pdf_to_markdown args...]
-  engine help
+    "example-cli usage:
+  example-cli <bridge_subcommand> [bridge args...]
+  example-cli bridge <bridge_subcommand> [bridge args...]
+  example-cli pdf [pdf args...]
+  example-cli pdfvlm [pdf_to_markdown args...]
+  example-cli help
 
 bridge subcommands:
   list-devices
@@ -24,14 +24,14 @@ bridge subcommands:
   rerank
 
 examples:
-  engine list-devices
-  engine bridge audio --audio-file <audio-file> --mode speech --custom default --whisper-model <whisper.bin>
-  engine bridge audio-session --audio-file <audio-file> --diarization-model-path <sortformer.gguf> --whisper-model <whisper.bin>
-  engine bridge audio-session --stdin-pcm-s16le --transcription-realtime-model <voxtral.gguf>
-  engine chat --model <gguf> --markdown <file.md>
-  engine vlm --model <gguf> --mmproj <gguf> --image <image.png>
-  engine pdf extract --input <file-or-dir> --output <path>
-  engine pdfvlm --pdf <file.pdf> --model <gguf> --mmproj <gguf>"
+  example-cli list-devices
+  example-cli bridge audio --audio-file <audio-file> --mode speech --custom default --whisper-model <whisper.bin>
+  example-cli bridge audio-session --audio-file <audio-file> --diarization-model-path <sortformer.gguf> --whisper-model <whisper.bin>
+  example-cli bridge audio-session --stdin-pcm-s16le --transcription-realtime-model <voxtral.gguf>
+  example-cli chat --model <gguf> --markdown <file.md>
+  example-cli vlm --model <gguf> --mmproj <gguf> --image <image.png>
+  example-cli pdf extract --input <file-or-dir> --output <path>
+  example-cli pdfvlm --pdf <file.pdf> --model <gguf> --mmproj <gguf>"
 }
 
 fn run_pdf_subcommand(args: &[String]) -> Result<(), String> {

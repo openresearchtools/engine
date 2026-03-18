@@ -91,6 +91,76 @@ static void set_backend_n_threads(ggml_backend_t backend, int n_threads) {
     }
 }
 
+static std::string lowercase_copy(std::string value) {
+    std::transform(
+        value.begin(),
+        value.end(),
+        value.begin(),
+        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return value;
+}
+
+static voxtral_gpu_backend parse_backend_name_hint(const std::string & backend_name) {
+    const std::string lowered = lowercase_copy(backend_name);
+    if (lowered.empty() || lowered == "cpu" || lowered == "none") {
+        return voxtral_gpu_backend::none;
+    }
+    if (lowered.rfind("cuda", 0) == 0 || lowered.rfind("ggml-cuda", 0) == 0) {
+        return voxtral_gpu_backend::cuda;
+    }
+    if (lowered.rfind("metal", 0) == 0 || lowered.rfind("ggml-metal", 0) == 0) {
+        return voxtral_gpu_backend::metal;
+    }
+    if (lowered.rfind("vulkan", 0) == 0 || lowered.rfind("ggml-vulkan", 0) == 0) {
+        return voxtral_gpu_backend::vulkan;
+    }
+    return voxtral_gpu_backend::none;
+}
+
+static voxtral_gpu_backend detect_backend_gpu_type(ggml_backend_t backend) {
+    if (backend == nullptr) {
+        return voxtral_gpu_backend::none;
+    }
+
+    if (const char * backend_name = ggml_backend_name(backend)) {
+        const auto parsed = parse_backend_name_hint(backend_name);
+        if (parsed != voxtral_gpu_backend::none) {
+            return parsed;
+        }
+    }
+
+    ggml_backend_dev_t dev = ggml_backend_get_device(backend);
+    if (dev != nullptr) {
+        if (const char * dev_name = ggml_backend_dev_name(dev)) {
+            const auto parsed = parse_backend_name_hint(dev_name);
+            if (parsed != voxtral_gpu_backend::none) {
+                return parsed;
+            }
+        }
+
+        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+        if (reg != nullptr) {
+            if (const char * reg_name = ggml_backend_reg_name(reg)) {
+                const auto parsed = parse_backend_name_hint(reg_name);
+                if (parsed != voxtral_gpu_backend::none) {
+                    return parsed;
+                }
+            }
+        }
+    }
+
+    return voxtral_gpu_backend::none;
+}
+
+static ggml_backend_t init_named_backend(const std::string & backend_name) {
+    if (backend_name.empty()) {
+        return nullptr;
+    }
+
+    ensure_backend_registry_loaded();
+    return ggml_backend_init_by_name(backend_name.c_str(), nullptr);
+}
+
 static ggml_tensor * ggml_rowwise_scale(
     ggml_context * gctx,
     ggml_tensor  * x,
@@ -848,7 +918,8 @@ static ggml_tensor * get_tensor(ggml_context * ctx, const char * name) {
 voxtral_model * voxtral_model_load_from_file(
     const std::string    & path,
     voxtral_log_callback   logger,
-    voxtral_gpu_backend    gpu)
+    voxtral_gpu_backend    gpu,
+    const std::string    & requested_backend_name)
 {
     auto log_info = [&](const std::string & msg) {
         if (logger) logger(voxtral_log_level::info, msg);
@@ -877,57 +948,48 @@ voxtral_model * voxtral_model_load_from_file(
     ggml_backend_t weights_backend = nullptr;
     voxtral_gpu_backend resolved_gpu = voxtral_gpu_backend::none;
 
-    auto try_cuda = [&]() -> bool {
-#ifdef GGML_USE_CUDA
-        weights_backend = ggml_backend_cuda_init(0);
-        if (weights_backend) { resolved_gpu = voxtral_gpu_backend::cuda; return true; }
-        log_info("CUDA backend init failed");
-#endif
-        return false;
+    auto try_named_backend = [&](const std::string & backend_name) -> bool {
+        weights_backend = init_named_backend(backend_name);
+        if (!weights_backend) {
+            return false;
+        }
+
+        resolved_gpu = detect_backend_gpu_type(weights_backend);
+        return true;
     };
 
-    auto try_metal = [&]() -> bool {
-#ifdef GGML_USE_METAL
-        weights_backend = ggml_backend_metal_init();
-        if (weights_backend) { resolved_gpu = voxtral_gpu_backend::metal; return true; }
-        log_info("Metal backend init failed");
-#endif
-        return false;
-    };
+    if (!requested_backend_name.empty() && !try_named_backend(requested_backend_name)) {
+        log_info("requested backend '" + requested_backend_name + "' init failed");
+    }
 
-    auto try_vulkan = [&]() -> bool {
-#ifdef GGML_USE_VULKAN
-        weights_backend = ggml_backend_vk_init(0);
-        if (weights_backend) { resolved_gpu = voxtral_gpu_backend::vulkan; return true; }
-        log_info("Vulkan backend init failed");
-#endif
-        return false;
-    };
-
-    switch (gpu) {
-        case voxtral_gpu_backend::cuda:
-            if (!try_cuda()) {
-                log_info("CUDA not available in this build, falling back to CPU");
-            }
-            break;
-        case voxtral_gpu_backend::metal:
-            if (!try_metal()) {
-                log_info("Metal not available in this build, falling back to CPU");
-            }
-            break;
-        case voxtral_gpu_backend::vulkan:
-            if (!try_vulkan()) {
-                log_info("Vulkan not available in this build, falling back to CPU");
-            }
-            break;
-        case voxtral_gpu_backend::auto_detect:
-            if (!try_cuda() && !try_metal() && !try_vulkan()) {
-                log_info("no GPU backend available, using CPU");
-            }
-            break;
-        case voxtral_gpu_backend::none:
-        default:
-            break;
+    if (!weights_backend) {
+        switch (gpu) {
+            case voxtral_gpu_backend::cuda:
+                if (!try_named_backend("CUDA0")) {
+                    log_info("CUDA backend init failed");
+                }
+                break;
+            case voxtral_gpu_backend::metal:
+                if (!try_named_backend("Metal")) {
+                    log_info("Metal backend init failed");
+                }
+                break;
+            case voxtral_gpu_backend::vulkan:
+                if (!try_named_backend("Vulkan0")) {
+                    log_info("Vulkan backend init failed");
+                }
+                break;
+            case voxtral_gpu_backend::auto_detect:
+                if (!try_named_backend("CUDA0") &&
+                    !try_named_backend("Metal") &&
+                    !try_named_backend("Vulkan0")) {
+                    log_info("no GPU backend available, using CPU");
+                }
+                break;
+            case voxtral_gpu_backend::none:
+            default:
+                break;
+        }
     }
 
     if (!weights_backend) {
@@ -1167,38 +1229,32 @@ voxtral_context * voxtral_init_from_model(
         }
     }
 
-    auto try_cuda_ctx = [&]() -> bool {
-#ifdef GGML_USE_CUDA
-        ctx->backend = ggml_backend_cuda_init(0);
-        if (ctx->backend) { ctx->gpu_type = voxtral_gpu_backend::cuda; ctx->owns_backend = true; return true; }
-        LOG_WARN(ctx, "CUDA backend init failed");
-#endif
-        return false;
-    };
-    auto try_metal_ctx = [&]() -> bool {
-#ifdef GGML_USE_METAL
-        ctx->backend = ggml_backend_metal_init();
-        if (ctx->backend) { ctx->gpu_type = voxtral_gpu_backend::metal; ctx->owns_backend = true; return true; }
-        LOG_WARN(ctx, "Metal backend init failed");
-#endif
-        return false;
-    };
-    auto try_vulkan_ctx = [&]() -> bool {
-#ifdef GGML_USE_VULKAN
-        ctx->backend = ggml_backend_vk_init(0);
-        if (ctx->backend) { ctx->gpu_type = voxtral_gpu_backend::vulkan; ctx->owns_backend = true; return true; }
-        LOG_WARN(ctx, "Vulkan backend init failed");
-#endif
+    auto try_named_ctx = [&](const std::string & backend_name, const char * failure_message) -> bool {
+        ctx->backend = init_named_backend(backend_name);
+        if (ctx->backend) {
+            ctx->gpu_type = detect_backend_gpu_type(ctx->backend);
+            ctx->owns_backend = true;
+            return true;
+        }
+        LOG_WARN(ctx, "%s", failure_message);
         return false;
     };
 
     if (!ctx->backend) {
         switch (gpu) {
-            case voxtral_gpu_backend::cuda:    try_cuda_ctx();   break;
-            case voxtral_gpu_backend::metal:   try_metal_ctx();  break;
-            case voxtral_gpu_backend::vulkan:  try_vulkan_ctx(); break;
+            case voxtral_gpu_backend::cuda:
+                try_named_ctx("CUDA0", "CUDA backend init failed");
+                break;
+            case voxtral_gpu_backend::metal:
+                try_named_ctx("Metal", "Metal backend init failed");
+                break;
+            case voxtral_gpu_backend::vulkan:
+                try_named_ctx("Vulkan0", "Vulkan backend init failed");
+                break;
             case voxtral_gpu_backend::auto_detect:
-                if (!try_cuda_ctx() && !try_metal_ctx() && !try_vulkan_ctx()) {
+                if (!try_named_ctx("CUDA0", "CUDA backend init failed") &&
+                    !try_named_ctx("Metal", "Metal backend init failed") &&
+                    !try_named_ctx("Vulkan0", "Vulkan backend init failed")) {
                     LOG_INFO(ctx, "no GPU backend available, using CPU");
                 }
                 break;
