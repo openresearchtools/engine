@@ -120,6 +120,9 @@ jobs:
       INCLUDE_CUDA: ${{ inputs.include_cuda }}
       GITHUB_REPOSITORY: ${{ github.repository }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
       - name: Download Runtime Build Artifacts
         uses: actions/download-artifact@v7
         with:
