@@ -183,7 +183,7 @@ jobs:
           $requiredFiles = @(
               "example-cli.exe",
               "Engine.exe",
-              "rpc-server.exe",
+              "multi-node-server.dll",
               "pdf.dll",
               "pdfvlm.dll",
               "llama-server-audio.dll",
