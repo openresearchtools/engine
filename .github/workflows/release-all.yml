@@ -332,7 +332,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: engine-controller-win-x64
-          path: ../ENGINEbuilds/gha-controller-win-x64-bundle/Engine.exe
+          path: ${{ github.workspace }}/../ENGINEbuilds/gha-controller-win-x64-bundle/Engine.exe
           if-no-files-found: error
 
   build-controller-macos:
@@ -371,7 +371,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: engine-controller-macos-arm64
-          path: ../ENGINEbuilds/gha-controller-macos-arm64-bundle/Engine.dmg
+          path: ${{ github.workspace }}/../ENGINEbuilds/gha-controller-macos-arm64-bundle/Engine.dmg
           if-no-files-found: error
 
   publish-release:
