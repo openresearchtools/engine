@@ -37,7 +37,7 @@ jobs:
       WEBRTC_AUDIO_PROCESSING_REF: "907015852bc78d8e3ac0e8fbb93c93e76110192a"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -71,7 +71,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -631,7 +631,7 @@ jobs:
           PY
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: engine-macos-arm64-${{ inputs.backend }}
           path: ${{ env.BUILD_ROOT }}/bundle

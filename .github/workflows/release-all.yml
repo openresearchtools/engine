@@ -39,7 +39,7 @@ jobs:
       title: ${{ steps.meta.outputs.title }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -121,7 +121,7 @@ jobs:
       GITHUB_REPOSITORY: ${{ github.repository }}
     steps:
       - name: Download Runtime Build Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: engine-*
           path: dist
@@ -289,7 +289,7 @@ jobs:
           PY
 
       - name: Upload Runtime Release Assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: engine-release-runtime-assets
           path: release-assets
@@ -303,13 +303,13 @@ jobs:
     runs-on: windows-2022
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Download Runtime Manifest Artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: engine-release-runtime-assets
           path: release-runtime-assets
@@ -326,7 +326,7 @@ jobs:
           .\build\package_cluster_controller_win.ps1 -BundleDir ..\ENGINEbuilds\gha-controller-win-x64-bundle -CargoTargetDir ..\ENGINEbuilds\gha-controller-win-x64-target
 
       - name: Upload Controller Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: engine-controller-win-x64
           path: ../ENGINEbuilds/gha-controller-win-x64-bundle/Engine.exe
@@ -340,13 +340,13 @@ jobs:
     runs-on: macos-14
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Download Runtime Manifest Artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: engine-release-runtime-assets
           path: release-runtime-assets
@@ -365,7 +365,7 @@ jobs:
           bash ./build/package_cluster_controller_macos.sh --bundle-dir ../ENGINEbuilds/gha-controller-macos-arm64-bundle --cargo-target-dir ../ENGINEbuilds/gha-controller-macos-arm64-target
 
       - name: Upload Controller Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: engine-controller-macos-arm64
           path: ../ENGINEbuilds/gha-controller-macos-arm64-bundle/Engine.dmg
@@ -388,19 +388,19 @@ jobs:
       GH_REPO: ${{ github.repository }}
     steps:
       - name: Download Runtime Release Assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: engine-release-runtime-assets
           path: dist/runtime-assets
 
       - name: Download Windows Controller Artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: engine-controller-win-x64
           path: dist/controller-win
 
       - name: Download macOS Controller Artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: engine-controller-macos-arm64
           path: dist/controller-macos
