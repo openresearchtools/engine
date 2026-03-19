@@ -328,11 +328,18 @@ jobs:
         run: |
           .\build\package_cluster_controller_win.ps1 -BundleDir ..\ENGINEbuilds\gha-controller-win-x64-bundle -CargoTargetDir ..\ENGINEbuilds\gha-controller-win-x64-target
 
+      - name: Stage Controller Artifact (Windows)
+        shell: pwsh
+        run: |
+          $stagingDir = Join-Path $env:GITHUB_WORKSPACE "dist\controller-win"
+          New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
+          Copy-Item -Force ..\ENGINEbuilds\gha-controller-win-x64-bundle\Engine.exe (Join-Path $stagingDir "Engine.exe")
+
       - name: Upload Controller Artifact
         uses: actions/upload-artifact@v6
         with:
           name: engine-controller-win-x64
-          path: ${{ github.workspace }}/../ENGINEbuilds/gha-controller-win-x64-bundle/Engine.exe
+          path: dist/controller-win/Engine.exe
           if-no-files-found: error
 
   build-controller-macos:
@@ -367,11 +374,18 @@ jobs:
           set -euo pipefail
           bash ./build/package_cluster_controller_macos.sh --bundle-dir ../ENGINEbuilds/gha-controller-macos-arm64-bundle --cargo-target-dir ../ENGINEbuilds/gha-controller-macos-arm64-target
 
+      - name: Stage Controller Artifact (macOS)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/controller-macos
+          cp ../ENGINEbuilds/gha-controller-macos-arm64-bundle/Engine.dmg dist/controller-macos/Engine.dmg
+
       - name: Upload Controller Artifact
         uses: actions/upload-artifact@v6
         with:
           name: engine-controller-macos-arm64
-          path: ${{ github.workspace }}/../ENGINEbuilds/gha-controller-macos-arm64-bundle/Engine.dmg
+          path: dist/controller-macos/Engine.dmg
           if-no-files-found: error
 
   publish-release:
