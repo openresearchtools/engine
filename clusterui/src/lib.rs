@@ -1,5 +1,5 @@
-pub mod app_icon;
 pub mod agent;
+pub mod app_icon;
 pub mod catalog;
 pub mod cluster_api;
 pub mod instance_presets;

@@ -36,17 +36,16 @@ fn embed_windows_icon(icon_png: &Path) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-fn write_multi_size_ico(source_png: &Path, out_ico: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn write_multi_size_ico(
+    source_png: &Path,
+    out_ico: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let source = image::open(source_png)?.to_rgba8();
     let mut icon_dir = ico::IconDir::new(ico::ResourceType::Icon);
 
     for size in [16_u32, 24, 32, 40, 48, 64, 96, 128, 256] {
-        let resized = image::imageops::resize(
-            &source,
-            size,
-            size,
-            image::imageops::FilterType::Lanczos3,
-        );
+        let resized =
+            image::imageops::resize(&source, size, size, image::imageops::FilterType::Lanczos3);
         let icon_image = ico::IconImage::from_rgba_data(size, size, resized.into_raw());
         icon_dir.add_entry(ico::IconDirEntry::encode(&icon_image)?);
     }

@@ -23,10 +23,14 @@ use std::time::Duration;
 use time::{OffsetDateTime, UtcOffset};
 
 const ENGINE_LICENSE_TEXT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../LICENSE"));
-const THIRD_PARTY_NOTICES_TEXT: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../third_party/README.md"));
-const THIRD_PARTY_LICENSES_TEXT: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../third_party/LICENSES.md"));
+const THIRD_PARTY_NOTICES_TEXT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../third_party/README.md"
+));
+const THIRD_PARTY_LICENSES_TEXT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../third_party/LICENSES.md"
+));
 const ENGINE_MANUAL_TEXT: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/manual.md"));
 
@@ -349,7 +353,7 @@ fn render_header(app: &mut ClusterControllerApp, ctx: &egui::Context) {
         egui::ScrollArea::horizontal()
             .id_salt("controller-header-tabs")
             .auto_shrink([false, true])
-                .show(ui, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let refresh_in_progress = app.manual_refresh_in_progress;
                     let refresh_recently_completed = app
@@ -2767,10 +2771,7 @@ fn render_multi_node_rpc_settings_card(app: &mut ClusterControllerApp, ui: &mut 
             } else {
                 "off".to_string()
             };
-            ui.label(format!(
-                "Current worker: {}",
-                current_worker
-            ));
+            ui.label(format!("Current worker: {}", current_worker));
             if restart_required {
                 ui.add_space(6.0);
                 warning_card(
@@ -2909,6 +2910,23 @@ fn render_settings_page(app: &mut ClusterControllerApp, ui: &mut egui::Ui) {
             if accent_button(ui, "Install / Repair").clicked() {
                 app.start_runtime_install();
             }
+            if crate::runtime_installer::runtime_unblock_supported() {
+                if app.runtime_unblock_prompt_active() {
+                    if app.runtime_install_in_progress || app.runtime_unblock_in_progress {
+                        secondary_button_enabled(ui, "Run Runtime Unblock", false);
+                    } else if accent_button(ui, "Run Runtime Unblock").clicked() {
+                        app.start_runtime_unblock();
+                    }
+                } else if secondary_button_enabled(
+                    ui,
+                    "Run Runtime Unblock",
+                    !app.runtime_install_in_progress && !app.runtime_unblock_in_progress,
+                )
+                .clicked()
+                {
+                    app.start_runtime_unblock();
+                }
+            }
             if secondary_button(ui, "Reconnect runtime").clicked() {
                 app.connect_local_host();
             }
@@ -2956,7 +2974,13 @@ fn render_settings_page(app: &mut ClusterControllerApp, ui: &mut egui::Ui) {
             }
         }
         if app.runtime_missing.is_empty() {
-            ui.label("Runtime looks complete.");
+            if app.runtime_unblock_prompt_active() {
+                ui.label(
+                    "Runtime looks complete, but still needs Runtime Unblock before first use.",
+                );
+            } else {
+                ui.label("Runtime looks complete.");
+            }
         } else {
             ui.colored_label(
                 egui::Color32::from_rgb(153, 27, 27),
@@ -2964,7 +2988,32 @@ fn render_settings_page(app: &mut ClusterControllerApp, ui: &mut egui::Ui) {
             );
             warning_card(ui, "Runtime issues", &app.runtime_missing.join("\n"));
         }
+        if app.runtime_unblock_prompt_active() {
+            warning_card(
+                ui,
+                "Runtime unblock recommended",
+                "Engine just installed or repaired the runtime. Run Runtime Unblock once before first use. On Windows this clears Mark of the Web from downloaded runtime files. On macOS it clears quarantine and restores executable bits for bundled tools.",
+            );
+        } else if crate::runtime_installer::runtime_unblock_supported() {
+            muted_label(
+                ui,
+                "Run Runtime Unblock if Windows or macOS blocked a downloaded runtime after install.",
+            );
+        }
         if let Some(status) = &app.runtime_install_status {
+            ui.label(status);
+        }
+        if app.runtime_unblock_in_progress {
+            ui.horizontal_wrapped(|ui| {
+                ui.spinner();
+                muted_label(
+                    ui,
+                    app.runtime_unblock_status
+                        .as_deref()
+                        .unwrap_or("Running runtime unblock..."),
+                );
+            });
+        } else if let Some(status) = &app.runtime_unblock_status {
             ui.label(status);
         }
     });
@@ -3026,8 +3075,12 @@ fn render_about_page(app: &mut ClusterControllerApp, ui: &mut egui::Ui) {
             {
                 app.selected_about_document = AboutDocument::ThirdPartyLicenses;
             }
-            if subtab_button(ui, "Manual", app.selected_about_document == AboutDocument::Manual)
-                .clicked()
+            if subtab_button(
+                ui,
+                "Manual",
+                app.selected_about_document == AboutDocument::Manual,
+            )
+            .clicked()
             {
                 app.selected_about_document = AboutDocument::Manual;
             }
@@ -3040,12 +3093,20 @@ fn render_about_page(app: &mut ClusterControllerApp, ui: &mut egui::Ui) {
                 render_about_document(app, ui, ENGINE_LICENSE_TEXT);
             }
             AboutDocument::ThirdPartyNotices => {
-                ui.label(egui::RichText::new("Third-Party Notices").strong().size(16.0));
+                ui.label(
+                    egui::RichText::new("Third-Party Notices")
+                        .strong()
+                        .size(16.0),
+                );
                 ui.add_space(6.0);
                 render_about_document(app, ui, THIRD_PARTY_NOTICES_TEXT);
             }
             AboutDocument::ThirdPartyLicenses => {
-                ui.label(egui::RichText::new("Third-Party Licenses").strong().size(16.0));
+                ui.label(
+                    egui::RichText::new("Third-Party Licenses")
+                        .strong()
+                        .size(16.0),
+                );
                 ui.add_space(6.0);
                 render_about_document(app, ui, THIRD_PARTY_LICENSES_TEXT);
             }

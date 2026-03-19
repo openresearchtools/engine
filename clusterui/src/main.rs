@@ -1,7 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-mod app_icon;
 mod agent;
+mod app_icon;
 mod catalog;
 mod cluster_api;
 mod controller_ui;
@@ -195,12 +195,16 @@ struct ClusterControllerApp {
     selected_supported_audio_repo: SupportedAudioRepo,
     allowed_control_addrs: BTreeSet<String>,
     runtime_missing: Vec<String>,
+    runtime_unblock_pending_dir: Option<String>,
     runtime_install_backends: Vec<String>,
     runtime_install_recommendation: runtime_installer::RuntimeInstallRecommendation,
     selected_runtime_install_backend: usize,
     runtime_install_in_progress: bool,
     runtime_install_status: Option<String>,
     runtime_install_rx: Option<mpsc::Receiver<RuntimeInstallEvent>>,
+    runtime_unblock_in_progress: bool,
+    runtime_unblock_status: Option<String>,
+    runtime_unblock_rx: Option<mpsc::Receiver<RuntimeUnblockEvent>>,
     show_advanced_instance_editor: bool,
     show_cpu_devices: bool,
     show_integrated_gpus: bool,
@@ -227,6 +231,10 @@ struct ClusterControllerApp {
 enum RuntimeInstallEvent {
     Status(String),
     Finished(Result<PathBuf, String>),
+}
+
+enum RuntimeUnblockEvent {
+    Finished(Result<String, String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -373,6 +381,10 @@ impl ClusterControllerApp {
         let local_control_addr_edit = bind_addr.clone();
         let host = NodeHost::new(runtime_dir, bind_addr);
         let runtime_install_backends = runtime_installer::available_runtime_backends();
+        let runtime_unblock_pending_dir = saved_settings
+            .as_ref()
+            .map(|settings| settings.runtime_unblock_pending_dir.trim().to_string())
+            .filter(|value| !value.is_empty());
         let mut app = Self {
             host,
             runtime_dir_edit,
@@ -506,6 +518,7 @@ impl ClusterControllerApp {
             selected_supported_audio_repo: SupportedAudioRepo::Whisper,
             allowed_control_addrs: BTreeSet::new(),
             runtime_missing: Vec::new(),
+            runtime_unblock_pending_dir,
             runtime_install_backends,
             runtime_install_recommendation:
                 runtime_installer::RuntimeInstallRecommendation::default(),
@@ -513,6 +526,9 @@ impl ClusterControllerApp {
             runtime_install_in_progress: false,
             runtime_install_status: None,
             runtime_install_rx: None,
+            runtime_unblock_in_progress: false,
+            runtime_unblock_status: None,
+            runtime_unblock_rx: None,
             show_advanced_instance_editor: false,
             show_cpu_devices: false,
             show_integrated_gpus: false,
@@ -686,8 +702,15 @@ impl ClusterControllerApp {
                     payload.runtime_install_recommendation,
                 );
                 if self.runtime_missing.is_empty() {
-                    self.startup_connect_due_at = Some(Instant::now() + Duration::from_secs(2));
-                    self.status = "Engine loaded. Connecting to local node...".to_string();
+                    if self.runtime_unblock_prompt_active() {
+                        self.selected_page = controller_ui::ControllerPage::Settings;
+                        self.status =
+                            "Runtime installed. Run Runtime Unblock in Settings before first use."
+                                .to_string();
+                    } else {
+                        self.startup_connect_due_at = Some(Instant::now() + Duration::from_secs(2));
+                        self.status = "Engine loaded. Connecting to local node...".to_string();
+                    }
                 } else {
                     self.selected_page = controller_ui::ControllerPage::Settings;
                     self.status =
@@ -711,6 +734,11 @@ impl ClusterControllerApp {
     fn current_controller_settings(&self) -> ControllerSettings {
         let mut settings = load_controller_settings().unwrap_or_else(default_controller_settings);
         settings.runtime_dir = self.runtime_dir_edit.trim().to_string();
+        settings.runtime_unblock_pending_dir = self
+            .runtime_unblock_pending_dir
+            .as_deref()
+            .unwrap_or_default()
+            .to_string();
         settings.local_control_addr = self.local_control_addr_edit.trim().to_string();
         settings.server_bind_addr = self.server_bind_addr_edit.trim().to_string();
         settings.server_allow_cors = self.server_allow_cors;
@@ -1332,6 +1360,30 @@ impl ClusterControllerApp {
             return false;
         };
         TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok()
+    }
+
+    fn runtime_unblock_prompt_active(&self) -> bool {
+        if !runtime_installer::runtime_unblock_supported() || !self.runtime_missing.is_empty() {
+            return false;
+        }
+        let Some(pending_dir) = self.runtime_unblock_pending_dir.as_deref() else {
+            return false;
+        };
+        path_strings_match(pending_dir, self.runtime_dir_edit.trim())
+    }
+
+    fn set_runtime_unblock_pending_for_dir(&mut self, runtime_dir: &Path) {
+        self.runtime_unblock_pending_dir = Some(runtime_dir.display().to_string());
+    }
+
+    fn clear_runtime_unblock_pending_for_dir(&mut self, runtime_dir: &Path) {
+        if self
+            .runtime_unblock_pending_dir
+            .as_deref()
+            .is_some_and(|pending| path_strings_match(pending, &runtime_dir.display().to_string()))
+        {
+            self.runtime_unblock_pending_dir = None;
+        }
     }
 
     fn local_models_dir(&self) -> PathBuf {
@@ -3239,7 +3291,7 @@ impl ClusterControllerApp {
     }
 
     fn start_runtime_install(&mut self) {
-        if self.runtime_install_in_progress {
+        if self.runtime_install_in_progress || self.runtime_unblock_in_progress {
             return;
         }
         let runtime_dir = PathBuf::from(self.runtime_dir_edit.trim());
@@ -3250,6 +3302,7 @@ impl ClusterControllerApp {
         let (tx, rx) = mpsc::channel();
         self.runtime_install_in_progress = true;
         self.runtime_install_status = Some("Preparing runtime install...".to_string());
+        self.runtime_unblock_status = None;
         self.runtime_install_rx = Some(rx);
         std::thread::spawn(move || {
             let status_tx = tx.clone();
@@ -3284,14 +3337,82 @@ impl ClusterControllerApp {
             match result {
                 Ok(path) => {
                     self.runtime_dir_edit = path.display().to_string();
-                    self.status = format!("Runtime installed to '{}'.", path.display());
                     self.refresh_runtime_state();
-                    self.connect_local_host();
+                    if runtime_installer::runtime_unblock_supported() {
+                        self.set_runtime_unblock_pending_for_dir(&path);
+                        self.persist_controller_settings_if_changed();
+                        self.selected_page = controller_ui::ControllerPage::Settings;
+                        self.runtime_install_status = Some(
+                            "Runtime installed. Run Runtime Unblock before first use.".to_string(),
+                        );
+                        self.status = format!(
+                            "Runtime installed to '{}'. Run Runtime Unblock in Settings before first use.",
+                            path.display()
+                        );
+                    } else {
+                        self.status = format!("Runtime installed to '{}'.", path.display());
+                        self.connect_local_host();
+                    }
                 }
                 Err(err) => {
                     self.status = format!("Runtime install failed: {err}");
                     self.runtime_install_status = Some(err);
                     self.refresh_runtime_state();
+                }
+            }
+        }
+    }
+
+    fn start_runtime_unblock(&mut self) {
+        if self.runtime_unblock_in_progress || self.runtime_install_in_progress {
+            return;
+        }
+        if !runtime_installer::runtime_unblock_supported() {
+            self.runtime_unblock_status =
+                Some("Runtime unblock is not needed on this platform.".to_string());
+            return;
+        }
+        let runtime_dir = PathBuf::from(self.runtime_dir_edit.trim());
+        let (tx, rx) = mpsc::channel();
+        self.runtime_unblock_in_progress = true;
+        self.runtime_unblock_status = Some("Running runtime unblock...".to_string());
+        self.runtime_unblock_rx = Some(rx);
+        std::thread::spawn(move || {
+            let result = runtime_installer::unblock_installed_runtime(&runtime_dir)
+                .map_err(|err| err.to_string());
+            let _ = tx.send(RuntimeUnblockEvent::Finished(result));
+        });
+    }
+
+    fn poll_runtime_unblock_events(&mut self) {
+        let Some(rx) = &self.runtime_unblock_rx else {
+            return;
+        };
+        let mut finished = None;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                RuntimeUnblockEvent::Finished(result) => finished = Some(result),
+            }
+        }
+        if let Some(result) = finished {
+            self.runtime_unblock_in_progress = false;
+            self.runtime_unblock_rx = None;
+            match result {
+                Ok(message) => {
+                    let runtime_dir = PathBuf::from(self.runtime_dir_edit.trim());
+                    self.clear_runtime_unblock_pending_for_dir(&runtime_dir);
+                    self.persist_controller_settings_if_changed();
+                    self.runtime_unblock_status = Some(message.clone());
+                    self.runtime_install_status = None;
+                    self.status = message;
+                    self.refresh_runtime_state();
+                    if self.runtime_missing.is_empty() {
+                        self.connect_local_host();
+                    }
+                }
+                Err(err) => {
+                    self.status = format!("Runtime unblock failed: {err}");
+                    self.runtime_unblock_status = Some(err);
                 }
             }
         }
@@ -3822,6 +3943,7 @@ impl ClusterControllerApp {
         }
         self.window_hidden_to_tray = true;
         self.status = "Controller hidden to tray. The local host keeps running.".to_string();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
     }
 
@@ -3935,6 +4057,7 @@ impl App for ClusterControllerApp {
         ));
         self.handle_tray_actions(ctx);
         self.poll_runtime_install_events();
+        self.poll_runtime_unblock_events();
         self.drain_model_store_events();
         self.drain_model_transfer_events();
         self.drain_controller_events();
@@ -4291,6 +4414,14 @@ fn format_mib_from_bytes(bytes: u64) -> String {
         "-".to_string()
     } else {
         format_mib(bytes)
+    }
+}
+
+fn path_strings_match(lhs: &str, rhs: &str) -> bool {
+    if cfg!(target_os = "windows") {
+        lhs.trim().eq_ignore_ascii_case(rhs.trim())
+    } else {
+        lhs.trim() == rhs.trim()
     }
 }
 

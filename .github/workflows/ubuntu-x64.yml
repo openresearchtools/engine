@@ -274,7 +274,7 @@ jobs:
           )
 
           cmake "${cmake_args[@]}"
-          cmake --build "$llama_build" --parallel --target llama-server-bridge llama-server-audio
+          cmake --build "$llama_build" --parallel --target llama-server-bridge multi-node-server llama-server-audio
 
       - name: Build Rust Runtime
         shell: bash
@@ -327,6 +327,7 @@ jobs:
           while IFS= read -r -d '' lib; do
             cp -a "$lib" "$bundle/$(basename "$lib")"
           done < <(find "$llama_lib_root" -type f,l \( \
+            -name "libmulti-node-server*.so*" -o \
             -name "libllama-server-bridge*.so*" -o \
             -name "libllama-server-audio*.so*" -o \
             -name "libllama*.so*" -o \
@@ -503,6 +504,7 @@ jobs:
             [[ -f "$bundle/$f" ]] || { echo "Missing required bundle file: $f"; exit 1; }
           done
 
+          ls "$bundle"/libmulti-node-server*.so* >/dev/null 2>&1 || { echo "Missing libmulti-node-server*.so"; exit 1; }
           ls "$bundle"/libllama-server-bridge*.so* >/dev/null 2>&1 || { echo "Missing libllama-server-bridge*.so"; exit 1; }
           ls "$bundle"/libllama-server-audio*.so* >/dev/null 2>&1 || { echo "Missing libllama-server-audio*.so"; exit 1; }
           ls "$bundle"/libggml-cpu*.so* >/dev/null 2>&1 || { echo "Missing libggml-cpu*.so"; exit 1; }
@@ -601,6 +603,39 @@ jobs:
             echo "Unexpected list-devices output (missing devices_count)"
             exit 1
           }
+
+          BUNDLE_ROOT="$bundle" python3 - <<'PY'
+          import ctypes
+          import glob
+          import os
+
+          bundle = os.environ["BUNDLE_ROOT"]
+          mode = getattr(os, "RTLD_NOW", None)
+          multi_node = sorted(glob.glob(os.path.join(bundle, "libmulti-node-server*.so*")))
+          bridge = sorted(glob.glob(os.path.join(bundle, "libllama-server-bridge*.so*")))
+          audio = sorted(glob.glob(os.path.join(bundle, "libllama-server-audio*.so*")))
+          if not multi_node:
+              raise SystemExit("Missing libmulti-node-server*.so* for ctypes smoke test")
+          if not bridge:
+              raise SystemExit("Missing libllama-server-bridge*.so* for ctypes smoke test")
+          if not audio:
+              raise SystemExit("Missing libllama-server-audio*.so* for ctypes smoke test")
+          targets = [
+              multi_node[0],
+              bridge[0],
+              audio[0],
+              os.path.join(bundle, "libpdf.so"),
+              os.path.join(bundle, "libpdfvlm.so"),
+          ]
+          for path in targets:
+              if not os.path.exists(path):
+                  raise SystemExit(f"Missing smoke library: {path}")
+              if mode is None:
+                  ctypes.CDLL(path)
+              else:
+                  ctypes.CDLL(path, mode=mode)
+          print("ctypes-load-ok")
+          PY
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v6

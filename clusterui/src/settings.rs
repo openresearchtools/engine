@@ -18,6 +18,8 @@ pub struct PairedPeerSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ControllerSettings {
     pub runtime_dir: String,
+    #[serde(default)]
+    pub runtime_unblock_pending_dir: String,
     pub local_control_addr: String,
     pub server_bind_addr: String,
     pub server_allow_cors: bool,
@@ -61,6 +63,7 @@ impl Default for ControllerSettings {
             runtime_dir: default_runtime_dir()
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
+            runtime_unblock_pending_dir: String::new(),
             local_control_addr: "127.0.0.1:46211".to_string(),
             server_bind_addr: "127.0.0.1:46310".to_string(),
             server_allow_cors: false,

@@ -37,8 +37,8 @@ fn fallback_window_icon() -> egui::IconData {
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
             let border = x <= 2 || y <= 2 || x >= WIDTH - 3 || y >= HEIGHT - 3;
-            let diagonal = (x as i32 - y as i32).abs() <= 2
-                || ((WIDTH - 1 - x) as i32 - y as i32).abs() <= 2;
+            let diagonal =
+                (x as i32 - y as i32).abs() <= 2 || ((WIDTH - 1 - x) as i32 - y as i32).abs() <= 2;
             let (r, g, b) = if diagonal {
                 (56, 189, 248)
             } else if border {

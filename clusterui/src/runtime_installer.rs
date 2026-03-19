@@ -29,6 +29,12 @@ const BUNDLED_ENGINE_MANIFEST_SOURCES_JSON: &str =
 const APP_UA: &str = "ENGINE-ClusterUI/1.0";
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+#[cfg(target_os = "windows")]
+const EMBEDDED_RUNTIME_UNBLOCK_SCRIPT: &str =
+    include_str!("../scripts/unblock-unsigned-runtime.ps1");
+#[cfg(target_os = "macos")]
+const EMBEDDED_RUNTIME_UNBLOCK_SCRIPT: &str =
+    include_str!("../scripts/unblock-unsigned-runtime.sh");
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct EngineManifest {
@@ -125,8 +131,7 @@ pub fn available_runtime_backends() -> Vec<String> {
 }
 
 pub fn bundled_controller_version_label() -> String {
-    bundled_manifest_release_tag()
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+    bundled_manifest_release_tag().unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
 }
 
 fn bundled_manifest_release_tag() -> Option<String> {
@@ -284,7 +289,7 @@ pub fn runtime_missing_messages(runtime_dir: &Path) -> Vec<String> {
         let compat_runtime_lib = runtime_library_path(runtime_dir);
         if compat_runtime_lib.exists() && compat_runtime_lib != managed_runtime_lib {
             missing.push(format!(
-                "Managed multi-node runtime is missing: {}. Found legacy runtime '{}' instead.",
+                "Managed multi-node runtime is missing: {}. Found direct bridge runtime '{}' instead.",
                 managed_runtime_lib
                     .file_name()
                     .map(|value| value.to_string_lossy().into_owned())
@@ -322,6 +327,127 @@ pub fn runtime_missing_messages(runtime_dir: &Path) -> Vec<String> {
     }
 
     missing
+}
+
+pub fn runtime_unblock_supported() -> bool {
+    cfg!(any(target_os = "windows", target_os = "macos"))
+}
+
+pub fn unblock_installed_runtime(runtime_dir: &Path) -> Result<String> {
+    if !runtime_unblock_supported() {
+        return Ok("Runtime unblock is not needed on this platform.".to_string());
+    }
+    if runtime_dir.as_os_str().is_empty() {
+        bail!("runtime directory is empty");
+    }
+    if !runtime_dir.is_dir() {
+        bail!(
+            "runtime directory does not exist: '{}'",
+            runtime_dir.display()
+        );
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        let (temp_root, script_path) = write_embedded_runtime_unblock_script()?;
+        let run_result = run_embedded_runtime_unblock_script(&script_path, runtime_dir);
+        let _ = fs::remove_dir_all(&temp_root);
+        return run_result;
+    }
+
+    #[allow(unreachable_code)]
+    Ok("Runtime unblock is not needed on this platform.".to_string())
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn embedded_runtime_unblock_script_file_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "unblock-unsigned-runtime.ps1"
+    } else {
+        "unblock-unsigned-runtime.sh"
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn write_embedded_runtime_unblock_script() -> Result<(PathBuf, PathBuf)> {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp_root = env::temp_dir().join(format!("engine-runtime-unblock-{stamp}"));
+    fs::create_dir_all(&temp_root)
+        .with_context(|| format!("failed creating '{}'", temp_root.display()))?;
+
+    let script_path = temp_root.join(embedded_runtime_unblock_script_file_name());
+    fs::write(&script_path, EMBEDDED_RUNTIME_UNBLOCK_SCRIPT)
+        .with_context(|| format!("failed writing '{}'", script_path.display()))?;
+
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("failed chmod '{}'", script_path.display()))?;
+    }
+
+    Ok((temp_root, script_path))
+}
+
+#[cfg(target_os = "windows")]
+fn run_embedded_runtime_unblock_script(script_path: &Path, runtime_dir: &Path) -> Result<String> {
+    let mut command = Command::new("powershell");
+    command
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(script_path)
+        .arg("-RuntimeDir")
+        .arg(runtime_dir)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    capture_runtime_unblock_output(command, script_path)
+}
+
+#[cfg(target_os = "macos")]
+fn run_embedded_runtime_unblock_script(script_path: &Path, runtime_dir: &Path) -> Result<String> {
+    let mut command = Command::new("sh");
+    command
+        .arg(script_path)
+        .arg(runtime_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    capture_runtime_unblock_output(command, script_path)
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn capture_runtime_unblock_output(mut command: Command, script_path: &Path) -> Result<String> {
+    let output = command.output().with_context(|| {
+        format!(
+            "failed to execute runtime unblock script '{}'",
+            script_path.display()
+        )
+    })?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !output.status.success() {
+        let details = if stderr.is_empty() {
+            stdout.clone()
+        } else {
+            stderr
+        };
+        bail!(
+            "runtime unblock script failed ({}): {}",
+            script_path.display(),
+            details
+        );
+    }
+    if stdout.is_empty() {
+        Ok("Runtime unblock complete.".to_string())
+    } else {
+        Ok(stdout)
+    }
 }
 
 #[cfg(target_os = "windows")]

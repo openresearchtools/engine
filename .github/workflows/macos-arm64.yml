@@ -279,7 +279,7 @@ jobs:
           cmake_args+=(-DGGML_METAL=ON)
 
           cmake "${cmake_args[@]}"
-          cmake --build "$llama_build" --parallel --target llama-server-bridge llama-server-audio rpc-server
+          cmake --build "$llama_build" --parallel --target llama-server-bridge multi-node-server llama-server-audio rpc-server
 
       - name: Build Rust Runtime
         shell: bash
@@ -326,6 +326,7 @@ jobs:
           while IFS= read -r -d '' lib; do
             cp -a "$lib" "$bundle/$(basename "$lib")"
           done < <(find "$llama_lib_dir" \( \
+            -name "libmulti-node-server*.dylib" -o \
             -name "libllama-server-bridge*.dylib" -o \
             -name "libllama-server-audio*.dylib" -o \
             -name "libllama*.dylib" -o \
@@ -517,7 +518,9 @@ jobs:
 
           otool -L "$bundle/example-cli"
           bridge_lib="$(ls "$bundle"/libllama-server-bridge*.dylib | head -n1)"
+          multi_node_lib="$(ls "$bundle"/libmulti-node-server*.dylib | head -n1)"
           otool -L "$bridge_lib"
+          otool -L "$multi_node_lib"
 
       - name: Validate Bundle Contents
         shell: bash
@@ -542,6 +545,7 @@ jobs:
             [[ -f "$bundle/$f" ]] || { echo "Missing required bundle file: $f"; exit 1; }
           done
 
+          ls "$bundle"/libmulti-node-server*.dylib >/dev/null 2>&1 || { echo "Missing libmulti-node-server*.dylib"; exit 1; }
           ls "$bundle"/libllama-server-bridge*.dylib >/dev/null 2>&1 || { echo "Missing libllama-server-bridge*.dylib"; exit 1; }
           ls "$bundle"/libllama-server-audio*.dylib >/dev/null 2>&1 || { echo "Missing libllama-server-audio*.dylib"; exit 1; }
           ls "$bundle"/libggml-cpu*.dylib >/dev/null 2>&1 || { echo "Missing libggml-cpu*.dylib"; exit 1; }
@@ -611,10 +615,14 @@ jobs:
 
           bundle = os.environ["BUNDLE_ROOT"]
           mode = getattr(os, "RTLD_NOW", None)
+          multi_node = sorted(glob.glob(os.path.join(bundle, "libmulti-node-server*.dylib")))
           bridge = sorted(glob.glob(os.path.join(bundle, "libllama-server-bridge*.dylib")))
+          if not multi_node:
+              raise SystemExit("Missing libmulti-node-server*.dylib for ctypes smoke test")
           if not bridge:
               raise SystemExit("Missing libllama-server-bridge*.dylib for ctypes smoke test")
           targets = [
+              multi_node[0],
               bridge[0],
               sorted(glob.glob(os.path.join(bundle, "libllama-server-audio*.dylib")))[0],
               os.path.join(bundle, "libpdf.dylib"),
