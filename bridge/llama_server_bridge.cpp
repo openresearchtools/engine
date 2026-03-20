@@ -580,6 +580,66 @@ static const llama_server_bridge_audio_session::assigned_piece * audio_session_n
     return nullptr;
 }
 
+static size_t audio_session_assigned_piece_word_count(
+    const llama_server_bridge_audio_session::assigned_piece & piece) {
+    size_t count = 0;
+    bool in_word = false;
+    for (const char ch : piece.text) {
+        const bool is_space = std::isspace(static_cast<unsigned char>(ch)) != 0;
+        if (is_space) {
+            in_word = false;
+            continue;
+        }
+        if (!in_word) {
+            ++count;
+            in_word = true;
+        }
+    }
+    return count;
+}
+
+static uint64_t audio_session_assigned_word_duration_samples(
+    const llama_server_bridge_audio_session::assigned_piece & word) {
+    const uint64_t duration = word.end_sample > word.start_sample
+        ? word.end_sample - word.start_sample
+        : 0;
+    return std::max<uint64_t>(duration, 1);
+}
+
+static std::optional<std::string> audio_session_dominant_speaker_for_assigned_words(
+    const std::vector<llama_server_bridge_audio_session::assigned_piece> & words,
+    size_t begin,
+    size_t end) {
+    std::unordered_map<std::string, uint64_t> totals;
+    for (size_t i = begin; i < end && i < words.size(); ++i) {
+        if (!words[i].speaker.has_value()) {
+            continue;
+        }
+        totals[*words[i].speaker] += audio_session_assigned_word_duration_samples(words[i]);
+    }
+
+    std::optional<std::string> best_speaker;
+    uint64_t best_total = 0;
+    for (const auto & it : totals) {
+        if (!best_speaker.has_value() || it.second > best_total) {
+            best_speaker = it.first;
+            best_total = it.second;
+        }
+    }
+    return best_speaker;
+}
+
+static void audio_session_reassign_word_range(
+    std::vector<llama_server_bridge_audio_session::assigned_piece> & words,
+    size_t begin,
+    size_t end,
+    const std::string & speaker) {
+    const size_t clamped_end = std::min(end, words.size());
+    for (size_t i = begin; i < clamped_end; ++i) {
+        words[i].speaker = speaker;
+    }
+}
+
 static std::optional<std::string> audio_session_dominant_speaker_for_piece(
     const llama_server_bridge_audio_session::transcript_piece & piece,
     const std::vector<llama_server_bridge_audio_session::speaker_span> & spans,
@@ -620,19 +680,435 @@ static std::optional<std::string> audio_session_dominant_speaker_for_piece(
     return std::nullopt;
 }
 
+static std::vector<llama_server_bridge_audio_session::assigned_piece> audio_session_assign_word_speakers(
+    const std::vector<llama_server_bridge_audio_session::speaker_span> & spans,
+    const std::vector<llama_server_bridge_audio_session::transcript_piece> & words,
+    const llama_server_bridge_audio_session::assemble_options & options) {
+    std::vector<llama_server_bridge_audio_session::assigned_piece> out;
+    out.reserve(words.size());
+    for (const auto & word : words) {
+        out.push_back({
+            audio_session_dominant_speaker_for_piece(word, spans, options),
+            word.start_sample,
+            word.end_sample,
+            word.text,
+        });
+    }
+    return out;
+}
+
+static void audio_session_smooth_sentence_word_speakers(
+    std::vector<llama_server_bridge_audio_session::assigned_piece> & words) {
+    if (words.empty()) {
+        return;
+    }
+
+    struct speaker_run {
+        size_t begin = 0;
+        size_t end = 0;
+        std::optional<std::string> speaker;
+        uint64_t duration_samples = 0;
+    };
+
+    auto make_runs = [&](size_t sentence_begin, size_t sentence_end) {
+        std::vector<speaker_run> runs;
+        for (size_t i = sentence_begin; i < sentence_end;) {
+            const auto speaker = words[i].speaker;
+            size_t j = i + 1;
+            while (j < sentence_end && words[j].speaker == speaker) {
+                ++j;
+            }
+
+            uint64_t duration_samples = 0;
+            for (size_t k = i; k < j; ++k) {
+                duration_samples += audio_session_assigned_word_duration_samples(words[k]);
+            }
+
+            runs.push_back({i, j, speaker, duration_samples});
+            i = j;
+        }
+        return runs;
+    };
+
+    auto process_sentence = [&](size_t sentence_begin, size_t sentence_end) {
+        if (sentence_begin >= sentence_end) {
+            return;
+        }
+
+        auto runs = make_runs(sentence_begin, sentence_end);
+        for (size_t idx = 1; idx < runs.size(); ++idx) {
+            const auto & run = runs[idx];
+            const auto & prev = runs[idx - 1];
+            if (run.speaker == prev.speaker) {
+                continue;
+            }
+            const size_t run_words = run.end - run.begin;
+            if (run_words > 4 || run.duration_samples > 20000) {
+                continue;
+            }
+            if (!audio_session_starts_with_continuation(words[run.begin].text)) {
+                continue;
+            }
+            if (prev.speaker.has_value()) {
+                audio_session_reassign_word_range(words, run.begin, run.end, *prev.speaker);
+            }
+        }
+
+        runs = make_runs(sentence_begin, sentence_end);
+        for (size_t idx = 0; idx + 1 < runs.size(); ++idx) {
+            const auto & run = runs[idx];
+            const auto & next = runs[idx + 1];
+            if (run.speaker == next.speaker) {
+                continue;
+            }
+            const size_t run_words = run.end - run.begin;
+            if (run_words > 4 || run.duration_samples > 20000) {
+                continue;
+            }
+            const bool sentence_start = run.begin == sentence_begin
+                || audio_session_word_ends_sentence(words[run.begin - 1].text);
+            if (!sentence_start || !audio_session_starts_with_sentence_start(words[run.begin].text)) {
+                continue;
+            }
+            const size_t next_words = next.end - next.begin;
+            if (next_words < run_words + 2 && next.duration_samples < run.duration_samples + 6400) {
+                continue;
+            }
+            if (next.speaker.has_value()) {
+                audio_session_reassign_word_range(words, run.begin, run.end, *next.speaker);
+            }
+        }
+
+        const auto best_speaker =
+            audio_session_dominant_speaker_for_assigned_words(words, sentence_begin, sentence_end);
+        if (!best_speaker.has_value()) {
+            return;
+        }
+
+        std::unordered_map<std::string, uint64_t> counts;
+        uint64_t total = 0;
+        for (size_t i = sentence_begin; i < sentence_end; ++i) {
+            if (!words[i].speaker.has_value()) {
+                continue;
+            }
+            const uint64_t dur = audio_session_assigned_word_duration_samples(words[i]);
+            total += dur;
+            counts[*words[i].speaker] += dur;
+        }
+        if (total == 0) {
+            return;
+        }
+
+        uint64_t best = 0;
+        uint64_t second = 0;
+        for (const auto & it : counts) {
+            if (it.first == *best_speaker) {
+                best = it.second;
+            } else if (it.second > second) {
+                second = it.second;
+            }
+        }
+        const bool clear_majority =
+            best * 100 >= total * 60 ||
+            best >= second * 2 ||
+            ((sentence_end - sentence_begin) <= 4 && best * 100 >= total * 50);
+        if (clear_majority) {
+            audio_session_reassign_word_range(words, sentence_begin, sentence_end, *best_speaker);
+        }
+    };
+
+    size_t sentence_begin = 0;
+    for (size_t i = 0; i < words.size(); ++i) {
+        if (audio_session_word_ends_sentence(words[i].text)) {
+            process_sentence(sentence_begin, i + 1);
+            sentence_begin = i + 1;
+        }
+    }
+    process_sentence(sentence_begin, words.size());
+}
+
+static std::pair<std::string, uint64_t> audio_session_previous_span_speaker_near(
+    const std::vector<llama_server_bridge_audio_session::speaker_span> & spans,
+    uint64_t anchor_sample,
+    uint64_t max_gap_samples) {
+    std::string best_speaker = "UNASSIGNED";
+    uint64_t best_gap = std::numeric_limits<uint64_t>::max();
+    for (const auto & span : spans) {
+        if (span.end_sample > anchor_sample) {
+            continue;
+        }
+        const uint64_t gap = anchor_sample - span.end_sample;
+        if (gap <= max_gap_samples && gap < best_gap) {
+            best_gap = gap;
+            best_speaker = span.speaker;
+        }
+    }
+    return {best_speaker, best_gap};
+}
+
+static std::pair<std::string, uint64_t> audio_session_next_span_speaker_near(
+    const std::vector<llama_server_bridge_audio_session::speaker_span> & spans,
+    uint64_t anchor_sample,
+    uint64_t max_gap_samples) {
+    std::string best_speaker = "UNASSIGNED";
+    uint64_t best_gap = std::numeric_limits<uint64_t>::max();
+    for (const auto & span : spans) {
+        if (span.start_sample < anchor_sample) {
+            continue;
+        }
+        const uint64_t gap = span.start_sample - anchor_sample;
+        if (gap <= max_gap_samples && gap < best_gap) {
+            best_gap = gap;
+            best_speaker = span.speaker;
+        }
+    }
+    return {best_speaker, best_gap};
+}
+
+static std::optional<std::pair<uint64_t, uint64_t>> audio_session_covering_or_previous_span_end_for_speaker_near(
+    const std::vector<llama_server_bridge_audio_session::speaker_span> & spans,
+    const std::string & speaker,
+    uint64_t anchor_sample,
+    uint64_t max_gap_samples) {
+    if (speaker.empty() || speaker == "UNASSIGNED") {
+        return std::nullopt;
+    }
+
+    bool found = false;
+    uint64_t best_end = 0;
+    uint64_t best_gap = std::numeric_limits<uint64_t>::max();
+    for (const auto & span : spans) {
+        if (span.speaker != speaker) {
+            continue;
+        }
+
+        uint64_t gap = 0;
+        if (anchor_sample >= span.start_sample && anchor_sample <= span.end_sample) {
+            gap = 0;
+        } else if (span.end_sample <= anchor_sample) {
+            gap = anchor_sample - span.end_sample;
+        } else {
+            continue;
+        }
+
+        if (gap <= max_gap_samples && (!found || gap < best_gap || (gap == best_gap && span.end_sample > best_end))) {
+            best_gap = gap;
+            best_end = span.end_sample;
+            found = true;
+        }
+    }
+
+    if (!found) {
+        return std::nullopt;
+    }
+    return std::make_pair(best_end, best_gap);
+}
+
+static std::optional<std::pair<uint64_t, uint64_t>> audio_session_next_span_start_for_speaker_near(
+    const std::vector<llama_server_bridge_audio_session::speaker_span> & spans,
+    const std::string & speaker,
+    uint64_t anchor_sample,
+    uint64_t max_gap_samples) {
+    if (speaker.empty() || speaker == "UNASSIGNED") {
+        return std::nullopt;
+    }
+
+    bool found = false;
+    uint64_t best_start = std::numeric_limits<uint64_t>::max();
+    uint64_t best_gap = std::numeric_limits<uint64_t>::max();
+    for (const auto & span : spans) {
+        if (span.speaker != speaker || span.start_sample < anchor_sample) {
+            continue;
+        }
+        const uint64_t gap = span.start_sample - anchor_sample;
+        if (gap <= max_gap_samples && (!found || gap < best_gap || (gap == best_gap && span.start_sample < best_start))) {
+            best_gap = gap;
+            best_start = span.start_sample;
+            found = true;
+        }
+    }
+
+    if (!found) {
+        return std::nullopt;
+    }
+    return std::make_pair(best_start, best_gap);
+}
+
+static void audio_session_refine_sentence_word_boundaries(
+    std::vector<llama_server_bridge_audio_session::assigned_piece> & words,
+    const std::vector<llama_server_bridge_audio_session::speaker_span> & spans) {
+    if (words.empty() || spans.empty()) {
+        return;
+    }
+
+    constexpr uint64_t k_boundary_gap_samples = 3840;
+    constexpr size_t k_short_sentence_words = 6;
+    constexpr uint64_t k_short_sentence_duration_samples = 28000;
+    constexpr uint64_t k_prev_carry_gap_samples = 3840;
+    constexpr uint64_t k_next_span_delay_samples = 3200;
+    constexpr uint64_t k_next_span_search_samples = 12800;
+
+    struct sentence_range {
+        size_t begin = 0;
+        size_t end = 0;
+        uint64_t start_sample = 0;
+        uint64_t end_sample = 0;
+        uint64_t duration_samples = 0;
+        size_t num_words = 0;
+        std::string dominant_speaker = "UNASSIGNED";
+    };
+
+    std::vector<sentence_range> ranges;
+    size_t sentence_begin = 0;
+    for (size_t i = 0; i < words.size(); ++i) {
+        if (!audio_session_word_ends_sentence(words[i].text) && i + 1 != words.size()) {
+            continue;
+        }
+
+        const size_t sentence_end = i + 1;
+        const uint64_t start_sample = words[sentence_begin].start_sample;
+        const uint64_t end_sample = std::max(start_sample, words[sentence_end - 1].end_sample);
+        const auto dominant =
+            audio_session_dominant_speaker_for_assigned_words(words, sentence_begin, sentence_end);
+        ranges.push_back({
+            sentence_begin,
+            sentence_end,
+            start_sample,
+            end_sample,
+            end_sample > start_sample ? end_sample - start_sample : 0,
+            sentence_end - sentence_begin,
+            dominant.value_or("UNASSIGNED"),
+        });
+        sentence_begin = sentence_end;
+    }
+
+    for (size_t i = 0; i < ranges.size(); ++i) {
+        const bool short_sentence =
+            ranges[i].num_words <= k_short_sentence_words ||
+            ranges[i].duration_samples <= k_short_sentence_duration_samples;
+        if (!short_sentence) {
+            continue;
+        }
+        if (!audio_session_starts_with_sentence_start(words[ranges[i].begin].text)) {
+            continue;
+        }
+
+        const std::string prev_sentence_speaker =
+            i > 0 ? ranges[i - 1].dominant_speaker : "UNASSIGNED";
+        const std::string next_sentence_speaker =
+            i + 1 < ranges.size() ? ranges[i + 1].dominant_speaker : "UNASSIGNED";
+
+        const auto [prev_span_speaker, prev_gap_samples] =
+            audio_session_previous_span_speaker_near(spans, ranges[i].start_sample, k_boundary_gap_samples);
+        const auto [next_span_speaker, next_gap_samples] =
+            audio_session_next_span_speaker_near(spans, ranges[i].end_sample, k_boundary_gap_samples);
+
+        if (prev_sentence_speaker != "UNASSIGNED" &&
+            prev_sentence_speaker == next_sentence_speaker &&
+            ranges[i].dominant_speaker != prev_sentence_speaker) {
+            audio_session_reassign_word_range(words, ranges[i].begin, ranges[i].end, prev_sentence_speaker);
+            ranges[i].dominant_speaker = prev_sentence_speaker;
+            continue;
+        }
+
+        if (prev_sentence_speaker != "UNASSIGNED" &&
+            prev_sentence_speaker == prev_span_speaker &&
+            ranges[i].dominant_speaker != prev_sentence_speaker &&
+            next_span_speaker == ranges[i].dominant_speaker &&
+            prev_gap_samples <= k_boundary_gap_samples) {
+            audio_session_reassign_word_range(words, ranges[i].begin, ranges[i].end, prev_sentence_speaker);
+            ranges[i].dominant_speaker = prev_sentence_speaker;
+            continue;
+        }
+
+        if (next_sentence_speaker != "UNASSIGNED" &&
+            next_sentence_speaker == next_span_speaker &&
+            ranges[i].dominant_speaker != next_sentence_speaker &&
+            prev_span_speaker == ranges[i].dominant_speaker &&
+            next_gap_samples <= k_boundary_gap_samples) {
+            audio_session_reassign_word_range(words, ranges[i].begin, ranges[i].end, next_sentence_speaker);
+            ranges[i].dominant_speaker = next_sentence_speaker;
+            continue;
+        }
+
+        if (i > 0 &&
+            prev_sentence_speaker != "UNASSIGNED" &&
+            ranges[i].dominant_speaker != "UNASSIGNED" &&
+            ranges[i].dominant_speaker != prev_sentence_speaker &&
+            (next_sentence_speaker == ranges[i].dominant_speaker || next_sentence_speaker == "UNASSIGNED")) {
+            const auto prev_same = audio_session_covering_or_previous_span_end_for_speaker_near(
+                spans,
+                prev_sentence_speaker,
+                ranges[i].start_sample,
+                k_prev_carry_gap_samples);
+            const auto next_dom = audio_session_next_span_start_for_speaker_near(
+                spans,
+                ranges[i].dominant_speaker,
+                ranges[i].start_sample,
+                k_next_span_search_samples);
+            if (prev_same.has_value() && next_dom.has_value()) {
+                const uint64_t prev_same_gap_samples = prev_same->second;
+                const uint64_t next_dom_start_sample = next_dom->first;
+                if (prev_same_gap_samples <= k_prev_carry_gap_samples &&
+                    next_dom_start_sample - ranges[i].start_sample >= k_next_span_delay_samples) {
+                    audio_session_reassign_word_range(words, ranges[i].begin, ranges[i].end, prev_sentence_speaker);
+                    ranges[i].dominant_speaker = prev_sentence_speaker;
+                }
+            }
+        }
+    }
+}
+
+static std::optional<std::string> audio_session_speaker_from_assigned_words(
+    const llama_server_bridge_audio_session::transcript_piece & piece,
+    const std::vector<llama_server_bridge_audio_session::assigned_piece> & assigned_words) {
+    std::unordered_map<std::string, uint64_t> totals;
+    for (const auto & word : assigned_words) {
+        if (!word.speaker.has_value()) {
+            continue;
+        }
+        if (audio_session_overlap_len(piece.start_sample, piece.end_sample, word.start_sample, word.end_sample) == 0) {
+            continue;
+        }
+        totals[*word.speaker] += audio_session_assigned_word_duration_samples(word);
+    }
+
+    std::optional<std::string> best_speaker;
+    uint64_t best_total = 0;
+    for (const auto & it : totals) {
+        if (!best_speaker.has_value() || it.second > best_total) {
+            best_speaker = it.first;
+            best_total = it.second;
+        }
+    }
+    return best_speaker;
+}
+
 static std::vector<llama_server_bridge_audio_session::assigned_piece> audio_session_assign_pieces(
     const std::vector<llama_server_bridge_audio_session::speaker_span> & spans,
     const std::vector<llama_server_bridge_audio_session::transcript_piece> & pieces,
+    const std::vector<llama_server_bridge_audio_session::transcript_piece> & words,
     const llama_server_bridge_audio_session::assemble_options & options) {
+    std::vector<llama_server_bridge_audio_session::assigned_piece> assigned_words;
+    if (!words.empty()) {
+        assigned_words = audio_session_assign_word_speakers(spans, words, options);
+        audio_session_smooth_sentence_word_speakers(assigned_words);
+        audio_session_refine_sentence_word_boundaries(assigned_words, spans);
+    }
+
     std::vector<llama_server_bridge_audio_session::assigned_piece> out;
     out.reserve(pieces.size());
     for (const auto & piece : pieces) {
         out.push_back({
-            audio_session_dominant_speaker_for_piece(piece, spans, options),
+            audio_session_speaker_from_assigned_words(piece, assigned_words)
+                .value_or(audio_session_dominant_speaker_for_piece(piece, spans, options).value_or(std::string())),
             piece.start_sample,
             piece.end_sample,
             piece.text,
         });
+        if (out.back().speaker.has_value() && out.back().speaker->empty()) {
+            out.back().speaker.reset();
+        }
     }
     return out;
 }
@@ -721,6 +1197,42 @@ static void audio_session_repair_unassigned_boundaries_with_words(
     }
 
     pieces = std::move(repaired);
+}
+
+static void audio_session_absorb_short_speaker_islands(
+    std::vector<llama_server_bridge_audio_session::assigned_piece> & pieces) {
+    if (pieces.size() < 3) {
+        return;
+    }
+
+    for (size_t index = 1; index + 1 < pieces.size(); ++index) {
+        if (!pieces[index].speaker.has_value() ||
+            !pieces[index - 1].speaker.has_value() ||
+            !pieces[index + 1].speaker.has_value()) {
+            continue;
+        }
+
+        const std::string & cur_speaker = *pieces[index].speaker;
+        const std::string & prev_speaker = *pieces[index - 1].speaker;
+        const std::string & next_speaker = *pieces[index + 1].speaker;
+        if (prev_speaker != next_speaker || cur_speaker == prev_speaker) {
+            continue;
+        }
+
+        const uint64_t duration_samples = pieces[index].end_sample > pieces[index].start_sample
+            ? pieces[index].end_sample - pieces[index].start_sample
+            : 0;
+        const size_t word_count = audio_session_assigned_piece_word_count(pieces[index]);
+        const bool short_fragment = duration_samples <= 32000
+            && (word_count <= 4
+                || audio_session_starts_with_continuation(pieces[index].text)
+                || !audio_session_ends_sentence(pieces[index].text));
+        if (!short_fragment) {
+            continue;
+        }
+
+        pieces[index].speaker = prev_speaker;
+    }
 }
 
 static bool audio_session_should_insert_space_between(
@@ -866,8 +1378,10 @@ static bool audio_session_recompute_transcript_markdown_locked(
     auto assigned = audio_session_assign_pieces(
         audio_session_active_spans(state),
         state.pieces,
+        state.words,
         state.options);
     audio_session_repair_unassigned_boundaries_with_words(assigned, state.words);
+    audio_session_absorb_short_speaker_islands(assigned);
     const auto turns = audio_session_merge_turns(assigned);
     const std::string markdown =
         audio_session_turns_to_markdown(turns, session->params.expected_input_sample_rate_hz);

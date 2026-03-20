@@ -17,11 +17,14 @@ use std::fs;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 use tower_http::cors::{Any, CorsLayer};
+
+const CLUSTER_INSTANCES_CACHE_TTL: Duration = Duration::from_millis(750);
+const CLUSTER_INSTANCES_STALE_FALLBACK_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 struct ManagedApiState {
@@ -30,6 +33,13 @@ struct ManagedApiState {
     api_key: Option<String>,
     allowed_client_ips: Vec<String>,
     request_gate: Arc<Semaphore>,
+    instances_cache: Arc<Mutex<Option<CachedClusterInstances>>>,
+}
+
+#[derive(Clone)]
+struct CachedClusterInstances {
+    instances: Vec<ResolvedApiInstance>,
+    fetched_at: Instant,
 }
 
 pub struct PublicServerHandle {
@@ -191,6 +201,7 @@ pub fn start_public_server(
         api_key: config.api_key.clone(),
         allowed_client_ips: config.allowed_client_ips.clone(),
         request_gate: Arc::new(Semaphore::new(1)),
+        instances_cache: Arc::new(Mutex::new(None)),
     });
 
     let thread_handle = thread::spawn(move || {
@@ -875,10 +886,49 @@ async fn run_transcriptions(
 }
 
 fn list_cluster_instances(state: &ManagedApiState) -> Result<Vec<ResolvedApiInstance>, ApiError> {
-    let telemetry = AgentClient::new(state.local_control_addr.clone())
+    if let Some(cached) = cached_cluster_instances(state, CLUSTER_INSTANCES_CACHE_TTL) {
+        return Ok(cached);
+    }
+
+    match AgentClient::new(state.local_control_addr.clone())
         .get_cluster_telemetry()
-        .map_err(map_runtime_error)?;
-    Ok(flatten_cluster_instances(telemetry))
+        .map(flatten_cluster_instances)
+        .map_err(map_runtime_error)
+    {
+        Ok(instances) => {
+            store_cluster_instances_cache(state, &instances);
+            Ok(instances)
+        }
+        Err(err) => {
+            if let Some(cached) =
+                cached_cluster_instances(state, CLUSTER_INSTANCES_STALE_FALLBACK_TTL)
+            {
+                return Ok(cached);
+            }
+            Err(err)
+        }
+    }
+}
+
+fn cached_cluster_instances(
+    state: &ManagedApiState,
+    max_age: Duration,
+) -> Option<Vec<ResolvedApiInstance>> {
+    let guard = state.instances_cache.lock().ok()?;
+    let cached = guard.as_ref()?;
+    if cached.fetched_at.elapsed() > max_age {
+        return None;
+    }
+    Some(cached.instances.clone())
+}
+
+fn store_cluster_instances_cache(state: &ManagedApiState, instances: &[ResolvedApiInstance]) {
+    if let Ok(mut guard) = state.instances_cache.lock() {
+        *guard = Some(CachedClusterInstances {
+            instances: instances.to_vec(),
+            fetched_at: Instant::now(),
+        });
+    }
 }
 
 fn flatten_cluster_instances(telemetry: Vec<TelemetrySnapshot>) -> Vec<ResolvedApiInstance> {

@@ -108,7 +108,9 @@ static voxtral_gpu_backend parse_backend_name_hint(const std::string & backend_n
     if (lowered.rfind("cuda", 0) == 0 || lowered.rfind("ggml-cuda", 0) == 0) {
         return voxtral_gpu_backend::cuda;
     }
-    if (lowered.rfind("metal", 0) == 0 || lowered.rfind("ggml-metal", 0) == 0) {
+    if (lowered.rfind("metal", 0) == 0 ||
+        lowered.rfind("ggml-metal", 0) == 0 ||
+        lowered.rfind("mtl", 0) == 0) {
         return voxtral_gpu_backend::metal;
     }
     if (lowered.rfind("vulkan", 0) == 0 || lowered.rfind("ggml-vulkan", 0) == 0) {
@@ -159,6 +161,17 @@ static ggml_backend_t init_named_backend(const std::string & backend_name) {
 
     ensure_backend_registry_loaded();
     return ggml_backend_init_by_name(backend_name.c_str(), nullptr);
+}
+
+static bool try_init_metal_backend(ggml_backend_t & backend) {
+#ifdef __APPLE__
+    backend = init_named_backend("MTL0");
+    if (backend != nullptr) {
+        return true;
+    }
+#endif
+    backend = init_named_backend("Metal");
+    return backend != nullptr;
 }
 
 static ggml_tensor * ggml_rowwise_scale(
@@ -970,8 +983,10 @@ voxtral_model * voxtral_model_load_from_file(
                 }
                 break;
             case voxtral_gpu_backend::metal:
-                if (!try_named_backend("Metal")) {
+                if (!try_init_metal_backend(weights_backend)) {
                     log_info("Metal backend init failed");
+                } else {
+                    resolved_gpu = detect_backend_gpu_type(weights_backend);
                 }
                 break;
             case voxtral_gpu_backend::vulkan:
@@ -981,9 +996,11 @@ voxtral_model * voxtral_model_load_from_file(
                 break;
             case voxtral_gpu_backend::auto_detect:
                 if (!try_named_backend("CUDA0") &&
-                    !try_named_backend("Metal") &&
+                    !try_init_metal_backend(weights_backend) &&
                     !try_named_backend("Vulkan0")) {
                     log_info("no GPU backend available, using CPU");
+                } else if (weights_backend) {
+                    resolved_gpu = detect_backend_gpu_type(weights_backend);
                 }
                 break;
             case voxtral_gpu_backend::none:
@@ -1246,13 +1263,16 @@ voxtral_context * voxtral_init_from_model(
                 try_named_ctx("CUDA0", "CUDA backend init failed");
                 break;
             case voxtral_gpu_backend::metal:
-                try_named_ctx("Metal", "Metal backend init failed");
+                if (!try_named_ctx("MTL0", "Metal backend init failed") &&
+                    !try_named_ctx("Metal", "Metal backend init failed")) {
+                }
                 break;
             case voxtral_gpu_backend::vulkan:
                 try_named_ctx("Vulkan0", "Vulkan backend init failed");
                 break;
             case voxtral_gpu_backend::auto_detect:
                 if (!try_named_ctx("CUDA0", "CUDA backend init failed") &&
+                    !try_named_ctx("MTL0", "Metal backend init failed") &&
                     !try_named_ctx("Metal", "Metal backend init failed") &&
                     !try_named_ctx("Vulkan0", "Vulkan backend init failed")) {
                     LOG_INFO(ctx, "no GPU backend available, using CPU");
@@ -1897,6 +1917,34 @@ static void encoder_kv_cache_shift_left(voxtral_context * ctx, int32_t shift) {
     ctx->enc_kv_pos_base += shift;
 }
 
+static void decoder_memory_shift_left(voxtral_context * ctx, int32_t shift) {
+    if (ctx == nullptr || shift <= 0 || ctx->decoder_memory == nullptr) {
+        return;
+    }
+    if (shift >= ctx->dec_seq_len) {
+        std::vector<uint8_t> bytes(ggml_nbytes(ctx->decoder_memory), 0);
+        ggml_backend_tensor_set(ctx->decoder_memory, bytes.data(), 0, bytes.size());
+        ctx->dec_seq_len = 0;
+        return;
+    }
+
+    std::vector<uint8_t> bytes(ggml_nbytes(ctx->decoder_memory));
+    ggml_backend_tensor_get(ctx->decoder_memory, bytes.data(), 0, bytes.size());
+
+    const size_t row_bytes = ctx->decoder_memory->nb[1];
+    const size_t kept_rows = static_cast<size_t>(ctx->dec_seq_len - shift);
+    const size_t cleared_rows = static_cast<size_t>(shift);
+
+    std::memmove(
+        bytes.data(),
+        bytes.data() + static_cast<size_t>(shift) * row_bytes,
+        kept_rows * row_bytes);
+    std::memset(bytes.data() + kept_rows * row_bytes, 0, cleared_rows * row_bytes);
+
+    ggml_backend_tensor_set(ctx->decoder_memory, bytes.data(), 0, bytes.size());
+    ctx->dec_seq_len = std::max<int32_t>(0, ctx->dec_seq_len - shift);
+}
+
 // ============================================================================
 // Graph Building: Encoder
 // ============================================================================
@@ -2458,9 +2506,10 @@ static void log_col_major_tensor_sample(
         stddev);
 }
 
-static void log_decoder_memory_window_sample(
+static void log_decoder_memory_range_sample(
     voxtral_context * ctx,
     const char * label,
+    int32_t start_token,
     int32_t stats_tokens) {
 
     if (ctx == nullptr ||
@@ -2470,7 +2519,8 @@ static void log_decoder_memory_window_sample(
         return;
     }
 
-    const int32_t token_count = std::min<int32_t>(stats_tokens, ctx->dec_seq_len);
+    const int32_t clamped_start = std::max<int32_t>(0, std::min<int32_t>(start_token, ctx->dec_seq_len));
+    const int32_t token_count = std::min<int32_t>(stats_tokens, ctx->dec_seq_len - clamped_start);
     if (token_count <= 0) {
         return;
     }
@@ -2484,17 +2534,17 @@ static void log_decoder_memory_window_sample(
     ggml_backend_tensor_get(
         ctx->decoder_memory,
         token0.data(),
-        0,
+        (size_t) clamped_start * ctx->decoder_memory->nb[1],
         (size_t) dims * sizeof(float));
     ggml_backend_tensor_get(
         ctx->decoder_memory,
         token_last.data(),
-        (size_t) (token_count - 1) * ctx->decoder_memory->nb[1],
+        (size_t) (clamped_start + token_count - 1) * ctx->decoder_memory->nb[1],
         (size_t) dims * sizeof(float));
     ggml_backend_tensor_get(
         ctx->decoder_memory,
         stats.data(),
-        0,
+        (size_t) clamped_start * ctx->decoder_memory->nb[1],
         stats.size() * sizeof(float));
 
     double sum = 0.0;
@@ -2510,16 +2560,25 @@ static void log_decoder_memory_window_sample(
 
     LOG_INFO(
         ctx,
-        "%s: tokens=%d token0_first%d=%s token%d_first%d=%s mean=%.6f std=%.6f",
+        "%s: start=%d tokens=%d token0_first%d=%s token%d_first%d=%s mean=%.6f std=%.6f",
         label,
+        clamped_start,
         token_count,
         dims,
         format_float_slice(token0.data(), dims).c_str(),
-        token_count - 1,
+        clamped_start + token_count - 1,
         dims,
         format_float_slice(token_last.data(), dims).c_str(),
         mean,
         stddev);
+}
+
+static void log_decoder_memory_window_sample(
+    voxtral_context * ctx,
+    const char * label,
+    int32_t stats_tokens) {
+
+    log_decoder_memory_range_sample(ctx, label, 0, stats_tokens);
 }
 
 static ggml_tensor * find_tensor_in_graph(ggml_cgraph * gf, const char * name);
@@ -4487,12 +4546,16 @@ struct voxtral_stream {
     int32_t total_audio_tokens = 0;
     bool decoder_started = false;
     bool eos_seen = false;
+    bool pad_boundary_seen = false;
     bool finished = false;
     int32_t prev_token = VOXTRAL_TOKEN_BOS;
+    int32_t feedback_token = VOXTRAL_TOKEN_STREAMING_PAD;
     int32_t gen_pos = 0;
     int32_t generated_token_index = 0;  // counts all generated token positions in the active segment
     int32_t timeline_token_base = 0;    // absolute 80 ms token index for this segment
     int32_t min_new_mel_frames = 1;
+    int32_t consecutive_pad_tokens = 0;
+    bool seen_visible_text = false;
 
     std::string pending_piece_text;
     int32_t pending_piece_begin_token_index = -1;
@@ -4788,6 +4851,34 @@ static bool run_stream_adapter_append(
         if (out_dec_tokens != nullptr) {
             *out_dec_tokens = usable_enc / VOXTRAL_DOWNSAMPLE_FACTOR;
         }
+        if (static_cast<int>(stream->ctx->log_level) >= static_cast<int>(voxtral_log_level::debug)) {
+            const int32_t appended_dec_tokens = usable_enc / VOXTRAL_DOWNSAMPLE_FACTOR;
+            const int32_t dec_end = dec_dst_offset + appended_dec_tokens;
+            const auto crosses = [&](int32_t marker) {
+                return dec_dst_offset <= marker && dec_end >= marker;
+            };
+            if (dec_dst_offset == 0 ||
+                crosses(256) ||
+                crosses(320) ||
+                crosses(384) ||
+                crosses(512) ||
+                crosses(640)) {
+                LOG_DBG(
+                    stream->ctx,
+                    "stream adapter append: dec_dst_offset=%d appended=%d dec_end=%d total_enc=%d leftover=%d",
+                    dec_dst_offset,
+                    appended_dec_tokens,
+                    dec_end,
+                    total_enc,
+                    leftover_enc);
+                const int32_t tail_start = std::max<int32_t>(0, dec_end - 39);
+                log_decoder_memory_range_sample(
+                    stream->ctx,
+                    "stream adapter decoder_memory tail sample",
+                    tail_start,
+                    39);
+            }
+        }
     }
 
     stream->enc_residual_count = leftover_enc;
@@ -4882,6 +4973,51 @@ static void flush_stream_piece_buffer(
     stream.pending_piece_end_token_index = -1;
 }
 
+static void restart_stream_after_eos(
+    voxtral_stream & stream,
+    std::vector<voxtral_stream_event> & out_events) {
+
+    if (stream.ctx == nullptr) {
+        return;
+    }
+
+    flush_stream_piece_buffer(stream, out_events);
+
+    const int32_t delay_tokens = delay_ms_to_tokens(stream.params.delay_ms);
+    const int32_t overlap_tokens = std::min(std::max(delay_tokens, 1), stream.generated_token_index);
+    const int32_t trim_tokens = std::max(0, stream.generated_token_index - overlap_tokens);
+    LOG_INFO(
+        stream.ctx,
+        "stream restart: reason=%s timeline_base=%d gen_index=%d total_audio_tokens=%d overlap=%d trim=%d",
+        stream.eos_seen ? "eos" : "pad-boundary",
+        stream.timeline_token_base,
+        stream.generated_token_index,
+        stream.total_audio_tokens,
+        overlap_tokens,
+        trim_tokens);
+    if (trim_tokens > 0) {
+        decoder_memory_shift_left(stream.ctx, trim_tokens);
+        stream.total_audio_tokens = std::max<int32_t>(0, stream.total_audio_tokens - trim_tokens);
+        stream.timeline_token_base += trim_tokens;
+    }
+
+    clear_kv_cache(stream.ctx);
+    stream.ctx->dec_step_cached_sched_ready = false;
+    stream.decoder_started = false;
+    stream.eos_seen = false;
+    stream.pad_boundary_seen = false;
+    stream.prev_token = VOXTRAL_TOKEN_BOS;
+    stream.feedback_token = VOXTRAL_TOKEN_STREAMING_PAD;
+    stream.gen_pos = 0;
+    stream.generated_token_index = 0;
+    stream.consecutive_pad_tokens = 0;
+    stream.seen_visible_text = false;
+}
+
+static bool stream_uses_segment_boundaries(const voxtral_stream & stream) {
+    return !stream.params.continuous_mode;
+}
+
 static void append_stream_piece_token(
     voxtral_stream & stream,
     int32_t token_index,
@@ -4892,6 +5028,43 @@ static void append_stream_piece_token(
     }
     stream.pending_piece_end_token_index = token_index + 1;
     stream.pending_piece_text.append(text);
+}
+
+static void update_stream_boundary_state(
+    voxtral_stream & stream,
+    int32_t token_id,
+    bool visible_text_emitted) {
+
+    if (!stream_uses_segment_boundaries(stream)) {
+        stream.consecutive_pad_tokens = 0;
+        if (visible_text_emitted) {
+            stream.seen_visible_text = true;
+        }
+        return;
+    }
+
+    if (token_id == VOXTRAL_TOKEN_STREAMING_PAD) {
+        if (stream.seen_visible_text) {
+            stream.consecutive_pad_tokens += 1;
+            if (stream.consecutive_pad_tokens >= std::max(1, stream.params.right_pad_tokens)) {
+                if (!stream.pad_boundary_seen) {
+                    LOG_INFO(
+                        stream.ctx,
+                        "stream boundary armed: %d consecutive pad tokens after text at gen_index=%d total_audio_tokens=%d",
+                        stream.consecutive_pad_tokens,
+                        stream.generated_token_index,
+                        stream.total_audio_tokens);
+                }
+                stream.pad_boundary_seen = true;
+            }
+        }
+        return;
+    }
+
+    stream.consecutive_pad_tokens = 0;
+    if (visible_text_emitted) {
+        stream.seen_visible_text = true;
+    }
 }
 
 static bool pending_piece_ends_sentence(const std::string & text) {
@@ -4916,6 +5089,12 @@ static bool text_begins_sentence(const std::string & text) {
         return std::isupper(ch) != 0;
     }
     return false;
+}
+
+static void update_stream_feedback_token(voxtral_stream & stream, int32_t token_id) {
+    if (token_id != VOXTRAL_TOKEN_EOS) {
+        stream.feedback_token = token_id;
+    }
 }
 
 struct voxtral_stream_conv_debug_state {
@@ -5858,11 +6037,10 @@ static bool stream_run_encoder_bounded(
 
     const int32_t mel_start = stream.mel_cursor - stream.mel.mel_frame_offset;
     const float * mel_ptr = stream.mel.mel.data() + (size_t) mel_start * VOXTRAL_NUM_MEL_BINS;
-    // CUDA still has a correctness issue in the device conv-stem path.
-    // Keep the encoder/decoder on GPU, but use the known-good CPU conv stem there for now.
-    const bool use_device_conv_stem =
-        ctx->gpu_type != voxtral_gpu_backend::none &&
-        ctx->gpu_type != voxtral_gpu_backend::cuda;
+    // The incremental device conv stem is still not correctness-stable on macOS Metal.
+    // Keep the encoder/decoder on GPU, but force the known-good CPU conv stem there.
+    // Vulkan remains on the device path, and CUDA already uses CPU conv stem here.
+    const bool use_device_conv_stem = ctx->gpu_type == voxtral_gpu_backend::vulkan;
     const bool run_conv_debug =
         static_cast<int>(ctx->log_level) >= static_cast<int>(voxtral_log_level::debug);
     const voxtral_stream_conv_debug_state conv_debug_state =
@@ -5987,6 +6165,13 @@ static bool stream_run_decoder(
     voxtral_context * ctx = stream.ctx;
     const int32_t delay_tokens = delay_ms_to_tokens(stream.params.delay_ms);
     const int32_t prompt_len = 1 + VOXTRAL_N_LEFT_PAD_TOKENS + delay_tokens;
+    const bool use_segment_boundaries = stream_uses_segment_boundaries(stream);
+
+    if (use_segment_boundaries &&
+        (stream.eos_seen || stream.pad_boundary_seen) &&
+        stream.total_audio_tokens > stream.generated_token_index) {
+        restart_stream_after_eos(stream, out_events);
+    }
 
     if (!stream.decoder_started && stream.total_audio_tokens < prompt_len) {
         LOG_DBG(ctx, "stream_run_decoder: waiting total_audio_tokens=%d prompt_len=%d",
@@ -5996,6 +6181,7 @@ static bool stream_run_decoder(
 
     auto handle_generated_token = [&](int32_t token_id, int32_t token_index) {
         std::string text;
+        bool visible_text_emitted = false;
         if (decode_visible_token_piece(*ctx->model, token_id, text)) {
             if (!stream.pending_piece_text.empty() &&
                 pending_piece_ends_sentence(stream.pending_piece_text) &&
@@ -6003,10 +6189,11 @@ static bool stream_run_decoder(
                 flush_stream_piece_buffer(stream, out_events);
             }
             append_stream_piece_token(stream, token_index, text);
-            return;
+            visible_text_emitted = true;
+        } else {
+            flush_stream_piece_buffer(stream, out_events);
         }
-
-        flush_stream_piece_buffer(stream, out_events);
+        update_stream_boundary_state(stream, token_id, visible_text_emitted);
     };
 
     if (!stream.decoder_started) {
@@ -6014,6 +6201,7 @@ static bool stream_run_decoder(
         clear_kv_cache(ctx);
         std::vector<int32_t> prompt_ids((size_t) prompt_len, VOXTRAL_TOKEN_STREAMING_PAD);
         prompt_ids[0] = VOXTRAL_TOKEN_BOS;
+        stream.feedback_token = prompt_ids[(size_t) prompt_len - 1];
 
         if (prompt_len > 1 && !run_decoder_prefill(ctx, prompt_ids.data(), prompt_len - 1, nullptr, nullptr)) {
             if (error) {
@@ -6029,20 +6217,23 @@ static bool stream_run_decoder(
         }
 
         handle_generated_token(stream.prev_token, stream.generated_token_index);
+        update_stream_feedback_token(stream, stream.prev_token);
         stream.generated_token_index += 1;
-        stream.eos_seen = (stream.prev_token == VOXTRAL_TOKEN_EOS);
+        stream.eos_seen = use_segment_boundaries && (stream.prev_token == VOXTRAL_TOKEN_EOS);
         stream.gen_pos = prompt_len;
         stream.decoder_started = true;
     }
 
     int32_t steps = 0;
-    while (!stream.eos_seen &&
+    while ((!use_segment_boundaries || !stream.eos_seen) &&
+           (!use_segment_boundaries || !stream.pad_boundary_seen) &&
            stream.gen_pos < stream.total_audio_tokens &&
            steps < std::max(1, stream.params.max_tokens_per_step)) {
 
         LOG_DBG(ctx, "stream_run_decoder: step gen_pos=%d prev_token=%d total_audio_tokens=%d",
             stream.gen_pos, stream.prev_token, stream.total_audio_tokens);
-        if (!run_decoder_step_from_prev_token(ctx, stream.gen_pos, stream.gen_pos, nullptr, &stream.prev_token)) {
+        const int32_t input_token = stream.feedback_token;
+        if (!run_decoder_step(ctx, input_token, stream.gen_pos, stream.gen_pos, nullptr, &stream.prev_token)) {
             if (error) {
                 *error = "voxtral decoder step failed";
             }
@@ -6050,8 +6241,9 @@ static bool stream_run_decoder(
         }
 
         handle_generated_token(stream.prev_token, stream.generated_token_index);
+        update_stream_feedback_token(stream, stream.prev_token);
         stream.generated_token_index += 1;
-        stream.eos_seen = (stream.prev_token == VOXTRAL_TOKEN_EOS);
+        stream.eos_seen = use_segment_boundaries && (stream.prev_token == VOXTRAL_TOKEN_EOS);
         stream.gen_pos += 1;
         steps += 1;
     }
@@ -6180,11 +6372,15 @@ bool voxtral_stream_reset(
     stream.total_audio_tokens = 0;
     stream.decoder_started = false;
     stream.eos_seen = false;
+    stream.pad_boundary_seen = false;
     stream.finished = false;
     stream.prev_token = VOXTRAL_TOKEN_BOS;
+    stream.feedback_token = VOXTRAL_TOKEN_STREAMING_PAD;
     stream.gen_pos = 0;
     stream.generated_token_index = 0;
     stream.timeline_token_base = 0;
+    stream.consecutive_pad_tokens = 0;
+    stream.seen_visible_text = false;
     stream.pending_piece_text.clear();
     stream.pending_piece_begin_token_index = -1;
     stream.pending_piece_end_token_index = -1;
@@ -6241,7 +6437,8 @@ bool voxtral_stream_flush(
     if (!stream_run_realtime_cycle(stream, out_events, error, bounded_encoder_steps)) {
         return false;
     }
-    while (!stream.eos_seen && stream.gen_pos < stream.total_audio_tokens) {
+    while ((!stream_uses_segment_boundaries(stream) || !stream.eos_seen) &&
+           stream.gen_pos < stream.total_audio_tokens) {
         const int32_t prev_gen_pos = stream.gen_pos;
         const int32_t prev_generated = stream.generated_token_index;
         const bool prev_started = stream.decoder_started;

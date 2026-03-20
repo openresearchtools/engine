@@ -12,6 +12,8 @@ pub struct PairedPeerSettings {
     pub display_name: String,
     pub control_addr: String,
     #[serde(default)]
+    pub known_control_addrs: Vec<String>,
+    #[serde(default)]
     pub shared_token_obfuscated: String,
 }
 
@@ -20,6 +22,8 @@ pub struct ControllerSettings {
     pub runtime_dir: String,
     #[serde(default)]
     pub runtime_unblock_pending_dir: String,
+    #[serde(default = "default_local_control_addr_auto")]
+    pub local_control_addr_auto: bool,
     pub local_control_addr: String,
     pub server_bind_addr: String,
     pub server_allow_cors: bool,
@@ -64,6 +68,7 @@ impl Default for ControllerSettings {
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
             runtime_unblock_pending_dir: String::new(),
+            local_control_addr_auto: true,
             local_control_addr: "127.0.0.1:46211".to_string(),
             server_bind_addr: "127.0.0.1:46310".to_string(),
             server_allow_cors: false,
@@ -78,6 +83,10 @@ impl Default for ControllerSettings {
             paired_peers: Vec::new(),
         }
     }
+}
+
+fn default_local_control_addr_auto() -> bool {
+    true
 }
 
 pub fn controller_settings_path() -> Option<PathBuf> {

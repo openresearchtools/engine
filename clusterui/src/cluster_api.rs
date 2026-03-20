@@ -360,6 +360,16 @@ pub struct ManualDeviceAllocation {
     pub layer_count: u32,
     #[serde(default)]
     pub rpc_device: bool,
+    #[serde(default)]
+    pub source_node_id: String,
+    #[serde(default)]
+    pub source_control_addr: String,
+    #[serde(default = "manual_device_unknown_index")]
+    pub source_bridge_device_index: i32,
+}
+
+const fn manual_device_unknown_index() -> i32 {
+    -1
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1407,9 +1417,21 @@ impl ClusterApi {
         let empty_chat_result = self.empty_chat_result;
         let chat_result_free = self.chat_result_free;
         let default_chat_request = self.default_chat_request;
-        let prompt = req.prompt.clone();
-        let reasoning = req.reasoning.clone();
-        let reasoning_format = req.reasoning_format.clone();
+        let prompt_c = CString::new(req.prompt.as_str()).context("invalid prompt")?;
+        let reasoning_c = req
+            .reasoning
+            .as_ref()
+            .filter(|v| !v.is_empty())
+            .map(|value| CString::new(value.as_str()))
+            .transpose()
+            .context("invalid reasoning")?;
+        let reasoning_format_c = req
+            .reasoning_format
+            .as_ref()
+            .filter(|v| !v.is_empty())
+            .map(|value| CString::new(value.as_str()))
+            .transpose()
+            .context("invalid reasoning format")?;
         let instance_id = req.instance_id;
         let n_predict = req.n_predict;
         let temperature = req.temperature;
@@ -1420,15 +1442,6 @@ impl ClusterApi {
         let repeat_penalty = req.repeat_penalty;
         let reasoning_budget = req.reasoning_budget;
         let (rc, text, error, metrics) = self.run_with_large_stack("chat-complete", move || {
-            let prompt_c = CString::new(prompt.as_str()).expect("validated prompt");
-            let reasoning_c = reasoning
-                .as_ref()
-                .filter(|v| !v.is_empty())
-                .map(|value| CString::new(value.as_str()).expect("validated reasoning"));
-            let reasoning_format_c = reasoning_format
-                .as_ref()
-                .filter(|v| !v.is_empty())
-                .map(|value| CString::new(value.as_str()).expect("validated reasoning format"));
             let mut raw_req = unsafe { default_chat_request() };
             raw_req.instance_id = instance_id;
             raw_req.prompt = prompt_c.as_ptr();

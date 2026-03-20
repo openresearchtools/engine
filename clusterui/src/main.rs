@@ -22,8 +22,8 @@ use agent::{
 use app_icon::build_engine_window_icon;
 use catalog::{default_models_dir, ManagedModelEntry, ManagedModelTask};
 use cluster_api::{
-    default_runtime_dir, ChatRequest, CreateInstanceParams, InferenceMetrics, InstanceModelKind,
-    RetentionMode,
+    default_runtime_dir, ChatRequest, ClusterApi, CreateInstanceParams, InferenceMetrics,
+    InstanceModelKind, RetentionMode,
 };
 use eframe::{egui, App, CreationContext, NativeOptions};
 use egui_commonmark::CommonMarkCache;
@@ -110,6 +110,7 @@ fn main() -> eframe::Result<()> {
 struct ClusterControllerApp {
     host: NodeHost,
     runtime_dir_edit: String,
+    local_control_addr_auto: bool,
     local_control_addr_edit: String,
     status: String,
     tray: Option<ControllerTray>,
@@ -191,6 +192,7 @@ struct ClusterControllerApp {
     pairing_poll_in_progress: bool,
     link_benchmark_in_progress: bool,
     manual_refresh_in_progress: bool,
+    manual_load_in_progress: bool,
     last_manual_refresh_completed_at: Option<Instant>,
     selected_supported_audio_repo: SupportedAudioRepo,
     allowed_control_addrs: BTreeSet<String>,
@@ -306,6 +308,7 @@ enum ControllerEvent {
     ManagedModels(Result<Vec<ManagedModelEntry>, String>),
     AvailableModelPackages(Result<Vec<ClusterModelPackageInfo>, String>),
     ServerStatus(Result<PublicApiStatus, String>),
+    ManualInstanceLoaded(Result<ManualInstanceLoadResult, String>),
 }
 
 struct ClusterRefreshPayload {
@@ -324,6 +327,11 @@ struct PairingPollPayload {
     pairing_requests: Vec<PairingRequestInfo>,
     discovery_status: DiscoveryStatus,
     topology_changed: bool,
+}
+
+struct ManualInstanceLoadResult {
+    owner_control_addr: String,
+    instance_id: i64,
 }
 
 struct StartupPreparation {
@@ -360,25 +368,46 @@ impl ClusterControllerApp {
         } else {
             args.runtime_dir.clone()
         };
-        let bind_addr = if use_saved_control_addr {
-            let configured = saved_settings
+        let local_control_addr_auto = if use_saved_control_addr {
+            saved_settings
+                .as_ref()
+                .map(|settings| settings.local_control_addr_auto)
+                .unwrap_or(true)
+        } else {
+            args.bind_addr == default_control_addr
+        };
+        let configured_local_control_addr = if use_saved_control_addr {
+            saved_settings
                 .as_ref()
                 .map(|settings| settings.local_control_addr.clone())
-                .unwrap_or_else(|| args.bind_addr.clone());
-            preferred_local_control_addr(&configured)
+                .unwrap_or_else(|| args.bind_addr.clone())
         } else {
-            preferred_local_control_addr(&args.bind_addr)
+            args.bind_addr.clone()
         };
+        let bind_addr = resolve_local_control_addr(
+            local_control_addr_auto,
+            &configured_local_control_addr,
+        );
         let promote_legacy_cluster_defaults = saved_settings
             .as_ref()
             .map(|settings| {
-                settings.local_control_addr.trim() == default_control_addr
+                (settings.local_control_addr_auto
+                    || settings.local_control_addr.trim() == default_control_addr)
                     && !settings.multi_node_rpc_enabled
                     && settings.paired_peers.is_empty()
             })
             .unwrap_or(false);
         let runtime_dir_edit = runtime_dir.display().to_string();
-        let local_control_addr_edit = bind_addr.clone();
+        let local_control_addr_edit = if local_control_addr_auto {
+            bind_addr.clone()
+        } else {
+            let trimmed = configured_local_control_addr.trim();
+            if trimmed.is_empty() {
+                bind_addr.clone()
+            } else {
+                trimmed.to_string()
+            }
+        };
         let host = NodeHost::new(runtime_dir, bind_addr);
         let runtime_install_backends = runtime_installer::available_runtime_backends();
         let runtime_unblock_pending_dir = saved_settings
@@ -388,6 +417,7 @@ impl ClusterControllerApp {
         let mut app = Self {
             host,
             runtime_dir_edit,
+            local_control_addr_auto,
             local_control_addr_edit,
             status: String::new(),
             tray: None,
@@ -514,6 +544,7 @@ impl ClusterControllerApp {
             pairing_poll_in_progress: false,
             link_benchmark_in_progress: false,
             manual_refresh_in_progress: false,
+            manual_load_in_progress: false,
             last_manual_refresh_completed_at: None,
             selected_supported_audio_repo: SupportedAudioRepo::Whisper,
             allowed_control_addrs: BTreeSet::new(),
@@ -579,6 +610,9 @@ impl ClusterControllerApp {
         }
         self.startup_initialized = true;
         self.enqueue_startup_preparation();
+        if self.startup_connect_due_at.is_none() {
+            self.startup_connect_due_at = Some(Instant::now() + Duration::from_secs(2));
+        }
         self.status = "Loading Engine controller...".to_string();
     }
 
@@ -724,10 +758,29 @@ impl ClusterControllerApp {
         }
     }
 
+    fn resolved_local_control_addr(&self) -> String {
+        resolve_local_control_addr(
+            self.local_control_addr_auto,
+            self.local_control_addr_edit.trim(),
+        )
+    }
+
+    fn local_node_snapshot(&self) -> Option<&NodeSnapshot> {
+        self.nodes
+            .iter()
+            .find(|node| node_matches_control_addr(node, self.host.control_addr()))
+    }
+
+    fn local_node_control_addrs(&self) -> Vec<String> {
+        self.local_node_snapshot()
+            .map(node_control_addr_candidates)
+            .unwrap_or_else(|| vec![self.host.control_addr().to_string()])
+    }
+
     fn rebuild_host_from_inputs(&mut self) {
         self.host = NodeHost::new(
             PathBuf::from(self.runtime_dir_edit.trim()),
-            self.local_control_addr_edit.trim().to_string(),
+            self.resolved_local_control_addr(),
         );
     }
 
@@ -739,7 +792,11 @@ impl ClusterControllerApp {
             .as_deref()
             .unwrap_or_default()
             .to_string();
-        settings.local_control_addr = self.local_control_addr_edit.trim().to_string();
+        settings.local_control_addr_auto = self.local_control_addr_auto;
+        settings.local_control_addr = persisted_local_control_addr_setting(
+            self.local_control_addr_edit.trim(),
+            self.local_control_addr_auto,
+        );
         settings.server_bind_addr = self.server_bind_addr_edit.trim().to_string();
         settings.server_allow_cors = self.server_allow_cors;
         settings.server_allowed_origins = self.server_allowed_origins_edit.clone();
@@ -921,7 +978,8 @@ impl ClusterControllerApp {
         self.create_params.allow_integrated_gpu = preset.allow_integrated_gpu;
         if let Some(owner_control_addr) = self.create_params.preferred_owner_control_addr.clone() {
             self.selected_control_addr = Some(owner_control_addr);
-            self.selected_rpc_peer_addrs = self.manual_remote_peer_control_addrs_for_owner();
+            let rpc_servers = self.create_params.rpc_servers.clone();
+            self.set_selected_rpc_workers_from_csv(rpc_servers.as_deref());
             let _ = self.refresh_selected_preview();
         }
         self.allowed_control_addrs.clear();
@@ -1053,20 +1111,32 @@ impl ClusterControllerApp {
             params.manual_devices_csv = None;
             params.manual_tensor_split = None;
         } else {
+            let (resolved_allocations, resolved_remote_control_addrs) =
+                crate::controller_ui::resolve_live_manual_device_allocations(self);
+            params.manual_device_allocations = resolved_allocations;
             let detected_layers = self
                 .selected_model_metadata()
                 .as_ref()
                 .and_then(|metadata| metadata.block_count);
             params.execution_group_id = "cluster:manual".to_string();
-            params.manual_devices_csv = self.manual_devices_csv_from_allocations();
-            params.manual_tensor_split = self.manual_tensor_split_from_allocations(detected_layers);
-            params.n_gpu_layers = self.manual_selected_gpu_layers(detected_layers);
+            params.manual_devices_csv =
+                Self::manual_devices_csv_from_allocations(&params.manual_device_allocations);
+            params.manual_tensor_split = Self::manual_tensor_split_from_allocations(
+                &params.manual_device_allocations,
+                detected_layers,
+            );
+            params.n_gpu_layers = Self::manual_selected_gpu_layers_from_allocations(
+                &params.manual_device_allocations,
+                detected_layers,
+                self.create_params.n_gpu_layers,
+            );
             params.rpc_servers = if params
                 .manual_device_allocations
                 .iter()
                 .any(|device| device.rpc_device)
             {
-                self.manual_rpc_servers_for_owner()
+                self.rpc_servers_for_control_addrs(resolved_remote_control_addrs.into_iter())
+                    .or_else(|| self.manual_rpc_servers_for_owner())
             } else {
                 None
             };
@@ -1081,26 +1151,49 @@ impl ClusterControllerApp {
             .filter(|value| !value.trim().is_empty())
     }
 
-    fn manual_remote_peer_control_addrs_for_owner(&self) -> BTreeSet<String> {
-        let Some(owner_control_addr) = self.manual_owner_control_addr() else {
-            return BTreeSet::new();
-        };
+    fn all_visible_rpc_peer_control_addrs_for_owner(
+        &self,
+        owner_control_addr: &str,
+    ) -> BTreeSet<String> {
         self.nodes
             .iter()
-            .filter(|node| node.control_addr != owner_control_addr)
+            .filter(|node| !node_matches_control_addr(node, owner_control_addr))
             .filter(|node| node.rpc_running)
             .map(|node| node.control_addr.clone())
             .collect()
     }
 
+    fn manual_remote_peer_control_addrs_for_owner(&self) -> BTreeSet<String> {
+        let Some(owner_control_addr) = self.manual_owner_control_addr() else {
+            return BTreeSet::new();
+        };
+        let selected = self.normalize_visible_node_addr_selection(&self.selected_rpc_peer_addrs);
+        self.nodes
+            .iter()
+            .filter(|node| !node_matches_control_addr(node, owner_control_addr))
+            .filter(|node| node.rpc_running)
+            .filter(|node| Self::addr_selection_contains_node(&selected, node))
+            .map(|node| node.control_addr.clone())
+            .collect()
+    }
+
     fn manual_rpc_servers_for_owner(&self) -> Option<String> {
+        self.rpc_servers_for_control_addrs(
+            self.manual_remote_peer_control_addrs_for_owner().into_iter(),
+        )
+    }
+
+    fn rpc_servers_for_control_addrs<I>(&self, control_addrs: I) -> Option<String>
+    where
+        I: IntoIterator<Item = String>,
+    {
         let endpoints = self
-            .manual_remote_peer_control_addrs_for_owner()
+            .normalize_visible_node_addr_selection(&control_addrs.into_iter().collect::<BTreeSet<_>>())
             .into_iter()
             .filter_map(|control_addr| {
                 self.nodes
                     .iter()
-                    .find(|node| node.control_addr == control_addr)
+                    .find(|node| node_matches_control_addr(node, &control_addr))
                     .and_then(rpc_endpoint_for_node)
             })
             .collect::<Vec<_>>();
@@ -1111,10 +1204,10 @@ impl ClusterControllerApp {
         }
     }
 
-    fn manual_devices_csv_from_allocations(&self) -> Option<String> {
-        let value = self
-            .create_params
-            .manual_device_allocations
+    fn manual_devices_csv_from_allocations(
+        allocations: &[crate::cluster_api::ManualDeviceAllocation],
+    ) -> Option<String> {
+        let value = allocations
             .iter()
             .map(|device| device.bridge_device_index.to_string())
             .collect::<Vec<_>>()
@@ -1127,17 +1220,27 @@ impl ClusterControllerApp {
     }
 
     fn manual_selected_gpu_layers(&self, detected_layer_count: Option<u32>) -> i32 {
-        if self.create_params.manual_device_allocations.is_empty() {
-            return self.create_params.n_gpu_layers;
+        Self::manual_selected_gpu_layers_from_allocations(
+            &self.create_params.manual_device_allocations,
+            detected_layer_count,
+            self.create_params.n_gpu_layers,
+        )
+    }
+
+    fn manual_selected_gpu_layers_from_allocations(
+        allocations: &[crate::cluster_api::ManualDeviceAllocation],
+        detected_layer_count: Option<u32>,
+        default_gpu_layers: i32,
+    ) -> i32 {
+        if allocations.is_empty() {
+            return default_gpu_layers;
         }
-        let selected_layers = self
-            .create_params
-            .manual_device_allocations
+        let selected_layers = allocations
             .iter()
             .map(|device| i64::from(device.layer_count))
             .sum::<i64>()
             .max(0);
-        if self.create_params.manual_device_allocations.len() == 1 && selected_layers == 0 {
+        if allocations.len() == 1 && selected_layers == 0 {
             return -1;
         }
         match detected_layer_count {
@@ -1147,33 +1250,24 @@ impl ClusterControllerApp {
     }
 
     fn manual_tensor_split_from_allocations(
-        &self,
+        allocations: &[crate::cluster_api::ManualDeviceAllocation],
         detected_layer_count: Option<u32>,
     ) -> Option<String> {
-        if self.create_params.manual_device_allocations.len() < 2 {
+        if allocations.len() < 2 {
             return None;
         }
         let total_layers = match detected_layer_count {
-            Some(total_layers) => self
-                .create_params
-                .manual_device_allocations
+            Some(total_layers) => allocations
                 .iter()
                 .map(|device| device.layer_count.min(total_layers))
                 .sum::<u32>(),
-            None => self
-                .create_params
-                .manual_device_allocations
-                .iter()
-                .map(|device| device.layer_count)
-                .sum::<u32>(),
+            None => allocations.iter().map(|device| device.layer_count).sum::<u32>(),
         };
         if total_layers == 0 {
             return None;
         }
 
-        let weights = self
-            .create_params
-            .manual_device_allocations
+        let weights = allocations
             .iter()
             .map(|device| {
                 let layers = detected_layer_count
@@ -1297,9 +1391,9 @@ impl ClusterControllerApp {
     }
 
     fn connect_local_host(&mut self) {
-        let preferred = preferred_local_control_addr(self.local_control_addr_edit.trim());
-        if preferred != self.local_control_addr_edit.trim() {
-            self.local_control_addr_edit = preferred;
+        let control_addr = self.resolved_local_control_addr();
+        if self.local_control_addr_auto && control_addr != self.local_control_addr_edit.trim() {
+            self.local_control_addr_edit = control_addr.clone();
         }
         self.rebuild_host_from_inputs();
         if self.local_connect_in_progress {
@@ -1307,11 +1401,10 @@ impl ClusterControllerApp {
             return;
         }
         let runtime_dir = PathBuf::from(self.runtime_dir_edit.trim());
-        let control_addr = self.local_control_addr_edit.trim().to_string();
         let tx = self.controller_worker_tx.clone();
         self.local_connect_in_progress = true;
         self.status = format!(
-            "Connecting local host {} using runtime {}...",
+            "Connecting local node via {} using runtime {}...",
             control_addr,
             runtime_dir.display()
         );
@@ -1319,7 +1412,7 @@ impl ClusterControllerApp {
             let result = ensure_local_agent(&runtime_dir, &control_addr)
                 .map(|_| {
                     format!(
-                        "Connected to local host {} using runtime {}",
+                        "Connected to local node via {} using runtime {}",
                         control_addr,
                         runtime_dir.display()
                     )
@@ -1921,13 +2014,23 @@ impl ClusterControllerApp {
             .create_params
             .preferred_owner_control_addr
             .clone()
+            .map(|control_addr| {
+                self.canonical_control_addr_for_visible_node(&control_addr)
+                    .unwrap_or(control_addr)
+            })
             .filter(|control_addr| {
                 self.allowed_control_addrs.is_empty()
-                    || self.allowed_control_addrs.contains(control_addr)
+                    || self.nodes.iter().any(|node| {
+                        node_matches_control_addr(node, control_addr)
+                            && Self::addr_selection_contains_node(&self.allowed_control_addrs, node)
+                    })
             })
             .or_else(|| {
                 if self.allowed_control_addrs.len() == 1 {
-                    self.allowed_control_addrs.iter().next().cloned()
+                    self.allowed_control_addrs.iter().next().map(|addr| {
+                        self.canonical_control_addr_for_visible_node(addr)
+                            .unwrap_or_else(|| addr.clone())
+                    })
                 } else {
                     None
                 }
@@ -2336,15 +2439,58 @@ impl ClusterControllerApp {
     fn node_display_name_for_control_addr(&self, control_addr: &str) -> String {
         self.nodes
             .iter()
-            .find(|node| node.control_addr == control_addr)
+            .find(|node| node_matches_control_addr(node, control_addr))
             .map(|node| node.node.display_name.clone())
             .or_else(|| {
                 self.peers
                     .iter()
-                    .find(|peer| peer.control_addr == control_addr)
+                    .find(|peer| peer_matches_control_addr(peer, control_addr))
                     .map(|peer| peer.display_name.clone())
             })
             .unwrap_or_else(|| control_addr.to_string())
+    }
+
+    fn canonical_control_addr_for_visible_node(&self, control_addr: &str) -> Option<String> {
+        self.nodes
+            .iter()
+            .find(|node| node_matches_control_addr(node, control_addr))
+            .map(|node| node.control_addr.clone())
+    }
+
+    fn addr_selection_contains_node(addrs: &BTreeSet<String>, node: &NodeSnapshot) -> bool {
+        node_control_addr_candidates(node)
+            .iter()
+            .any(|addr| addrs.contains(addr))
+    }
+
+    fn set_addr_selection_for_node(
+        addrs: &mut BTreeSet<String>,
+        node: &NodeSnapshot,
+        enabled: bool,
+    ) {
+        for addr in node_control_addr_candidates(node) {
+            addrs.remove(&addr);
+        }
+        if enabled {
+            addrs.insert(node.control_addr.clone());
+        }
+    }
+
+    fn normalize_visible_node_addr_selection(&self, addrs: &BTreeSet<String>) -> BTreeSet<String> {
+        let mut normalized = BTreeSet::new();
+        let mut matched = BTreeSet::new();
+        for node in &self.nodes {
+            if Self::addr_selection_contains_node(addrs, node) {
+                normalized.insert(node.control_addr.clone());
+                matched.extend(node_control_addr_candidates(node));
+            }
+        }
+        normalized.extend(
+            addrs.iter()
+                .filter(|addr| !matched.contains(*addr))
+                .cloned(),
+        );
+        normalized
     }
 
     fn drain_model_store_events(&mut self) {
@@ -2612,6 +2758,24 @@ impl ClusterControllerApp {
                         self.enqueue_server_status_refresh();
                     }
                 }
+                ControllerEvent::ManualInstanceLoaded(result) => {
+                    self.manual_load_in_progress = false;
+                    match result {
+                        Ok(loaded) => {
+                            self.selected_instance_id = Some(loaded.instance_id);
+                            self.status = format!(
+                                "Loaded instance {} on {}",
+                                loaded.instance_id, loaded.owner_control_addr
+                            );
+                            self.selected_page = controller_ui::ControllerPage::Instances;
+                            self.instance_creation_open = false;
+                            let _ = self.refresh_cluster();
+                            let _ = self.refresh_selected_preview();
+                            self.refresh_placement_candidates();
+                        }
+                        Err(err) => self.status = err,
+                    }
+                }
             }
         }
     }
@@ -2695,7 +2859,7 @@ impl ClusterControllerApp {
             .peers
             .iter()
             .filter(|peer| peer.trusted)
-            .map(|peer| peer.control_addr.clone())
+            .map(peer_identity_key)
             .collect::<BTreeSet<_>>();
         std::thread::spawn(move || {
             let result = query_pairing_poll(local_client, previous_trusted);
@@ -2746,7 +2910,22 @@ impl ClusterControllerApp {
         self.nodes = payload.nodes;
         self.telemetry = payload.telemetry;
         self.last_telemetry_refresh = Instant::now();
-        self.selected_control_addr = payload.selected_control_addr;
+        self.selected_control_addr = payload.selected_control_addr.and_then(|addr| {
+            self.canonical_control_addr_for_visible_node(&addr)
+                .or(Some(addr))
+        });
+        self.selected_rpc_peer_addrs =
+            self.normalize_visible_node_addr_selection(&self.selected_rpc_peer_addrs);
+        self.allowed_control_addrs =
+            self.normalize_visible_node_addr_selection(&self.allowed_control_addrs);
+        self.create_params.preferred_owner_control_addr = self
+            .create_params
+            .preferred_owner_control_addr
+            .clone()
+            .map(|addr| {
+                self.canonical_control_addr_for_visible_node(&addr)
+                    .unwrap_or(addr)
+            });
         self.preview_node = payload.preview_node;
         self.handle_pairing_request_updates();
 
@@ -2758,7 +2937,7 @@ impl ClusterControllerApp {
             || !self
                 .allowed_control_addrs
                 .iter()
-                .any(|addr| self.nodes.iter().any(|node| &node.control_addr == addr))
+                .any(|addr| self.nodes.iter().any(|node| node_matches_control_addr(node, addr)))
         {
             self.allowed_control_addrs = self.default_allowed_node_addrs();
         }
@@ -3041,8 +3220,8 @@ impl ClusterControllerApp {
         let mut values = self
             .nodes
             .iter()
+            .filter(|node| !restrict_to_allowed || Self::addr_selection_contains_node(&allowed, node))
             .map(|node| node.control_addr.clone())
-            .filter(|control_addr| !restrict_to_allowed || allowed.contains(control_addr))
             .collect::<Vec<_>>();
         values.sort();
         values.dedup();
@@ -3182,7 +3361,7 @@ impl ClusterControllerApp {
         let next_trusted = peers
             .iter()
             .filter(|peer| peer.trusted)
-            .map(|peer| peer.control_addr.clone())
+            .map(peer_identity_key)
             .collect::<BTreeSet<_>>();
         self.peers = peers;
         self.pairing_requests = pairing_requests;
@@ -3435,19 +3614,16 @@ impl ClusterControllerApp {
     }
 
     fn refresh_selected_preview(&mut self) -> Result<(), String> {
-        let Some(client) = self.selected_client() else {
+        if self.selected_control_addr.is_none() {
             self.preview_node = None;
             return Ok(());
-        };
-        let endpoints = self.selected_rpc_endpoints();
-        let snapshot = client
-            .get_snapshot_with_rpc(if endpoints.is_empty() {
-                None
-            } else {
-                Some(endpoints.join(","))
-            })
-            .map_err(|e| e.to_string())?;
-        self.preview_node = Some(snapshot);
+        }
+        if self.host.local_client().is_none() {
+            self.preview_node = None;
+            return Err("local host is not connected".to_string());
+        }
+        self.preview_node = None;
+        self.enqueue_cluster_refresh();
         Ok(())
     }
 
@@ -3499,7 +3675,7 @@ impl ClusterControllerApp {
         let selected = self.selected_control_addr.as_ref()?;
         self.nodes
             .iter()
-            .find(|node| &node.control_addr == selected)
+            .find(|node| node_matches_control_addr(node, selected))
     }
 
     fn selected_preview_node(&self) -> Option<&NodeSnapshot> {
@@ -3507,10 +3683,9 @@ impl ClusterControllerApp {
     }
 
     fn telemetry_for_control_addr(&self, control_addr: &str) -> Option<&TelemetrySnapshot> {
-        self.telemetry.iter().find(|snapshot| {
-            snapshot.control_addr == control_addr
-                || snapshot.advertised_control_addr.as_deref() == Some(control_addr)
-        })
+        self.telemetry
+            .iter()
+            .find(|snapshot| telemetry_matches_control_addr(snapshot, control_addr))
     }
 
     fn selected_telemetry(&self) -> Option<&TelemetrySnapshot> {
@@ -3527,15 +3702,23 @@ impl ClusterControllerApp {
     }
 
     fn selected_is_local(&self) -> bool {
-        self.selected_control_addr.as_deref() == Some(self.host.control_addr())
+        self.selected_control_addr.as_deref().is_some_and(|selected| {
+            self.local_node_snapshot()
+                .is_some_and(|node| node_matches_control_addr(node, selected))
+                || selected == self.host.control_addr()
+        })
     }
 
     fn selected_client(&self) -> Option<AgentClient> {
         let selected = self.selected_control_addr.as_ref()?;
-        if selected == self.host.control_addr() {
+        if self.selected_is_local() {
             return self.host.local_client();
         }
-        Some(AgentClient::new(selected.clone()))
+        let connect_addr = self
+            .selected_node()
+            .map(|node| node.control_addr.clone())
+            .unwrap_or_else(|| selected.clone());
+        Some(AgentClient::new(connect_addr))
     }
 
     fn selected_rpc_endpoints(&self) -> Vec<String> {
@@ -3546,10 +3729,67 @@ impl ClusterControllerApp {
 
         self.nodes
             .iter()
-            .filter(|node| node.control_addr != selected_host)
-            .filter(|node| self.selected_rpc_peer_addrs.contains(&node.control_addr))
+            .filter(|node| !node_matches_control_addr(node, selected_host))
+            .filter(|node| {
+                node_control_addr_candidates(node)
+                    .iter()
+                    .any(|addr| self.selected_rpc_peer_addrs.contains(addr))
+            })
             .filter_map(rpc_endpoint_for_node)
             .collect()
+    }
+
+    fn set_selected_rpc_workers_from_csv(&mut self, rpc_servers: Option<&str>) {
+        self.selected_rpc_peer_addrs.clear();
+        let selected_owner = self
+            .selected_control_addr
+            .clone()
+            .or_else(|| self.create_params.preferred_owner_control_addr.clone());
+        let endpoints = rpc_servers
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(|part| part.trim())
+                    .filter(|part| !part.is_empty())
+                    .map(|part| part.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for endpoint in endpoints {
+            let endpoint_host = endpoint
+                .rsplit_once(':')
+                .map(|(host, _)| host)
+                .unwrap_or(endpoint.as_str());
+            let matched = self.nodes.iter().find(|node| {
+                if selected_owner
+                    .as_deref()
+                    .is_some_and(|owner| node_matches_control_addr(node, owner))
+                {
+                    return false;
+                }
+                if node
+                    .advertised_rpc_endpoint
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case(endpoint.as_str()))
+                    || node
+                        .rpc_endpoint
+                        .as_deref()
+                        .is_some_and(|value| value.eq_ignore_ascii_case(endpoint.as_str()))
+                {
+                    return true;
+                }
+                node_control_addr_candidates(node).iter().any(|addr| {
+                    addr.rsplit_once(':')
+                        .map(|(host, _)| host.eq_ignore_ascii_case(endpoint_host))
+                        .unwrap_or(false)
+                })
+            });
+            if let Some(node) = matched {
+                self.selected_rpc_peer_addrs.insert(node.control_addr.clone());
+            }
+        }
+        self.selected_rpc_peer_addrs =
+            self.normalize_visible_node_addr_selection(&self.selected_rpc_peer_addrs);
     }
 
     fn scheduler_allowed_nodes(&self) -> Option<Vec<String>> {
@@ -3587,6 +3827,8 @@ impl ClusterControllerApp {
                     Some(plan.rpc_servers.clone())
                 };
                 self.selected_control_addr = Some(plan.owner_control_addr.clone());
+                let rpc_servers = self.create_params.rpc_servers.clone();
+                self.set_selected_rpc_workers_from_csv(rpc_servers.as_deref());
                 self.last_plan = Some(plan.clone());
                 let placement_label = if plan.display_label.trim().is_empty() {
                     plan.execution_group_id.clone()
@@ -3652,6 +3894,7 @@ impl ClusterControllerApp {
                         String::new()
                     }
                 );
+                self.set_selected_rpc_workers_from_csv(Some(&scheduled.rpc_servers));
                 let _ = self.refresh_cluster();
                 self.refresh_placement_candidates();
             }
@@ -3660,6 +3903,10 @@ impl ClusterControllerApp {
     }
 
     fn load_manual_instance_cluster(&mut self) {
+        if self.manual_load_in_progress {
+            self.status = "A manual multi-node load is already running.".to_string();
+            return;
+        }
         let Some(owner_control_addr) = self.manual_owner_control_addr().map(str::to_string) else {
             self.status = "Pick a primary GPU first.".to_string();
             return;
@@ -3676,34 +3923,59 @@ impl ClusterControllerApp {
 
         self.selected_control_addr = Some(owner_control_addr.clone());
         self.selected_rpc_peer_addrs = self.manual_remote_peer_control_addrs_for_owner();
-        let result = if owner_control_addr == self.host.control_addr() {
-            self.host.create_instance(&params).and_then(|instance_id| {
-                self.host.load_instance(instance_id)?;
-                Ok(instance_id)
-            })
-        } else {
-            let client = AgentClient::new(owner_control_addr.clone());
-            client
-                .create_instance(params)
-                .map_err(|err| err.to_string())
-                .and_then(|instance_id| {
-                    client
-                        .load_instance(instance_id)
-                        .map_err(|err| err.to_string())?;
-                    Ok(instance_id)
-                })
-        };
+        self.manual_load_in_progress = true;
+        let owner_display_name = self.node_display_name_for_control_addr(&owner_control_addr);
+        self.status = format!("Loading instance on {owner_display_name}...");
 
-        match result {
-            Ok(instance_id) => {
-                self.selected_instance_id = Some(instance_id);
-                self.status = format!("Loaded instance {instance_id} on {owner_control_addr}");
-                let _ = self.refresh_cluster();
-                let _ = self.refresh_selected_preview();
-                self.refresh_placement_candidates();
-            }
-            Err(err) => self.status = err,
-        }
+        let tx = self.controller_worker_tx.clone();
+        let local_control_addr = self.host.control_addr().to_string();
+        let local_client = self.host.local_client();
+        let runtime_dir = self.host.runtime_dir().to_path_buf();
+        std::thread::spawn(move || {
+            let result = if owner_control_addr == local_control_addr {
+                if let Some(client) = local_client {
+                    client
+                        .create_instance(params)
+                        .map_err(|err| err.to_string())
+                        .and_then(|instance_id| {
+                            client
+                                .load_instance(instance_id)
+                                .map_err(|err| err.to_string())?;
+                            Ok(ManualInstanceLoadResult {
+                                owner_control_addr,
+                                instance_id,
+                            })
+                        })
+                } else {
+                    (|| -> Result<ManualInstanceLoadResult, String> {
+                        let api = ClusterApi::load(&runtime_dir).map_err(|err| err.to_string())?;
+                        let instance_id =
+                            api.create_instance(&params).map_err(|err| err.to_string())?;
+                        api.load_instance(instance_id)
+                            .map_err(|err| err.to_string())?;
+                        Ok(ManualInstanceLoadResult {
+                            owner_control_addr,
+                            instance_id,
+                        })
+                    })()
+                }
+            } else {
+                let client = AgentClient::new(owner_control_addr.clone());
+                client
+                    .create_instance(params)
+                    .map_err(|err| err.to_string())
+                    .and_then(|instance_id| {
+                        client
+                            .load_instance(instance_id)
+                            .map_err(|err| err.to_string())?;
+                        Ok(ManualInstanceLoadResult {
+                            owner_control_addr,
+                            instance_id,
+                        })
+                    })
+            };
+            let _ = tx.send(ControllerEvent::ManualInstanceLoaded(result));
+        });
     }
 
     fn create_instance(&mut self) {
@@ -3769,7 +4041,9 @@ impl ClusterControllerApp {
             .nodes
             .iter()
             .filter(|node| {
-                self.selected_control_addr.as_deref() != Some(node.control_addr.as_str())
+                self.selected_control_addr
+                    .as_deref()
+                    .is_none_or(|selected| !node_matches_control_addr(node, selected))
             })
             .filter(|node| node.rpc_running)
             .map(|node| node.control_addr.clone())
@@ -4134,10 +4408,15 @@ fn query_cluster_refresh(
     let mut nodes = vec![local_snapshot];
     let mut warnings = Vec::new();
     for peer in peers.iter().filter(|peer| peer.trusted) {
-        let remote = AgentClient::new(peer.control_addr.clone());
-        match remote.get_snapshot() {
-            Ok(mut snapshot) => {
-                snapshot.control_addr = peer.control_addr.clone();
+        match query_remote_snapshot_for_peer(peer) {
+            Ok((resolved_addr, mut snapshot)) => {
+                snapshot.control_addr = resolved_addr.clone();
+                snapshot.known_control_addrs = dedup_control_addrs(
+                    std::iter::once(resolved_addr)
+                        .chain(snapshot.known_control_addrs.into_iter())
+                        .chain(peer_control_addr_candidates(peer).into_iter())
+                        .collect(),
+                );
                 if snapshot.advertised_control_addr.is_none() {
                     snapshot.advertised_control_addr = peer.advertised_control_addr.clone();
                 }
@@ -4158,11 +4437,15 @@ fn query_cluster_refresh(
     });
 
     let selected_control_addr = selected_control_addr
-        .filter(|selected| nodes.iter().any(|node| &node.control_addr == selected))
+        .and_then(|selected| {
+            nodes.iter()
+                .find(|node| node_matches_control_addr(node, &selected))
+                .map(|node| node.control_addr.clone())
+        })
         .or_else(|| {
             nodes
                 .iter()
-                .find(|node| node.control_addr == local_control_addr)
+                .find(|node| node_matches_control_addr(node, &local_control_addr))
                 .or_else(|| nodes.first())
                 .map(|node| node.control_addr.clone())
         });
@@ -4175,8 +4458,12 @@ fn query_cluster_refresh(
         };
         let endpoints = nodes
             .iter()
-            .filter(|node| node.control_addr != *selected)
-            .filter(|node| selected_rpc_peer_addrs.contains(&node.control_addr))
+            .filter(|node| !node_matches_control_addr(node, selected))
+            .filter(|node| {
+                node_control_addr_candidates(node)
+                    .iter()
+                    .any(|addr| selected_rpc_peer_addrs.contains(addr))
+            })
             .filter_map(rpc_endpoint_for_node)
             .collect::<Vec<_>>();
         preview_client
@@ -4226,6 +4513,12 @@ fn query_cluster_telemetry(
         {
             snapshot.advertised_control_addr = Some(local_control_addr.clone());
         }
+        snapshot.known_control_addrs = dedup_control_addrs(
+            std::iter::once(snapshot.control_addr.clone())
+                .chain(snapshot.advertised_control_addr.iter().cloned())
+                .chain(snapshot.known_control_addrs.iter().cloned())
+                .collect(),
+        );
     }
 
     telemetry.sort_by(|lhs, rhs| {
@@ -4235,10 +4528,11 @@ fn query_cluster_telemetry(
             .then(lhs.control_addr.cmp(&rhs.control_addr))
     });
     telemetry.retain(|snapshot| {
-        if seen.contains(&snapshot.control_addr) {
+        let key = telemetry_identity_key(snapshot);
+        if seen.contains(&key) {
             return false;
         }
-        seen.insert(snapshot.control_addr.clone());
+        seen.insert(key);
         true
     });
     Ok(telemetry)
@@ -4258,7 +4552,7 @@ fn query_pairing_poll(
     let next_trusted = peers
         .iter()
         .filter(|peer| peer.trusted)
-        .map(|peer| peer.control_addr.clone())
+        .map(peer_identity_key)
         .collect::<BTreeSet<_>>();
     Ok(PairingPollPayload {
         peers,
@@ -4433,6 +4727,137 @@ fn control_addr_is_loopback(value: &str) -> bool {
         .unwrap_or_else(|| value.trim())
         .trim_matches(|ch| ch == '[' || ch == ']');
     host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1")
+}
+
+fn resolve_local_control_addr(local_control_addr_auto: bool, control_addr: &str) -> String {
+    let default = agent::default_local_agent_addr();
+    if local_control_addr_auto {
+        preferred_local_control_addr(&default)
+    } else {
+        let trimmed = control_addr.trim();
+        if trimmed.is_empty() {
+            preferred_local_control_addr(&default)
+        } else {
+            trimmed.to_string()
+        }
+    }
+}
+
+fn persisted_local_control_addr_setting(
+    control_addr: &str,
+    local_control_addr_auto: bool,
+) -> String {
+    let default = agent::default_local_agent_addr();
+    if local_control_addr_auto {
+        default
+    } else {
+        let trimmed = control_addr.trim();
+        if trimmed.is_empty() {
+            default
+        } else {
+            trimmed.to_string()
+        }
+    }
+}
+
+fn dedup_control_addrs(addrs: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for addr in addrs {
+        let trimmed = addr.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value = trimmed.to_string();
+        if seen.insert(value.clone()) {
+            out.push(value);
+        }
+    }
+    out
+}
+
+fn peer_control_addr_candidates(peer: &PeerInfo) -> Vec<String> {
+    let mut control_addrs = Vec::new();
+    control_addrs.push(peer.control_addr.clone());
+    if let Some(advertised) = peer.advertised_control_addr.clone() {
+        control_addrs.push(advertised);
+    }
+    control_addrs.extend(peer.known_control_addrs.iter().cloned());
+    dedup_control_addrs(control_addrs)
+}
+
+fn node_control_addr_candidates(node: &NodeSnapshot) -> Vec<String> {
+    let mut control_addrs = Vec::new();
+    control_addrs.push(node.control_addr.clone());
+    if let Some(advertised) = node.advertised_control_addr.clone() {
+        control_addrs.push(advertised);
+    }
+    control_addrs.extend(node.known_control_addrs.iter().cloned());
+    dedup_control_addrs(control_addrs)
+}
+
+fn telemetry_control_addr_candidates(snapshot: &TelemetrySnapshot) -> Vec<String> {
+    let mut control_addrs = Vec::new();
+    control_addrs.push(snapshot.control_addr.clone());
+    if let Some(advertised) = snapshot.advertised_control_addr.clone() {
+        control_addrs.push(advertised);
+    }
+    control_addrs.extend(snapshot.known_control_addrs.iter().cloned());
+    dedup_control_addrs(control_addrs)
+}
+
+fn peer_matches_control_addr(peer: &PeerInfo, control_addr: &str) -> bool {
+    peer_control_addr_candidates(peer)
+        .iter()
+        .any(|candidate| candidate == control_addr)
+}
+
+fn node_matches_control_addr(node: &NodeSnapshot, control_addr: &str) -> bool {
+    node_control_addr_candidates(node)
+        .iter()
+        .any(|candidate| candidate == control_addr)
+}
+
+fn telemetry_matches_control_addr(snapshot: &TelemetrySnapshot, control_addr: &str) -> bool {
+    telemetry_control_addr_candidates(snapshot)
+        .iter()
+        .any(|candidate| candidate == control_addr)
+}
+
+fn peer_identity_key(peer: &PeerInfo) -> String {
+    if !peer.node_id.trim().is_empty() {
+        format!("node:{}", peer.node_id.trim())
+    } else {
+        format!("addr:{}", peer_control_addr_candidates(peer).join("|"))
+    }
+}
+
+fn telemetry_identity_key(snapshot: &TelemetrySnapshot) -> String {
+    if !snapshot.node.node_id.trim().is_empty() {
+        format!("node:{}", snapshot.node.node_id.trim())
+    } else {
+        format!("addr:{}", telemetry_control_addr_candidates(snapshot).join("|"))
+    }
+}
+
+fn query_remote_snapshot_for_peer(peer: &PeerInfo) -> Result<(String, NodeSnapshot), String> {
+    let candidates = peer_control_addr_candidates(peer);
+    let mut last_error = None;
+    for control_addr in &candidates {
+        match AgentClient::new(control_addr.clone()).get_snapshot() {
+            Ok(snapshot) => return Ok((control_addr.clone(), snapshot)),
+            Err(err) => last_error = Some(err.to_string()),
+        }
+    }
+    let attempted = if candidates.is_empty() {
+        peer.control_addr.clone()
+    } else {
+        candidates.join(", ")
+    };
+    Err(match last_error {
+        Some(err) => format!("failed to connect to agent on any known control path ({attempted}): {err}"),
+        None => format!("failed to connect to agent on any known control path ({attempted})"),
+    })
 }
 
 fn open_path_in_file_manager(path: &Path) -> Result<(), String> {
@@ -4630,19 +5055,58 @@ fn rpc_endpoint_for_node(node: &NodeSnapshot) -> Option<String> {
     if !node.rpc_running {
         return None;
     }
-    if let Some(endpoint) = node.advertised_rpc_endpoint.clone() {
+    if let Some(endpoint) = node
+        .advertised_rpc_endpoint
+        .clone()
+        .filter(|value| !rpc_endpoint_uses_loopback_or_unspecified_host(value))
+    {
         return Some(endpoint);
     }
-
-    let port = node
+    if let Some(endpoint) = node
         .rpc_endpoint
+        .clone()
+        .filter(|value| !rpc_endpoint_uses_loopback_or_unspecified_host(value))
+    {
+        return Some(endpoint);
+    }
+    let port = node
+        .advertised_rpc_endpoint
         .as_deref()
+        .or(node.rpc_endpoint.as_deref())
         .and_then(|value| value.rsplit_once(':').map(|(_, port)| port.to_string()))
         .unwrap_or_else(|| CLUSTER_AGENT_RPC_PORT.to_string());
-    let control_addr = node
-        .advertised_control_addr
-        .as_deref()
-        .unwrap_or(&node.control_addr);
-    let (host, _) = control_addr.rsplit_once(':')?;
-    Some(format!("{host}:{port}"))
+    let mut preferred = Vec::new();
+    let mut fallback = Vec::new();
+    for control_addr in node_control_addr_candidates(node) {
+        let Some((host, _)) = control_addr.rsplit_once(':') else {
+            continue;
+        };
+        let endpoint = format!("{host}:{port}");
+        if control_addr_is_loopback(&control_addr)
+            || rpc_endpoint_uses_loopback_or_unspecified_host(&endpoint)
+        {
+            fallback.push(endpoint);
+        } else {
+            preferred.push(endpoint);
+        }
+    }
+    preferred
+        .into_iter()
+        .chain(fallback)
+        .next()
+        .or_else(|| node.advertised_rpc_endpoint.clone())
+        .or_else(|| node.rpc_endpoint.clone())
+}
+
+fn rpc_endpoint_uses_loopback_or_unspecified_host(value: &str) -> bool {
+    let host = value
+        .trim()
+        .rsplit_once(':')
+        .map(|(host, _)| host.trim())
+        .unwrap_or_else(|| value.trim())
+        .trim_matches(|ch| ch == '[' || ch == ']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    matches!(host, "127.0.0.1" | "::1" | "0.0.0.0" | "::" | "[::]")
 }

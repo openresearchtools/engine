@@ -22,6 +22,14 @@ void loaded_backend_model::transcribe_audio_offline(
 
 namespace {
 
+const char * default_realtime_gpu_backend_name() {
+#ifdef __APPLE__
+    return "MTL0";
+#else
+    return "Vulkan0";
+#endif
+}
+
 using create_backend_fn = std::unique_ptr<stream_backend> (*)(
     const backend_model_params & params,
     bool capture_debug);
@@ -170,7 +178,6 @@ bool resolve_voxtral_runtime(
     stream_session_config & out_session_config,
     std::string & error) {
 
-    constexpr const char * k_default_backend_name = "Vulkan0";
     constexpr uint32_t k_default_sample_rate_hz = VOXTRAL_SAMPLE_RATE;
     constexpr uint32_t k_default_audio_ring_capacity_samples = VOXTRAL_SAMPLE_RATE * 120u;
 
@@ -181,7 +188,7 @@ bool resolve_voxtral_runtime(
 
     out_model_params = params;
     if (out_model_params.backend_name.empty()) {
-        out_model_params.backend_name = k_default_backend_name;
+        out_model_params.backend_name = default_realtime_gpu_backend_name();
     }
 
     out_session_config.expected_sample_rate_hz =
@@ -203,7 +210,6 @@ bool resolve_sortformer_runtime(
     stream_session_config & out_session_config,
     std::string & error) {
 
-    constexpr const char * k_default_backend_name = "Vulkan0";
     constexpr uint32_t k_default_sample_rate_hz = 16000u;
     constexpr uint32_t k_default_audio_ring_capacity_samples = 16000u * 120u;
 
@@ -214,7 +220,7 @@ bool resolve_sortformer_runtime(
 
     out_model_params = params;
     if (out_model_params.backend_name.empty()) {
-        out_model_params.backend_name = k_default_backend_name;
+        out_model_params.backend_name = default_realtime_gpu_backend_name();
     }
 
     out_session_config.expected_sample_rate_hz =
@@ -238,13 +244,13 @@ struct backend_registry_entry {
 const std::array<backend_registry_entry, 2> & backend_registry(void) {
     static const std::array<backend_registry_entry, 2> registry = {{
         {
-            { backend_kind::sortformer, "sortformer", "Vulkan0", true, false, true, 16000u, 16000u * 120u, 1u },
+            { backend_kind::sortformer, "sortformer", default_realtime_gpu_backend_name(), true, false, true, 16000u, 16000u * 120u, 1u },
             &create_sortformer_backend,
             &load_sortformer_backend_model,
             &resolve_sortformer_runtime,
         },
         {
-            { backend_kind::voxtral_realtime, "voxtral_realtime", "Vulkan0", true, true, false, VOXTRAL_SAMPLE_RATE, VOXTRAL_SAMPLE_RATE * 120u, 1u },
+            { backend_kind::voxtral_realtime, "voxtral_realtime", default_realtime_gpu_backend_name(), true, true, false, VOXTRAL_SAMPLE_RATE, VOXTRAL_SAMPLE_RATE * 120u, 1u },
             &create_voxtral_backend,
             &load_voxtral_backend_model,
             &resolve_voxtral_runtime,

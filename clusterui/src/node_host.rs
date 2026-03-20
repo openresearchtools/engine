@@ -110,6 +110,11 @@ impl NodeHost {
 
     pub fn set_local_client(&mut self, client: AgentClient) {
         self.local_client = Some(client);
+        if let Ok(mut guard) = self.local_api.lock() {
+            // Once the embedded agent is live, avoid keeping a second local runtime
+            // loaded through the controller's direct ClusterApi path.
+            *guard = None;
+        }
     }
 
     pub fn clear_local_connection(&mut self) {
@@ -137,6 +142,11 @@ impl NodeHost {
     }
 
     pub fn create_instance(&self, params: &CreateInstanceParams) -> Result<i64, String> {
+        if let Some(client) = self.local_client.as_ref() {
+            return client
+                .create_instance(params.clone())
+                .map_err(|err| err.to_string());
+        }
         self.with_local_api(|api| api.create_instance(params).map_err(|err| err.to_string()))
     }
 
@@ -178,6 +188,9 @@ impl NodeHost {
     }
 
     pub fn load_instance(&self, instance_id: i64) -> Result<(), String> {
+        if let Some(client) = self.local_client.as_ref() {
+            return client.load_instance(instance_id).map_err(|err| err.to_string());
+        }
         self.with_local_api(|api| {
             api.load_instance(instance_id)
                 .map_err(|err| err.to_string())
@@ -185,6 +198,11 @@ impl NodeHost {
     }
 
     pub fn unload_instance(&self, instance_id: i64) -> Result<(), String> {
+        if let Some(client) = self.local_client.as_ref() {
+            return client
+                .unload_instance(instance_id)
+                .map_err(|err| err.to_string());
+        }
         self.with_local_api(|api| {
             api.unload_instance(instance_id)
                 .map_err(|err| err.to_string())
@@ -192,6 +210,11 @@ impl NodeHost {
     }
 
     pub fn remove_instance(&self, instance_id: i64) -> Result<(), String> {
+        if let Some(client) = self.local_client.as_ref() {
+            return client
+                .remove_instance(instance_id)
+                .map_err(|err| err.to_string());
+        }
         self.with_local_api(|api| {
             api.remove_instance(instance_id)
                 .map_err(|err| err.to_string())
@@ -203,6 +226,11 @@ impl NodeHost {
         instance_id: i64,
         retention_mode: RetentionMode,
     ) -> Result<(), String> {
+        if let Some(client) = self.local_client.as_ref() {
+            return client
+                .set_retention_mode(instance_id, retention_mode)
+                .map_err(|err| err.to_string());
+        }
         self.with_local_api(|api| {
             api.set_retention_mode(instance_id, retention_mode)
                 .map_err(|err| err.to_string())
@@ -210,6 +238,11 @@ impl NodeHost {
     }
 
     pub fn chat_complete(&self, request: &ChatRequest) -> Result<TextGenerationResult, String> {
+        if let Some(client) = self.local_client.as_ref() {
+            return client
+                .chat_complete(request.clone())
+                .map_err(|err| err.to_string());
+        }
         self.with_local_api(|api| api.chat_complete(request).map_err(|err| err.to_string()))
     }
 

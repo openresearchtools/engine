@@ -21,6 +21,8 @@ pub struct PeerInfo {
     pub arch: String,
     pub control_addr: String,
     pub advertised_control_addr: Option<String>,
+    #[serde(default)]
+    pub known_control_addrs: Vec<String>,
     pub rpc_endpoint: Option<String>,
     pub advertised_rpc_endpoint: Option<String>,
     pub rpc_running: bool,
@@ -33,6 +35,8 @@ pub struct NodeSnapshot {
     pub node: NodeInfo,
     pub control_addr: String,
     pub advertised_control_addr: Option<String>,
+    #[serde(default)]
+    pub known_control_addrs: Vec<String>,
     pub runtime_dir: String,
     #[serde(default)]
     pub models_dir: String,
@@ -59,6 +63,8 @@ pub struct TelemetrySnapshot {
     pub node: NodeInfo,
     pub control_addr: String,
     pub advertised_control_addr: Option<String>,
+    #[serde(default)]
+    pub known_control_addrs: Vec<String>,
     pub unix_ms: u64,
     pub process_memory_bytes: u64,
     pub process_virtual_memory_bytes: u64,
@@ -96,6 +102,8 @@ pub struct DiscoveryAnnouncement {
     pub control_port: u16,
     #[serde(default)]
     pub advertised_control_addr: Option<String>,
+    #[serde(default)]
+    pub known_control_addrs: Vec<String>,
     #[serde(default)]
     pub advertised_rpc_endpoint: Option<String>,
     #[serde(default)]

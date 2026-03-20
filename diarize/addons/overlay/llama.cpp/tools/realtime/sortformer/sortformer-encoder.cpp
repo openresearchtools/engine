@@ -79,6 +79,53 @@ ggml_tensor * mul_linear_project(
     return out;
 }
 
+ggml_tensor * roll_dim0_exact(
+    ggml_context * ctx,
+    ggml_tensor * x,
+    int shift) {
+    const int64_t width = x->ne[0];
+    if (width <= 0) {
+        throw std::runtime_error("roll_dim0_exact requires a non-empty tensor");
+    }
+    if (width == 1) {
+        return x;
+    }
+
+    int64_t shift_norm = shift % width;
+    if (shift_norm < 0) {
+        shift_norm += width;
+    }
+    if (shift_norm == 0) {
+        return x;
+    }
+
+    // Metal in this ggml snapshot does not encode GGML_OP_ROLL, but it does support
+    // view + concat. Keep the exact same circular shift semantics on dim 0.
+    ggml_tensor * tail = ggml_view_4d(
+        ctx,
+        x,
+        shift_norm,
+        x->ne[1],
+        x->ne[2],
+        x->ne[3],
+        x->nb[1],
+        x->nb[2],
+        x->nb[3],
+        (size_t) (width - shift_norm) * x->nb[0]);
+    ggml_tensor * head = ggml_view_4d(
+        ctx,
+        x,
+        width - shift_norm,
+        x->ne[1],
+        x->ne[2],
+        x->ne[3],
+        x->nb[1],
+        x->nb[2],
+        x->nb[3],
+        0);
+    return ggml_cont(ctx, ggml_concat(ctx, tail, head, 0));
+}
+
 ggml_tensor * apply_feed_forward(
     ggml_context * ctx,
     ggml_tensor * x,
@@ -192,7 +239,7 @@ sortformer_matrix_f32 run_encoder_layer_vulkan(
             const auto q_len = matrix_bd->ne[1];
             const auto h = matrix_bd->ne[2];
             matrix_bd = ggml_pad(ctx, matrix_bd, 1, 0, 0, 0);
-            matrix_bd = ggml_roll(ctx, matrix_bd, 1, 0, 0, 0);
+            matrix_bd = roll_dim0_exact(ctx, matrix_bd, 1);
             matrix_bd = ggml_reshape_3d(ctx, matrix_bd, q_len, pos_len + 1, h);
             matrix_bd = ggml_view_3d(ctx, matrix_bd, q_len, pos_len, h, matrix_bd->nb[1], matrix_bd->nb[2], matrix_bd->nb[0] * q_len);
             matrix_bd = ggml_cont_3d(ctx, matrix_bd, pos_len, q_len, h);
@@ -228,7 +275,7 @@ sortformer_matrix_f32 run_encoder_layer_vulkan(
         conv_x = ggml_cont(ctx, ggml_transpose(ctx, conv_x));
         conv_x = ggml_reshape_3d(ctx, conv_x, conv_x->ne[0], conv_x->ne[1], 1);
         conv_x = ggml_pad(ctx, conv_x, 4, 0, 0, 0);
-        conv_x = ggml_roll(ctx, conv_x, 4, 0, 0, 0);
+        conv_x = roll_dim0_exact(ctx, conv_x, 4);
         conv_x = ggml_pad(ctx, conv_x, 4, 0, 0, 0);
 
         ggml_tensor * conv_dw_w = ggml_reshape_2d(ctx, tensor(".conv.dw.w"), tensor(".conv.dw.w")->ne[0], tensor(".conv.dw.w")->ne[2]);
@@ -404,7 +451,7 @@ sortformer_matrix_f32 sortformer_run_encoder(
                 const auto q_len = matrix_bd->ne[1];
                 const auto h = matrix_bd->ne[2];
                 matrix_bd = ggml_pad(ctx, matrix_bd, 1, 0, 0, 0);
-                matrix_bd = ggml_roll(ctx, matrix_bd, 1, 0, 0, 0);
+                matrix_bd = roll_dim0_exact(ctx, matrix_bd, 1);
                 matrix_bd = ggml_reshape_3d(ctx, matrix_bd, q_len, pos_len + 1, h);
                 matrix_bd = ggml_view_3d(ctx, matrix_bd, q_len, pos_len, h, matrix_bd->nb[1], matrix_bd->nb[2], matrix_bd->nb[0] * q_len);
                 matrix_bd = ggml_cont_3d(ctx, matrix_bd, pos_len, q_len, h);
@@ -440,7 +487,7 @@ sortformer_matrix_f32 sortformer_run_encoder(
             conv_x = ggml_cont(ctx, ggml_transpose(ctx, conv_x));
             conv_x = ggml_reshape_3d(ctx, conv_x, conv_x->ne[0], conv_x->ne[1], 1);
             conv_x = ggml_pad(ctx, conv_x, 4, 0, 0, 0);
-            conv_x = ggml_roll(ctx, conv_x, 4, 0, 0, 0);
+            conv_x = roll_dim0_exact(ctx, conv_x, 4);
             conv_x = ggml_pad(ctx, conv_x, 4, 0, 0, 0);
 
             ggml_tensor * conv_dw_w = ggml_reshape_2d(ctx, tensor(".conv.dw.w"), tensor(".conv.dw.w")->ne[0], tensor(".conv.dw.w")->ne[2]);

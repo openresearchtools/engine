@@ -765,8 +765,8 @@ std::mutex & rpc_registry_mutex() {
     return mutex;
 }
 
-std::unordered_set<std::string> & registered_rpc_servers() {
-    static std::unordered_set<std::string> servers;
+std::unordered_map<std::string, ggml_backend_reg_t> & active_rpc_servers() {
+    static std::unordered_map<std::string, ggml_backend_reg_t> servers;
     return servers;
 }
 
@@ -786,17 +786,15 @@ bool ensure_bridge_backend_registry_ready(std::string * error_out) {
     return true;
 }
 
-bool register_rpc_servers(const std::string & rpc_servers, std::string * error_out) {
-    const std::vector<std::string> endpoints = split_csv(rpc_servers);
-    if (endpoints.empty()) {
-        return true;
-    }
-
-    if (!ensure_bridge_backend_registry_ready(error_out)) {
+bool resolve_rpc_add_server_proc_locked(
+    void ** add_server_out,
+    std::string * error_out) {
+    if (add_server_out == nullptr) {
+        if (error_out != nullptr) {
+            *error_out = "RPC add-server output slot is required";
+        }
         return false;
     }
-
-    std::lock_guard<std::mutex> lock(rpc_registry_mutex());
     ggml_backend_reg_t rpc_reg = ggml_backend_reg_by_name("RPC");
     if (rpc_reg == nullptr) {
         if (error_out != nullptr) {
@@ -814,9 +812,44 @@ bool register_rpc_servers(const std::string & rpc_servers, std::string * error_o
         }
         return false;
     }
+    *add_server_out = reinterpret_cast<void *>(add_server);
+    return true;
+}
+
+bool configure_rpc_servers_locked(
+    const std::vector<std::string> & requested_endpoints,
+    std::string * error_out) {
+    std::vector<std::string> endpoints = requested_endpoints;
+    std::sort(endpoints.begin(), endpoints.end());
+    endpoints.erase(std::unique(endpoints.begin(), endpoints.end()), endpoints.end());
+
+    auto & active = active_rpc_servers();
+    std::unordered_set<std::string> desired(endpoints.begin(), endpoints.end());
+    for (auto it = active.begin(); it != active.end();) {
+        if (desired.count(it->first) != 0) {
+            ++it;
+            continue;
+        }
+        ggml_backend_unload(it->second);
+        it = active.erase(it);
+    }
+
+    if (endpoints.empty()) {
+        return true;
+    }
+
+    if (!ensure_bridge_backend_registry_ready(error_out)) {
+        return false;
+    }
+
+    void * raw_add_server = nullptr;
+    if (!resolve_rpc_add_server_proc_locked(&raw_add_server, error_out)) {
+        return false;
+    }
+    auto * add_server = reinterpret_cast<ggml_backend_reg_t (*)(const char * endpoint)>(raw_add_server);
 
     for (const std::string & endpoint : endpoints) {
-        if (registered_rpc_servers().count(endpoint) != 0) {
+        if (active.count(endpoint) != 0) {
             continue;
         }
 
@@ -828,10 +861,23 @@ bool register_rpc_servers(const std::string & rpc_servers, std::string * error_o
             return false;
         }
         ggml_backend_register(reg);
-        registered_rpc_servers().insert(endpoint);
+        active.insert({endpoint, reg});
     }
 
     return true;
+}
+
+bool is_rpc_backend_device(ggml_backend_dev_t device) {
+    if (device == nullptr) {
+        return false;
+    }
+    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(device);
+    const char * backend_name = reg != nullptr ? ggml_backend_reg_name(reg) : nullptr;
+    if (backend_name != nullptr && lower_copy(backend_name).find("rpc") != std::string::npos) {
+        return true;
+    }
+    const char * device_name = ggml_backend_dev_name(device);
+    return device_name != nullptr && lower_copy(device_name).find("rpc") != std::string::npos;
 }
 
 std::string host_name_string() {
@@ -894,21 +940,24 @@ int64_t unix_ms_from_steady_deadline(const steady_clock::time_point & deadline) 
 }
 
 std::vector<owned_device_info> query_devices(const std::string & rpc_servers, std::string * error_out) {
-    if (!register_rpc_servers(rpc_servers, error_out)) {
-        return {};
-    }
-
     llama_server_bridge_device_info * raw_devices = nullptr;
     size_t raw_count = 0;
-    const int32_t rc = llama_server_bridge_list_devices_ex(
-        rpc_servers.empty() ? 0 : 1,
-        &raw_devices,
-        &raw_count);
-    if (rc != 0) {
-        if (error_out != nullptr) {
-            *error_out = "llama_server_bridge_list_devices failed";
+    {
+        std::lock_guard<std::mutex> lock(rpc_registry_mutex());
+        if (!configure_rpc_servers_locked(split_csv(rpc_servers), error_out)) {
+            return {};
         }
-        return {};
+
+        const int32_t rc = llama_server_bridge_list_devices_ex(
+            rpc_servers.empty() ? 0 : 1,
+            &raw_devices,
+            &raw_count);
+        if (rc != 0) {
+            if (error_out != nullptr) {
+                *error_out = "llama_server_bridge_list_devices failed";
+            }
+            return {};
+        }
     }
 
     std::vector<owned_device_info> devices;
@@ -2763,7 +2812,9 @@ int32_t llama_server_cluster_run_local_rpc_server(
     devices.reserve(ggml_backend_dev_count());
     for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
         ggml_backend_dev_t device = ggml_backend_dev_get(i);
-        if (device != nullptr && ggml_backend_dev_type(device) != GGML_BACKEND_DEVICE_TYPE_CPU) {
+        if (device != nullptr
+            && ggml_backend_dev_type(device) != GGML_BACKEND_DEVICE_TYPE_CPU
+            && !is_rpc_backend_device(device)) {
             devices.push_back(device);
         }
     }
@@ -2805,9 +2856,13 @@ int64_t llama_server_cluster_create_instance(
         set_cluster_error(cluster, device_error);
         return -1;
     }
-    const std::vector<owned_execution_group> groups = build_execution_groups(
-        devices,
-        params->rpc_servers != nullptr && params->rpc_servers[0] != '\0');
+    const bool has_manual_devices =
+        params->manual_devices_csv != nullptr && params->manual_devices_csv[0] != '\0';
+    const std::vector<owned_execution_group> groups = has_manual_devices
+        ? std::vector<owned_execution_group>{}
+        : build_execution_groups(
+              devices,
+              params->rpc_servers != nullptr && params->rpc_servers[0] != '\0');
 
     std::string normalize_error;
     owned_instance_params normalized = normalize_instance_params(*params, groups, devices, &normalize_error);

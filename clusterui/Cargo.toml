@@ -8,18 +8,6 @@ autobins = false
 name = "Engine"
 path = "src/main.rs"
 
-[[bin]]
-name = "cluster-agent-harness"
-path = "src/bin/cluster-agent-harness.rs"
-
-[[bin]]
-name = "cluster-direct-harness"
-path = "src/bin/cluster-direct-harness.rs"
-
-[[bin]]
-name = "cluster-local-agent-harness"
-path = "src/bin/cluster-local-agent-harness.rs"
-
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", features = ["multipart"] }

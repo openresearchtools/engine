@@ -85,6 +85,16 @@ resolve_bundled_target() {
         echo "$pdfium_dir/$dep_base"
         return 0
     fi
+    local dep_stem="${dep_base%.dylib}"
+    local dir
+    for dir in "$bundle_root" "$ffmpeg_dir" "$pdfium_dir"; do
+        [[ -d "$dir" ]] || continue
+        while IFS= read -r candidate; do
+            [[ -n "$candidate" ]] || continue
+            echo "$candidate"
+            return 0
+        done < <(find "$dir" -maxdepth 1 \( -type f -o -type l \) -name "${dep_stem}*.dylib" -print | LC_ALL=C sort)
+    done
     return 1
 }
 
@@ -92,6 +102,88 @@ to_loader_path() {
     local from_file="$1"
     local to_file="$2"
     python3 -c 'import os,sys; from_dir=os.path.dirname(os.path.abspath(sys.argv[1])); to_path=os.path.abspath(sys.argv[2]); rel=os.path.relpath(to_path, from_dir).replace("\\\\","/"); print(f"@loader_path/{rel}")' "$from_file" "$to_file"
+}
+
+collect_rpaths() {
+    local file="$1"
+    otool -l "$file" | awk '
+        $1 == "cmd" && $2 == "LC_RPATH" { flag = 1; next }
+        flag && $1 == "path" { print $2; flag = 0 }
+    '
+}
+
+is_stale_build_rpath() {
+    local value="$1"
+    case "$value" in
+        "$build_root"/*|"$llama_build"/*|"$cargo_target"/*|"$ffmpeg_out"/*|"$pdfium_root"/*|"$webrtc_root"/*|*"/ENGINEbuilds/"*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+sync_macho_rpaths() {
+    local file="$1"
+    shift
+    local -a desired=("$@")
+    local -a current=()
+    while IFS= read -r value; do
+        [[ -n "$value" ]] || continue
+        current+=("$value")
+    done < <(collect_rpaths "$file")
+
+    local -a stale=()
+    local value
+    for value in "${current[@]-}"; do
+        if is_stale_build_rpath "$value"; then
+            stale+=("$value")
+        fi
+    done
+
+    local desired_value
+    local stale_index=0
+    for desired_value in "${desired[@]-}"; do
+        local present=0
+        for value in "${current[@]-}"; do
+            if [[ "$value" == "$desired_value" ]]; then
+                present=1
+                break
+            fi
+        done
+        if (( present )); then
+            continue
+        fi
+        if (( stale_index < ${#stale[@]} )); then
+            install_name_tool -rpath "${stale[$stale_index]}" "$desired_value" "$file"
+            stale_index=$((stale_index + 1))
+        else
+            install_name_tool -add_rpath "$desired_value" "$file"
+        fi
+        current+=("$desired_value")
+    done
+
+    while IFS= read -r value; do
+        [[ -n "$value" ]] || continue
+        if is_stale_build_rpath "$value"; then
+            install_name_tool -delete_rpath "$value" "$file"
+        fi
+    done < <(collect_rpaths "$file")
+}
+
+verify_no_build_rpaths() {
+    local macho_files="$1"
+    local file
+    while IFS= read -r file; do
+        [[ -n "$file" ]] || continue
+        [[ -f "$file" ]] || continue
+        while IFS= read -r value; do
+            [[ -n "$value" ]] || continue
+            if is_stale_build_rpath "$value"; then
+                echo "Bundled Mach-O still contains a build-tree rpath: $file -> $value" >&2
+                return 1
+            fi
+        done < <(collect_rpaths "$file")
+    done < "$macho_files"
 }
 
 fixup_macho_paths() {
@@ -147,7 +239,11 @@ fixup_macho_paths() {
                 fi
             fi
         done < <(otool -L "$file" | awk 'NR > 1 { print $1 }')
+
+        sync_macho_rpaths "$file" "@loader_path"
     done < "$macho_files"
+
+    verify_no_build_rpaths "$macho_files"
 }
 
 ensure_command git

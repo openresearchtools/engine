@@ -5,7 +5,7 @@ use crate::model_metadata::{ModelFileMetadata, RuntimeVramEstimate};
 use crate::model_store::{load_local_package_readme, supported_audio_repos};
 use crate::protocol::{
     ClusterModelArtifactInfo, ClusterModelPackageInfo, LinkMetrics, NodeSnapshot,
-    PairingRequestInfo, PlacementPlan, TelemetrySnapshot,
+    PairingRequestInfo, PlacementPlan, TelemetrySnapshot, CLUSTER_AGENT_RPC_PORT,
 };
 use crate::settings::ControllerThemePreference;
 use crate::{
@@ -568,8 +568,10 @@ fn render_cluster_sidebar(app: &mut ClusterControllerApp, ui: &mut egui::Ui) {
                 }
                 for node in &app.nodes.clone() {
                     let telemetry = app.telemetry_for_control_addr(&node.control_addr).cloned();
-                    let selected =
-                        app.selected_control_addr.as_deref() == Some(node.control_addr.as_str());
+                    let selected = app.selected_control_addr.as_deref().is_some_and(|selected| {
+                        lookup_node_for_addr(app, selected)
+                            .is_some_and(|current| current.control_addr == node.control_addr)
+                    });
                     let palette = controller_palette_for_ui(ui);
                     let mut button = egui::Button::new(
                         egui::RichText::new(&node.node.display_name)
@@ -684,7 +686,8 @@ fn render_cluster_sidebar(app: &mut ClusterControllerApp, ui: &mut egui::Ui) {
                         for device in &visible_devices {
                             let used = device.memory_total.saturating_sub(device.memory_free);
                             ui.label(
-                                egui::RichText::new(device_display_name(node, device)).strong(),
+                                egui::RichText::new(device_display_name_for_ui(app, node, device))
+                                    .strong(),
                             );
                             ui.add(
                                 egui::ProgressBar::new(memory_ratio(used, device.memory_total))
@@ -1006,7 +1009,7 @@ fn render_overview_page(app: &mut ClusterControllerApp, ui: &mut egui::Ui) {
                             .text(format!(
                                 "{} [{}] {} free of {}",
                                 node.as_ref()
-                                    .map(|value| device_display_name(value, device))
+                                    .map(|value| device_display_name_for_ui(app, value, device))
                                     .unwrap_or_else(|| device.name.clone()),
                                 device.backend,
                                 format_mib(device.memory_free),
@@ -2075,7 +2078,10 @@ fn render_instances_page(app: &mut ClusterControllerApp, ui: &mut egui::Ui) {
                 for (owner_addr, owner_name, instance) in instances {
                     outlined_card(ui, |ui| {
                         let selected = app.selected_instance_id == Some(instance.instance_id)
-                            && app.selected_control_addr.as_deref() == Some(owner_addr.as_str());
+                            && app.selected_control_addr.as_deref().is_some_and(|selected| {
+                                lookup_node_for_addr(app, selected)
+                                    .is_some_and(|current| current.control_addr == owner_addr)
+                            });
                         if ui
                             .selectable_label(
                                 selected,
@@ -2261,17 +2267,21 @@ fn render_nodes_page(app: &mut ClusterControllerApp, ui: &mut egui::Ui) {
                 if accent_button(ui, "Stop finding nodes").clicked() {
                     app.stop_pair_discovery();
                 }
-                ui.label(format!(
-                    "Looking for nodes for {} more seconds.",
-                    discovery_seconds_remaining(app.discovery_status.expires_unix_ms)
-                ));
+                if app.discovery_status.expires_unix_ms == 0 {
+                    ui.label("Looking for nodes continuously.");
+                } else {
+                    ui.label(format!(
+                        "Looking for nodes for {} more seconds.",
+                        discovery_seconds_remaining(app.discovery_status.expires_unix_ms)
+                    ));
+                }
             } else {
                 if accent_button(ui, "Connect and look for nodes").clicked() {
                     app.connect_local_host_and_start_pair_discovery(180);
                 }
                 muted_label(
                     ui,
-                    "Known paired nodes reconnect automatically after launch. Press the button only when you want to actively scan for new nodes.",
+                    "Known paired nodes reconnect automatically after launch. Press the button when you want this node to actively announce itself for new pairing.",
                 );
             }
         });
@@ -2294,10 +2304,11 @@ fn render_nodes_page(app: &mut ClusterControllerApp, ui: &mut egui::Ui) {
             ui.label("No paired nodes are saved yet.");
         } else {
             for peer in paired {
+                let control_paths =
+                    display_control_paths(&peer.control_addr, &peer.known_control_addrs);
                 outlined_card(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(egui::RichText::new(&peer.display_name).strong());
-                        wrapped_muted_text(ui, &peer.control_addr);
                         state_badge(
                             ui,
                             "paired",
@@ -2305,6 +2316,7 @@ fn render_nodes_page(app: &mut ClusterControllerApp, ui: &mut egui::Ui) {
                             egui::Color32::from_rgb(22, 101, 52),
                         );
                     });
+                    render_control_paths(ui, "Known control paths", &control_paths);
                     ui.horizontal_wrapped(|ui| {
                         if secondary_button(ui, "Inspect").clicked() {
                             app.selected_control_addr = Some(peer.control_addr.clone());
@@ -2376,13 +2388,15 @@ fn render_discovered_nodes_card(app: &mut ClusterControllerApp, ui: &mut egui::U
             muted_label(ui, "No new nodes are visible right now.");
         } else {
             for peer in pending {
+                let control_paths =
+                    display_control_paths(&peer.control_addr, &peer.known_control_addrs);
                 outlined_card(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(egui::RichText::new(&peer.display_name).strong());
                         muted_label(ui, &peer.os_name);
                         muted_label(ui, &peer.arch);
                     });
-                    wrapped_muted_text(ui, &peer.control_addr);
+                    render_control_paths(ui, "Visible control paths", &control_paths);
                     ui.horizontal_wrapped(|ui| {
                         if accent_button(ui, "Request pairing").clicked() {
                             app.request_pairing(&peer.control_addr);
@@ -2693,26 +2707,56 @@ fn render_server_page(app: &mut ClusterControllerApp, ui: &mut egui::Ui) {
 
 fn render_local_host_settings_card(app: &mut ClusterControllerApp, ui: &mut egui::Ui) {
     card(ui, Some("Local host"), |ui| {
-        ui.set_min_height(168.0);
+        ui.set_min_height(196.0);
+        let local_control_addrs = app.local_node_control_addrs();
         ui.horizontal_wrapped(|ui| {
-            ui.label("Control address");
+            ui.label("Controller endpoint");
             ui.add_sized(
                 [adaptive_field_width(ui, 0.62, 220.0, 420.0), 24.0],
-                egui::TextEdit::singleline(&mut app.local_control_addr_edit),
+                egui::Label::new(egui::RichText::new(app.host.control_addr()).monospace()).wrap(),
             );
             if accent_button(ui, "Reconnect").clicked() {
                 app.connect_local_host();
             }
         });
-        if let Some(local_node) = app
-            .nodes
-            .iter()
-            .find(|node| node.control_addr == app.host.control_addr())
-        {
-            wrapped_monospace(
+        muted_label(
+            ui,
+            "A node keeps one identity and advertises every reachable control path it has. The endpoint above is only what this controller is using right now.",
+        );
+        render_control_paths(ui, "Advertised control paths", &local_control_addrs);
+        ui.collapsing("Advanced local bind override", |ui| {
+            if ui
+                .checkbox(
+                    &mut app.local_control_addr_auto,
+                    "Reconnect automatically using whatever local control paths are live",
+                )
+                .changed()
+            {
+                app.local_control_addr_edit = app.host.control_addr().to_string();
+            }
+            ui.add_enabled_ui(!app.local_control_addr_auto, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Manual controller endpoint");
+                    ui.add_sized(
+                        [adaptive_field_width(ui, 0.62, 220.0, 420.0), 24.0],
+                        egui::TextEdit::singleline(&mut app.local_control_addr_edit),
+                    );
+                });
+            });
+            muted_label(
                 ui,
-                &format!("Models dir: {}", app.local_models_dir().display()),
+                if app.local_control_addr_auto {
+                    "Automatic mode ignores stale saved IPs and reconnects through the live address set after restarts, replugging, and DHCP/link-local changes."
+                } else {
+                    "Manual mode changes only this controller's local dial target. The node still advertises every known control path to other machines."
+                },
             );
+        });
+        wrapped_monospace(
+            ui,
+            &format!("Models dir: {}", app.local_models_dir().display()),
+        );
+        if let Some(local_node) = app.local_node_snapshot() {
             ui.label(format!(
                 "Public HTTP: {}",
                 local_node
@@ -3368,7 +3412,11 @@ fn render_model_details(
                     ui.horizontal_wrapped(|ui| {
                         if secondary_button(ui, "Automatic on this node").clicked() {
                             app.allowed_control_addrs.clear();
-                            app.allowed_control_addrs.insert(node.control_addr.clone());
+                            ClusterControllerApp::set_addr_selection_for_node(
+                                &mut app.allowed_control_addrs,
+                                &node,
+                                true,
+                            );
                             set_auto_placement_target(app);
                             app.refresh_placement_candidates();
                         }
@@ -3434,18 +3482,13 @@ fn render_model_details(
     card(ui, Some("Current run summary"), |ui| {
         let allowed_nodes = if app.allowed_control_addrs.is_empty() {
             app.default_allowed_node_addrs()
-                .into_iter()
-                .collect::<Vec<_>>()
         } else {
-            app.allowed_control_addrs
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
+            app.allowed_control_addrs.clone()
         };
         let allowed_labels = app
             .nodes
             .iter()
-            .filter(|node| allowed_nodes.contains(&node.control_addr))
+            .filter(|node| ClusterControllerApp::addr_selection_contains_node(&allowed_nodes, node))
             .map(|node| node.node.display_name.clone())
             .collect::<Vec<_>>();
         let automatic_mode = app.create_params.execution_group_id == "cluster:auto"
@@ -3722,7 +3765,8 @@ fn render_model_details(
             app.allowed_control_addrs = default_allowed.clone();
         }
         for node in &app.nodes.clone() {
-            let mut enabled = app.allowed_control_addrs.contains(&node.control_addr);
+            let mut enabled =
+                ClusterControllerApp::addr_selection_contains_node(&app.allowed_control_addrs, node);
             let visible_groups = filtered_execution_groups_for_node(app, node, None)
                 .into_iter()
                 .filter(|group| group.id != "cluster:auto")
@@ -3734,14 +3778,13 @@ fn render_model_details(
             )
             .into_iter()
             .filter(|device| !is_rpc_device(device))
-            .map(|device| device_display_name(node, &device))
+            .map(|device| device_display_name_for_ui(app, node, &device))
             .take(2)
             .collect::<Vec<_>>()
             .join(" + ");
             let description = format!(
-                "{} | {} | {} target{}{}{}",
+                "{} | {} target{}{}{}",
                 node.node.display_name,
-                node.control_addr,
                 visible_groups,
                 if visible_groups == 1 { "" } else { "s" },
                 if node.rpc_running {
@@ -3757,12 +3800,16 @@ fn render_model_details(
                     format!(" | {device_preview}")
                 }
             );
-            if ui.checkbox(&mut enabled, description).changed() {
-                if enabled {
-                    app.allowed_control_addrs.insert(node.control_addr.clone());
-                } else {
-                    app.allowed_control_addrs.remove(&node.control_addr);
-                }
+            let response = ui.checkbox(&mut enabled, description);
+            let response = response.on_hover_text(
+                display_control_paths(&node.control_addr, &node.known_control_addrs).join("\n"),
+            );
+            if response.changed() {
+                ClusterControllerApp::set_addr_selection_for_node(
+                    &mut app.allowed_control_addrs,
+                    node,
+                    enabled,
+                );
                 app.refresh_placement_candidates();
             }
         }
@@ -3779,7 +3826,15 @@ fn render_model_details(
                     .as_ref()
                     .or(app.selected_control_addr.as_ref())
                 {
-                    app.allowed_control_addrs.insert(selected.to_string());
+                    if let Some(node) = lookup_node_for_addr(app, selected).cloned() {
+                        ClusterControllerApp::set_addr_selection_for_node(
+                            &mut app.allowed_control_addrs,
+                            &node,
+                            true,
+                        );
+                    } else {
+                        app.allowed_control_addrs.insert(selected.to_string());
+                    }
                 }
                 app.refresh_placement_candidates();
             }
@@ -3909,25 +3964,37 @@ fn render_model_details(
             });
             ui.label("Remote worker preview");
             for node in &app.nodes.clone() {
-                if app.selected_control_addr.as_deref() == Some(node.control_addr.as_str()) {
+                if app.selected_control_addr.as_deref().is_some_and(|selected| {
+                    lookup_node_for_addr(app, selected)
+                        .is_some_and(|current| current.control_addr == node.control_addr)
+                }) {
                     continue;
                 }
-                let mut enabled = app.selected_rpc_peer_addrs.contains(&node.control_addr);
+                let mut enabled =
+                    ClusterControllerApp::addr_selection_contains_node(&app.selected_rpc_peer_addrs, node);
                 let label = format!(
-                    "{} | {} | {}",
+                    "{} | {}",
                     node.node.display_name,
-                    node.control_addr,
+                    if node.rpc_running {
+                        "split worker ready"
+                    } else {
+                        "rpc unavailable"
+                    }
+                );
+                let hover = format!(
+                    "Control paths:\n{}\n\nRPC endpoint: {}",
+                    display_control_paths(&node.control_addr, &node.known_control_addrs).join("\n"),
                     node.advertised_rpc_endpoint
                         .as_deref()
-                        .unwrap_or("rpc unavailable")
+                        .or(node.rpc_endpoint.as_deref())
+                        .unwrap_or("unavailable")
                 );
-                if ui.checkbox(&mut enabled, label).changed() {
-                    if enabled {
-                        app.selected_rpc_peer_addrs
-                            .insert(node.control_addr.clone());
-                    } else {
-                        app.selected_rpc_peer_addrs.remove(&node.control_addr);
-                    }
+                if ui.checkbox(&mut enabled, label).on_hover_text(hover).changed() {
+                    ClusterControllerApp::set_addr_selection_for_node(
+                        &mut app.selected_rpc_peer_addrs,
+                        node,
+                        enabled,
+                    );
                     if let Err(err) = app.refresh_selected_preview() {
                         app.status = err;
                     }
@@ -4587,6 +4654,9 @@ fn render_integrated_model_details(
                         backend: primary_choice.backend.clone(),
                         layer_count: 0,
                         rpc_device: false,
+                        source_node_id: primary_choice.source_node_id.clone(),
+                        source_control_addr: primary_choice.source_control_addr.clone(),
+                        source_bridge_device_index: primary_choice.source_bridge_device_index,
                     },
                 );
             }
@@ -4615,7 +4685,16 @@ fn render_integrated_model_details(
             let current_owner_key = app
                 .manual_owner_control_addr()
                 .zip(app.create_params.manual_device_allocations.first())
-                .map(|(owner, row)| format!("{owner}|{}", row.bridge_device_index))
+                .map(|(owner, row)| {
+                    format!(
+                        "{owner}|{}",
+                        if row.source_bridge_device_index >= 0 {
+                            row.source_bridge_device_index
+                        } else {
+                            row.bridge_device_index
+                        }
+                    )
+                })
                 .unwrap_or_else(|| manual_owner_choice_key(&owner_choices[0]));
             let mut next_owner_key = current_owner_key.clone();
             let current_owner_label = owner_choices
@@ -4654,12 +4733,15 @@ fn render_integrated_model_details(
             if let Some(row) = app.create_params.manual_device_allocations.first_mut() {
                 let live_choice = manual_choices
                     .iter()
-                    .find(|choice| choice.bridge_device_index == row.bridge_device_index)
+                    .find(|choice| !choice.rpc_device && manual_allocation_matches_choice(row, choice))
                     .cloned();
                 if let Some(choice) = &live_choice {
                     row.device_label = choice.device_label.clone();
                     row.backend = choice.backend.clone();
                     row.rpc_device = choice.rpc_device;
+                    row.source_node_id = choice.source_node_id.clone();
+                    row.source_control_addr = choice.source_control_addr.clone();
+                    row.source_bridge_device_index = choice.source_bridge_device_index;
                 }
 
                 outlined_card(ui, |ui| {
@@ -4780,6 +4862,11 @@ fn render_integrated_model_details(
                     .cloned()
                 {
                     set_manual_primary_owner(app, &choice);
+                    app.selected_rpc_peer_addrs = app
+                        .all_visible_rpc_peer_control_addrs_for_owner(
+                            &choice.owner_control_addr,
+                        );
+                    let _ = app.refresh_selected_preview();
                     runtime_changed = true;
                     manual_choices = manual_device_choices(app);
                     current_owner_badge = app
@@ -4791,11 +4878,11 @@ fn render_integrated_model_details(
                 }
             }
 
-            let current_indices = app
+            let current_choice_keys = app
                 .create_params
                 .manual_device_allocations
                 .iter()
-                .map(|row| row.bridge_device_index)
+                .filter_map(manual_allocation_choice_key)
                 .collect::<Vec<_>>();
             for row_index in 1..app.create_params.manual_device_allocations.len() {
                 let row_slider_max = manual_layer_slider_max(
@@ -4805,12 +4892,15 @@ fn render_integrated_model_details(
                 let row = &mut app.create_params.manual_device_allocations[row_index];
                 let live_choice = manual_choices
                     .iter()
-                    .find(|choice| choice.bridge_device_index == row.bridge_device_index)
+                    .find(|choice| manual_allocation_matches_choice(row, choice))
                     .cloned();
                 if let Some(choice) = &live_choice {
                     row.device_label = choice.device_label.clone();
                     row.backend = choice.backend.clone();
                     row.rpc_device = choice.rpc_device;
+                    row.source_node_id = choice.source_node_id.clone();
+                    row.source_control_addr = choice.source_control_addr.clone();
+                    row.source_bridge_device_index = choice.source_bridge_device_index;
                 }
 
                 outlined_card(ui, |ui| {
@@ -4818,8 +4908,9 @@ fn render_integrated_model_details(
                     let available_choices = manual_choices
                         .iter()
                         .filter(|choice| {
-                            !current_indices.iter().enumerate().any(|(index, used)| {
-                                index != row_index && *used == choice.bridge_device_index
+                            let choice_key = manual_device_choice_key(choice);
+                            !current_choice_keys.iter().enumerate().any(|(index, used)| {
+                                index != row_index && *used == choice_key
                             })
                         })
                         .cloned()
@@ -4827,11 +4918,21 @@ fn render_integrated_model_details(
                     let mut current_choice_key = live_choice
                         .as_ref()
                         .map(manual_device_choice_key)
-                        .unwrap_or_else(|| {
-                            format!("{}|{}", row.bridge_device_index, row.rpc_device)
-                        });
+                        .or_else(|| manual_allocation_choice_key(row))
+                        .unwrap_or_else(|| format!("{}|{}", row.bridge_device_index, row.rpc_device));
                     egui::ComboBox::from_id_salt(format!("manual-device-row-{row_index}"))
-                        .selected_text(format!("{} [{}]", row.device_label, row.backend))
+                        .selected_text(
+                            live_choice
+                                .as_ref()
+                                .map(|choice| {
+                                    format!(
+                                        "{} [{}]",
+                                        manual_device_choice_display_label(choice),
+                                        choice.backend
+                                    )
+                                })
+                                .unwrap_or_else(|| format!("{} [{}]", row.device_label, row.backend)),
+                        )
                         .width(adaptive_combo_width(ui, 0.68, 280.0, 700.0))
                         .show_ui(ui, |ui| {
                             for choice in &available_choices {
@@ -4842,7 +4943,7 @@ fn render_integrated_model_details(
                                     selected,
                                     format!(
                                         "{} [{}] | {} free / {}{}",
-                                        choice.device_label,
+                                        manual_device_choice_display_label(choice),
                                         choice.backend,
                                         format_mib(choice.memory_free),
                                         format_mib(choice.memory_total),
@@ -4858,7 +4959,7 @@ fn render_integrated_model_details(
                         .iter()
                         .find(|choice| manual_device_choice_key(choice) == current_choice_key)
                     {
-                        if choice.bridge_device_index != row.bridge_device_index {
+                        if !manual_allocation_matches_choice(row, choice) {
                             apply_manual_allocation_row_from_choice(row, choice);
                             runtime_changed = true;
                         }
@@ -4909,15 +5010,15 @@ fn render_integrated_model_details(
             }
 
             if !model.single_device_only {
-                let used_indices = app
+                let used_choice_keys = app
                     .create_params
                     .manual_device_allocations
                     .iter()
-                    .map(|row| row.bridge_device_index)
+                    .filter_map(manual_allocation_choice_key)
                     .collect::<BTreeSet<_>>();
                 let next_choice = manual_choices
                     .iter()
-                    .find(|choice| !used_indices.contains(&choice.bridge_device_index))
+                    .find(|choice| !used_choice_keys.contains(&manual_device_choice_key(choice)))
                     .cloned();
                 ui.add_space(6.0);
                 if secondary_button_enabled(ui, "+ Add device", next_choice.is_some()).clicked() {
@@ -4929,6 +5030,9 @@ fn render_integrated_model_details(
                                 backend: choice.backend.clone(),
                                 layer_count: 0,
                                 rpc_device: choice.rpc_device,
+                                source_node_id: choice.source_node_id.clone(),
+                                source_control_addr: choice.source_control_addr.clone(),
+                                source_bridge_device_index: choice.source_bridge_device_index,
                             },
                         );
                         runtime_changed = true;
@@ -5233,14 +5337,18 @@ fn render_integrated_model_details(
                 app.refresh_all_ui();
             }
             ui.add_enabled_ui(
-                !app.create_params.manual_device_allocations.is_empty(),
+                !app.create_params.manual_device_allocations.is_empty()
+                    && !app.manual_load_in_progress,
                 |ui| {
                     if accent_button(ui, "Load now").clicked() {
                         app.load_manual_instance_cluster();
-                        open_instances_loaded_view(app);
                     }
                 },
             );
+            if app.manual_load_in_progress {
+                ui.spinner();
+                muted_label(ui, "Loading cluster runtime...");
+            }
         });
     });
 }
@@ -5272,6 +5380,10 @@ struct ManualOwnerChoice {
 
 #[derive(Clone)]
 struct ManualDeviceChoice {
+    source_node_id: String,
+    source_control_addr: String,
+    source_display_name: String,
+    source_bridge_device_index: i32,
     bridge_device_index: i32,
     device_label: String,
     backend: String,
@@ -5397,6 +5509,153 @@ fn device_display_name(_node: &NodeSnapshot, device: &DeviceInfo) -> String {
     }
 }
 
+fn device_source_display_name(node: &NodeSnapshot) -> String {
+    node.node.display_name.clone()
+}
+
+fn device_display_name_for_ui(
+    app: &ClusterControllerApp,
+    node: &NodeSnapshot,
+    device: &DeviceInfo,
+) -> String {
+    if !is_rpc_device(device) {
+        return device_display_name(node, device);
+    }
+    let Some(endpoint) = rpc_endpoint_from_device(device) else {
+        return device_display_name(node, device);
+    };
+    let Some(remote_node) = lookup_node_for_rpc_endpoint(app, &endpoint) else {
+        return device_display_name(node, device);
+    };
+
+    let remote_devices = filtered_devices_for_node(
+        app,
+        remote_node,
+        app.telemetry_for_control_addr(&remote_node.control_addr),
+    )
+    .into_iter()
+    .filter(|candidate| !is_cpu_device(candidate) && !is_rpc_device(candidate))
+    .collect::<Vec<_>>();
+    if remote_devices.is_empty() {
+        return remote_node.node.display_name.clone();
+    }
+
+    if let Some(exact) = unique_remote_device_match_by_memory(&remote_devices, device.memory_total) {
+        return format!(
+            "{} | {}",
+            remote_node.node.display_name,
+            device_display_name(remote_node, exact)
+        );
+    }
+
+    let rpc_ordinal = rpc_device_ordinal_for_endpoint(node, device, &endpoint);
+    let mut sorted_remote_devices = remote_devices;
+    sorted_remote_devices.sort_by(|lhs, rhs| {
+        lhs.bridge_device_index
+            .cmp(&rhs.bridge_device_index)
+            .then(lhs.memory_total.cmp(&rhs.memory_total))
+            .then(lhs.name.cmp(&rhs.name))
+    });
+    if let Some(matched) = sorted_remote_devices.get(rpc_ordinal) {
+        return format!(
+            "{} | {}",
+            remote_node.node.display_name,
+            device_display_name(remote_node, matched)
+        );
+    }
+
+    format!(
+        "{} | Remote GPU ({})",
+        remote_node.node.display_name,
+        format_mib(device.memory_total)
+    )
+}
+
+fn rpc_endpoint_from_device(device: &DeviceInfo) -> Option<String> {
+    normalize_rpc_endpoint_token(device.description.trim())
+        .or_else(|| normalize_rpc_endpoint_token(device.name.trim()))
+}
+
+fn normalize_rpc_endpoint_token(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let trimmed = trimmed
+        .strip_prefix("rpc://")
+        .unwrap_or(trimmed)
+        .trim_end_matches(" [RPC]")
+        .trim();
+    trimmed.contains(':').then(|| trimmed.to_string())
+}
+
+fn rpc_endpoint_candidates_for_node(node: &NodeSnapshot) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    let mut push = |value: String| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if seen.insert(trimmed.to_string()) {
+            out.push(trimmed.to_string());
+        }
+    };
+
+    if let Some(value) = node.advertised_rpc_endpoint.as_deref() {
+        push(value.to_string());
+    }
+    if let Some(value) = node.rpc_endpoint.as_deref() {
+        push(value.to_string());
+    }
+
+    let rpc_port = node
+        .advertised_rpc_endpoint
+        .as_deref()
+        .or(node.rpc_endpoint.as_deref())
+        .and_then(|value| value.rsplit_once(':').map(|(_, port)| port.to_string()))
+        .unwrap_or_else(|| CLUSTER_AGENT_RPC_PORT.to_string());
+    for control_addr in display_control_paths(&node.control_addr, &node.known_control_addrs) {
+        if let Some((host, _)) = control_addr.rsplit_once(':') {
+            push(format!("{host}:{rpc_port}"));
+        }
+    }
+    out
+}
+
+fn lookup_node_for_rpc_endpoint<'a>(
+    app: &'a ClusterControllerApp,
+    endpoint: &str,
+) -> Option<&'a NodeSnapshot> {
+    app.nodes.iter().find(|node| {
+        rpc_endpoint_candidates_for_node(node)
+            .iter()
+            .any(|candidate| candidate == endpoint)
+    })
+}
+
+fn unique_remote_device_match_by_memory<'a>(
+    devices: &'a [DeviceInfo],
+    memory_total: u64,
+) -> Option<&'a DeviceInfo> {
+    let mut matches = devices.iter().filter(|candidate| candidate.memory_total == memory_total);
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+fn rpc_device_ordinal_for_endpoint(
+    node: &NodeSnapshot,
+    device: &DeviceInfo,
+    endpoint: &str,
+) -> usize {
+    node.devices
+        .iter()
+        .filter(|candidate| is_rpc_device(candidate))
+        .filter(|candidate| rpc_endpoint_from_device(candidate).as_deref() == Some(endpoint))
+        .filter(|candidate| candidate.bridge_device_index < device.bridge_device_index)
+        .count()
+}
+
 fn group_device_indices(group: &ExecutionGroupInfo) -> Vec<i32> {
     group
         .devices_csv
@@ -5421,7 +5680,7 @@ fn group_visible_device_names(
                 .map(|device| {
                     (
                         physical_device_key(node, device),
-                        device_display_name(node, device),
+                        device_display_name_for_ui(app, node, device),
                     )
                 })
         })
@@ -5622,8 +5881,67 @@ fn manual_owner_choice_key(choice: &ManualOwnerChoice) -> String {
     )
 }
 
+fn manual_device_source_key(
+    source_node_id: &str,
+    source_control_addr: &str,
+    source_bridge_device_index: i32,
+    rpc_device: bool,
+) -> String {
+    let source = if !source_node_id.trim().is_empty() {
+        format!("node:{}", source_node_id.trim())
+    } else {
+        format!("addr:{}", source_control_addr.trim())
+    };
+    format!(
+        "{source}|device:{source_bridge_device_index}|rpc:{}",
+        if rpc_device { 1 } else { 0 }
+    )
+}
+
 fn manual_device_choice_key(choice: &ManualDeviceChoice) -> String {
-    format!("{}|{}", choice.bridge_device_index, choice.rpc_device)
+    manual_device_source_key(
+        &choice.source_node_id,
+        &choice.source_control_addr,
+        choice.source_bridge_device_index,
+        choice.rpc_device,
+    )
+}
+
+fn manual_device_choice_display_label(choice: &ManualDeviceChoice) -> String {
+    if choice.source_display_name.trim().is_empty() {
+        choice.device_label.clone()
+    } else {
+        format!("{} | {}", choice.source_display_name, choice.device_label)
+    }
+}
+
+fn manual_allocation_choice_key(
+    row: &crate::cluster_api::ManualDeviceAllocation,
+) -> Option<String> {
+    (row.source_bridge_device_index >= 0
+        && (!row.source_node_id.trim().is_empty() || !row.source_control_addr.trim().is_empty()))
+    .then(|| {
+        manual_device_source_key(
+            &row.source_node_id,
+            &row.source_control_addr,
+            row.source_bridge_device_index,
+            row.rpc_device,
+        )
+    })
+}
+
+fn manual_allocation_matches_choice(
+    row: &crate::cluster_api::ManualDeviceAllocation,
+    choice: &ManualDeviceChoice,
+) -> bool {
+    if let Some(key) = manual_allocation_choice_key(row) {
+        return key == manual_device_choice_key(choice);
+    }
+    let row_label = normalized_manual_device_label(&row.device_label);
+    row.bridge_device_index == choice.bridge_device_index
+        && (row_label.is_empty()
+            || normalized_manual_device_label(&choice.device_label) == row_label)
+        && row.rpc_device == choice.rpc_device
 }
 
 fn artifact_is_available_on_owner(
@@ -5776,6 +6094,9 @@ fn apply_manual_allocation_row_from_choice(
     row.device_label = choice.device_label.clone();
     row.backend = choice.backend.clone();
     row.rpc_device = choice.rpc_device;
+    row.source_node_id = choice.source_node_id.clone();
+    row.source_control_addr = choice.source_control_addr.clone();
+    row.source_bridge_device_index = choice.source_bridge_device_index;
 }
 
 fn manual_owner_choices(app: &ClusterControllerApp) -> Vec<ManualOwnerChoice> {
@@ -5790,7 +6111,7 @@ fn manual_owner_choices(app: &ClusterControllerApp) -> Vec<ManualOwnerChoice> {
                 owner_control_addr: node.control_addr.clone(),
                 owner_display_name: node.node.display_name.clone(),
                 bridge_device_index: device.bridge_device_index,
-                device_label: device_display_name(node, &device),
+                device_label: device_display_name_for_ui(app, node, &device),
                 backend: device.backend.clone(),
                 memory_free: device.memory_free,
                 memory_total: device.memory_total,
@@ -5807,15 +6128,91 @@ fn manual_owner_choices(app: &ClusterControllerApp) -> Vec<ManualOwnerChoice> {
     out
 }
 
+fn manual_selected_remote_peers(
+    app: &ClusterControllerApp,
+    owner_control_addr: &str,
+) -> BTreeSet<String> {
+    let selected = app.normalize_visible_node_addr_selection(&app.selected_rpc_peer_addrs);
+    if selected.is_empty() {
+        return app.all_visible_rpc_peer_control_addrs_for_owner(owner_control_addr);
+    }
+    let owner_canonical = lookup_node_for_addr(app, owner_control_addr)
+        .map(|node| node.control_addr.clone())
+        .unwrap_or_else(|| owner_control_addr.to_string());
+    app.nodes
+        .iter()
+        .filter(|node| node.control_addr != owner_canonical)
+        .filter(|node| node.rpc_running)
+        .filter(|node| ClusterControllerApp::addr_selection_contains_node(&selected, node))
+        .map(|node| node.control_addr.clone())
+        .collect()
+}
+
+fn manual_choice_from_source_device(
+    node: &NodeSnapshot,
+    device: &DeviceInfo,
+    rpc_device: bool,
+) -> ManualDeviceChoice {
+    ManualDeviceChoice {
+        source_node_id: node.node.node_id.clone(),
+        source_control_addr: node.control_addr.clone(),
+        source_display_name: device_source_display_name(node),
+        source_bridge_device_index: device.bridge_device_index,
+        bridge_device_index: device.bridge_device_index,
+        device_label: device_display_name(node, device),
+        backend: device.backend.clone(),
+        memory_free: device.memory_free,
+        memory_total: device.memory_total,
+        rpc_device,
+    }
+}
+
 fn manual_preview_owner_snapshot<'a>(app: &'a ClusterControllerApp) -> Option<&'a NodeSnapshot> {
     let owner_control_addr = app.manual_owner_control_addr()?;
     app.preview_node
         .as_ref()
-        .filter(|node| node.control_addr == owner_control_addr)
+        .filter(|node| lookup_node_for_addr(app, owner_control_addr).is_some_and(|current| current.control_addr == node.control_addr))
         .or_else(|| lookup_node_for_addr(app, owner_control_addr))
 }
 
 fn manual_device_choices(app: &ClusterControllerApp) -> Vec<ManualDeviceChoice> {
+    let Some(owner_control_addr) = app.manual_owner_control_addr() else {
+        return Vec::new();
+    };
+    let Some(owner_snapshot) = lookup_node_for_addr(app, owner_control_addr) else {
+        return Vec::new();
+    };
+    let owner_telemetry = app.telemetry_for_control_addr(&owner_snapshot.control_addr);
+    let mut out = filtered_devices_for_node(app, owner_snapshot, owner_telemetry)
+        .into_iter()
+        .filter(|device| !is_cpu_device(device) && !is_rpc_device(device))
+        .map(|device| manual_choice_from_source_device(owner_snapshot, &device, false))
+        .collect::<Vec<_>>();
+
+    for remote_control_addr in manual_selected_remote_peers(app, owner_control_addr) {
+        let Some(remote_node) = lookup_node_for_addr(app, &remote_control_addr) else {
+            continue;
+        };
+        let telemetry = app.telemetry_for_control_addr(&remote_node.control_addr);
+        for device in filtered_devices_for_node(app, remote_node, telemetry)
+            .into_iter()
+            .filter(|device| !is_cpu_device(device) && !is_rpc_device(device))
+        {
+            out.push(manual_choice_from_source_device(remote_node, &device, true));
+        }
+    }
+    out.sort_by(|lhs, rhs| {
+        lhs.rpc_device
+            .cmp(&rhs.rpc_device)
+            .then(lhs.source_display_name.cmp(&rhs.source_display_name))
+            .then(rhs.memory_total.cmp(&lhs.memory_total))
+            .then(lhs.device_label.cmp(&rhs.device_label))
+            .then(lhs.source_bridge_device_index.cmp(&rhs.source_bridge_device_index))
+    });
+    out
+}
+
+fn manual_runtime_device_choices(app: &ClusterControllerApp) -> Vec<ManualDeviceChoice> {
     let Some(owner_snapshot) = manual_preview_owner_snapshot(app) else {
         return Vec::new();
     };
@@ -5828,23 +6225,197 @@ fn manual_device_choices(app: &ClusterControllerApp) -> Vec<ManualDeviceChoice> 
     .collect::<Vec<_>>();
     let mut out = devices
         .into_iter()
-        .map(|device| ManualDeviceChoice {
-            bridge_device_index: device.bridge_device_index,
-            device_label: device_display_name(owner_snapshot, &device),
-            backend: device.backend.clone(),
-            memory_free: device.memory_free,
-            memory_total: device.memory_total,
-            rpc_device: is_rpc_device(&device),
+        .map(|device| {
+            let rpc_device = is_rpc_device(&device);
+            let (
+                source_node_id,
+                source_control_addr,
+                source_display_name,
+                source_bridge_device_index,
+                device_label,
+            ) = if rpc_device {
+                let endpoint = rpc_endpoint_from_device(&device);
+                let remote_node = endpoint
+                    .as_deref()
+                    .and_then(|value| lookup_node_for_rpc_endpoint(app, value));
+                let matched_remote = endpoint.as_deref().and_then(|value| {
+                    let remote_node = lookup_node_for_rpc_endpoint(app, value)?;
+                    let remote_devices = filtered_devices_for_node(
+                        app,
+                        remote_node,
+                        app.telemetry_for_control_addr(&remote_node.control_addr),
+                    )
+                    .into_iter()
+                    .filter(|candidate| !is_cpu_device(candidate) && !is_rpc_device(candidate))
+                    .collect::<Vec<_>>();
+                    if let Some(exact) =
+                        unique_remote_device_match_by_memory(&remote_devices, device.memory_total)
+                    {
+                        return Some(exact.clone());
+                    }
+                    let rpc_ordinal =
+                        rpc_device_ordinal_for_endpoint(owner_snapshot, &device, value);
+                    let mut sorted_remote_devices = remote_devices;
+                    sorted_remote_devices.sort_by(|lhs, rhs| {
+                        lhs.bridge_device_index
+                            .cmp(&rhs.bridge_device_index)
+                            .then(lhs.memory_total.cmp(&rhs.memory_total))
+                            .then(lhs.name.cmp(&rhs.name))
+                    });
+                    sorted_remote_devices.get(rpc_ordinal).cloned()
+                });
+                (
+                    remote_node
+                        .map(|node| node.node.node_id.clone())
+                        .unwrap_or_default(),
+                    remote_node
+                        .map(|node| node.control_addr.clone())
+                        .unwrap_or_default(),
+                    remote_node
+                        .map(device_source_display_name)
+                        .unwrap_or_else(|| device_display_name_for_ui(app, owner_snapshot, &device)),
+                    matched_remote
+                        .as_ref()
+                        .map(|remote| remote.bridge_device_index)
+                        .unwrap_or(-1),
+                    matched_remote
+                        .as_ref()
+                        .zip(remote_node)
+                        .map(|(remote, node)| device_display_name(node, remote))
+                        .unwrap_or_else(|| device_display_name_for_ui(app, owner_snapshot, &device)),
+                )
+            } else {
+                (
+                    owner_snapshot.node.node_id.clone(),
+                    owner_snapshot.control_addr.clone(),
+                    device_source_display_name(owner_snapshot),
+                    device.bridge_device_index,
+                    device_display_name(owner_snapshot, &device),
+                )
+            };
+            ManualDeviceChoice {
+                source_node_id,
+                source_control_addr,
+                source_display_name,
+                source_bridge_device_index,
+                bridge_device_index: device.bridge_device_index,
+                device_label,
+                backend: device.backend.clone(),
+                memory_free: device.memory_free,
+                memory_total: device.memory_total,
+                rpc_device,
+            }
         })
         .collect::<Vec<_>>();
     out.sort_by(|lhs, rhs| {
         lhs.rpc_device
             .cmp(&rhs.rpc_device)
             .then(rhs.memory_total.cmp(&lhs.memory_total))
+            .then(lhs.source_display_name.cmp(&rhs.source_display_name))
             .then(lhs.device_label.cmp(&rhs.device_label))
             .then(lhs.bridge_device_index.cmp(&rhs.bridge_device_index))
     });
     out
+}
+
+fn normalized_manual_device_label(value: &str) -> String {
+    value.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+pub(crate) fn resolve_live_manual_device_allocations(
+    app: &ClusterControllerApp,
+) -> (Vec<crate::cluster_api::ManualDeviceAllocation>, BTreeSet<String>) {
+    let choices = manual_runtime_device_choices(app);
+    if choices.is_empty() {
+        return (app.create_params.manual_device_allocations.clone(), BTreeSet::new());
+    }
+
+    let owner_control_addr = app.manual_owner_control_addr().map(str::to_string);
+    let mut used_choice_keys = BTreeSet::new();
+    let mut selected_remote_control_addrs = BTreeSet::new();
+    let mut resolved = Vec::with_capacity(app.create_params.manual_device_allocations.len());
+
+    for (row_index, row) in app.create_params.manual_device_allocations.iter().enumerate() {
+        let row_label = normalized_manual_device_label(&row.device_label);
+
+        let mut matched = choices
+            .iter()
+            .find(|choice| manual_allocation_matches_choice(row, choice))
+            .cloned();
+
+        if matched.is_none() && !row_label.is_empty() {
+            let label_matches = choices
+                .iter()
+                .filter(|choice| normalized_manual_device_label(&choice.device_label) == row_label)
+                .cloned()
+                .collect::<Vec<_>>();
+            let rpc_filtered = label_matches
+                .iter()
+                .filter(|choice| choice.rpc_device == row.rpc_device)
+                .cloned()
+                .collect::<Vec<_>>();
+            let owner_filtered = rpc_filtered
+                .iter()
+                .filter(|choice| {
+                    row_index != 0
+                        || owner_control_addr.as_deref()
+                            == Some(choice.source_control_addr.as_str())
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let candidates = if !owner_filtered.is_empty() {
+                owner_filtered
+            } else if !rpc_filtered.is_empty() {
+                rpc_filtered
+            } else {
+                label_matches
+            };
+            let unused = candidates
+                .iter()
+                .filter(|choice| !used_choice_keys.contains(&manual_device_choice_key(choice)))
+                .cloned()
+                .collect::<Vec<_>>();
+            matched = unused
+                .into_iter()
+                .next()
+                .or_else(|| candidates.into_iter().next());
+        }
+
+        if matched.is_none() && row_index == 0 {
+            matched = choices
+                .iter()
+                .find(|choice| {
+                    !choice.rpc_device
+                        && owner_control_addr.as_deref()
+                            == Some(choice.source_control_addr.as_str())
+                })
+                .cloned();
+        }
+
+        if let Some(choice) = matched {
+            used_choice_keys.insert(manual_device_choice_key(&choice));
+            if choice.rpc_device {
+                selected_remote_control_addrs.insert(choice.source_control_addr.clone());
+            }
+            resolved.push(crate::cluster_api::ManualDeviceAllocation {
+                bridge_device_index: choice.bridge_device_index,
+                device_label: choice.device_label,
+                backend: choice.backend,
+                layer_count: row.layer_count,
+                rpc_device: choice.rpc_device,
+                source_node_id: choice.source_node_id,
+                source_control_addr: choice.source_control_addr,
+                source_bridge_device_index: choice.source_bridge_device_index,
+            });
+        } else {
+            resolved.push(row.clone());
+        }
+    }
+
+    (resolved, selected_remote_control_addrs)
 }
 
 fn set_manual_primary_owner(app: &mut ClusterControllerApp, choice: &ManualOwnerChoice) {
@@ -5866,10 +6437,15 @@ fn set_manual_primary_owner(app: &mut ClusterControllerApp, choice: &ManualOwner
             backend: choice.backend.clone(),
             layer_count: preserved_layers,
             rpc_device: false,
+            source_node_id: lookup_node_for_addr(app, &choice.owner_control_addr)
+                .map(|node| node.node.node_id.clone())
+                .unwrap_or_default(),
+            source_control_addr: choice.owner_control_addr.clone(),
+            source_bridge_device_index: choice.bridge_device_index,
         }];
     app.sync_selected_model_package();
     app.selected_control_addr = Some(choice.owner_control_addr.clone());
-    app.selected_rpc_peer_addrs = app.manual_remote_peer_control_addrs_for_owner();
+    app.selected_rpc_peer_addrs.clear();
     let _ = app.refresh_selected_preview();
     app.last_plan = None;
 }
@@ -5882,6 +6458,11 @@ fn ensure_manual_allocation_seed(
     if !app.create_params.manual_device_allocations.is_empty()
         && app.manual_owner_control_addr().is_some()
     {
+        let owner_control_addr = app.manual_owner_control_addr().unwrap_or_default().to_string();
+        let visible_remote_peers = app.all_visible_rpc_peer_control_addrs_for_owner(&owner_control_addr);
+        if !visible_remote_peers.is_empty() && app.selected_rpc_peer_addrs.is_empty() {
+            app.selected_rpc_peer_addrs = visible_remote_peers;
+        }
         return;
     }
     let owner_choices = manual_owner_choices(app);
@@ -5905,6 +6486,9 @@ fn ensure_manual_allocation_seed(
         .unwrap_or(&owner_choices[0])
         .clone();
     set_manual_primary_owner(app, &seeded);
+    app.selected_rpc_peer_addrs = app
+        .all_visible_rpc_peer_control_addrs_for_owner(&seeded.owner_control_addr);
+    let _ = app.refresh_selected_preview();
 }
 
 fn manual_allocation_summary(
@@ -5914,9 +6498,9 @@ fn manual_allocation_summary(
 ) -> ManualAllocationSummary {
     let single_device_full_offload = manual_single_device_full_offload(app);
     let choices = manual_device_choices(app);
-    let live_by_index = choices
+    let live_by_key = choices
         .iter()
-        .map(|choice| (choice.bridge_device_index, choice.clone()))
+        .map(|choice| (manual_device_choice_key(choice), choice.clone()))
         .collect::<BTreeMap<_, _>>();
     let allocated_layers = app
         .create_params
@@ -5973,7 +6557,7 @@ fn manual_allocation_summary(
         .iter()
         .enumerate()
     {
-        let live = live_by_index.get(&row.bridge_device_index);
+        let live = manual_allocation_choice_key(row).and_then(|key| live_by_key.get(&key));
         let effective_layers = if single_device_full_offload && index == 0 {
             total_layers.unwrap_or(1)
         } else {
@@ -6119,7 +6703,7 @@ fn render_target_distribution_preview(
         ui.label(
             egui::RichText::new(format!(
                 "{} [{}]",
-                device_display_name(owner, device),
+                device_display_name_for_ui(app, owner, device),
                 device.backend
             ))
             .strong(),
@@ -6179,7 +6763,34 @@ fn lookup_node_for_addr<'a>(app: &'a ClusterControllerApp, addr: &str) -> Option
                 .advertised_control_addr
                 .as_deref()
                 .is_some_and(|value| value == addr)
+            || node.known_control_addrs.iter().any(|value| value == addr)
     })
+}
+
+fn display_control_paths(current: &str, known: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for value in std::iter::once(current.to_string()).chain(known.iter().cloned()) {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let normalized = trimmed.to_string();
+        if seen.insert(normalized.clone()) {
+            out.push(normalized);
+        }
+    }
+    out
+}
+
+fn render_control_paths(ui: &mut egui::Ui, label: &str, addrs: &[String]) {
+    if addrs.is_empty() {
+        return;
+    }
+    ui.label(label);
+    for addr in addrs {
+        wrapped_monospace(ui, addr);
+    }
 }
 
 fn best_target_for_owner_control_addr<'a>(
@@ -6196,6 +6807,7 @@ fn set_auto_placement_target(app: &mut ClusterControllerApp) {
     app.create_params.execution_group_id = "cluster:auto".to_string();
     app.create_params.rpc_servers = None;
     app.sync_selected_model_package();
+    app.set_selected_rpc_workers_from_csv(None);
 }
 
 fn apply_placement_target(app: &mut ClusterControllerApp, target: &PlacementTargetView) {
@@ -6208,6 +6820,8 @@ fn apply_placement_target(app: &mut ClusterControllerApp, target: &PlacementTarg
     };
     app.sync_selected_model_package();
     app.selected_control_addr = Some(target.owner_control_addr.clone());
+    let rpc_servers = app.create_params.rpc_servers.clone();
+    app.set_selected_rpc_workers_from_csv(rpc_servers.as_deref());
     let _ = app.refresh_selected_preview();
 }
 
@@ -6309,7 +6923,7 @@ fn local_labels_for_plan(
             .map(|device| {
                 (
                     physical_device_key(owner, &device),
-                    device_display_name(owner, &device),
+                    device_display_name_for_ui(app, owner, &device),
                 )
             })
             .collect::<BTreeMap<_, _>>()
@@ -6334,7 +6948,7 @@ fn local_labels_for_plan(
                 .map(|device| {
                     (
                         physical_device_key(owner, device),
-                        device_display_name(owner, device),
+                        device_display_name_for_ui(app, owner, device),
                     )
                 })
         })
@@ -6362,7 +6976,7 @@ fn remote_labels_for_plan(app: &ClusterControllerApp, plan: &PlacementPlan) -> V
             )
             .into_iter()
             .find(|device| !is_cpu_device(device) && !is_rpc_device(device))
-            .map(|device| device_display_name(node, &device));
+            .map(|device| device_display_name_for_ui(app, node, &device));
             match first_device {
                 Some(device) => format!("{} {}", node.node.display_name, device),
                 None => node.node.display_name.clone(),
@@ -6387,7 +7001,10 @@ fn physical_device_key(node: &NodeSnapshot, device: &DeviceInfo) -> String {
         return format!("cpu|{display}");
     }
     if is_rpc_device(device) {
-        return format!("rpc|{display}|{}", device.memory_total);
+        return format!(
+            "rpc|{display}|{}|{}",
+            device.bridge_device_index, device.memory_total
+        );
     }
     format!("{display}|{}", device.memory_total)
 }
@@ -6540,7 +7157,7 @@ fn render_node_devices_card(
             ui.label(
                 egui::RichText::new(format!(
                     "{} [{}]",
-                    device_display_name(node, &device),
+                    device_display_name_for_ui(app, node, &device),
                     device.backend
                 ))
                 .strong(),

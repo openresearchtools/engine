@@ -631,18 +631,18 @@ fn parse_manifest(raw: &str) -> Result<EngineManifest> {
 }
 
 fn local_manifest_file_candidates(exe_dir: &Path) -> Vec<PathBuf> {
-    let mut out = vec![exe_dir
-        .join("runtime-manifests")
-        .join("engine-manifest.json")];
-    if let Ok(cwd) = env::current_dir() {
-        out.push(cwd.join("runtime-manifests").join("engine-manifest.json"));
+    let mut out = vec![exe_dir.join("runtime-manifests").join("engine-manifest.json")];
+    if should_probe_source_manifest_files(exe_dir) {
+        if let Ok(cwd) = env::current_dir() {
+            out.push(cwd.join("runtime-manifests").join("engine-manifest.json"));
+        }
+        out.push(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("runtime-manifests")
+                .join("engine-manifest.json"),
+        );
     }
-    out.push(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("runtime-manifests")
-            .join("engine-manifest.json"),
-    );
     out
 }
 
@@ -650,24 +650,54 @@ fn manifest_sources_candidates(exe_dir: &Path) -> Vec<PathBuf> {
     let mut out = vec![exe_dir
         .join("runtime-manifests")
         .join("engine-manifest-sources.json")];
-    if let Ok(cwd) = env::current_dir() {
+    if should_probe_source_manifest_files(exe_dir) {
+        if let Ok(cwd) = env::current_dir() {
+            out.push(
+                cwd.join("runtime-manifests")
+                    .join("engine-manifest-sources.json"),
+            );
+        }
         out.push(
-            cwd.join("runtime-manifests")
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("runtime-manifests")
                 .join("engine-manifest-sources.json"),
         );
     }
-    out.push(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("runtime-manifests")
-            .join("engine-manifest-sources.json"),
-    );
     if let Ok(cache_path) = cached_manifest_file() {
         if let Some(parent) = cache_path.parent() {
             out.push(parent.join("engine-manifest-sources.json"));
         }
     }
     dedupe_paths(out)
+}
+
+fn should_probe_source_manifest_files(exe_dir: &Path) -> bool {
+    !looks_like_installed_engine_runtime(exe_dir)
+}
+
+fn looks_like_installed_engine_runtime(exe_dir: &Path) -> bool {
+    if exe_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case("MacOS"))
+        .unwrap_or(false)
+    {
+        if exe_dir
+            .parent()
+            .and_then(|path| path.parent())
+            .and_then(|path| path.extension())
+            .and_then(|value| value.to_str())
+            .map(|value| value.eq_ignore_ascii_case("app"))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+
+    let normalized = exe_dir.to_string_lossy().replace('\\', "/");
+    let normalized = normalized.to_ascii_lowercase();
+    normalized.contains("/openresearchtools/engine")
 }
 
 fn cached_manifest_file() -> Result<PathBuf> {
@@ -1318,16 +1348,36 @@ fn dxdiag_temp_path() -> PathBuf {
 #[cfg(target_os = "windows")]
 fn run_command_capture(command: &str, args: &[&str]) -> Option<String> {
     let mut child = Command::new(command);
-    child.args(args);
-    child.creation_flags(CREATE_NO_WINDOW);
-    let output = child.output().ok()?;
-    if !output.status.success() {
+    child
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let mut child = child.spawn().ok()?;
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(100)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    if !status.success() {
         return None;
     }
-    String::from_utf8(output.stdout)
-        .ok()
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
+    let mut stdout = String::new();
+    child.stdout.take()?.read_to_string(&mut stdout).ok()?;
+    let stdout = stdout.trim();
+    if stdout.is_empty() {
+        None
+    } else {
+        Some(stdout.to_string())
+    }
 }
 
 #[cfg(target_os = "windows")]

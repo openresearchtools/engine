@@ -186,7 +186,7 @@ index 8aab0d4..52930dc 100644
                              break;
                          }
                      }
-@@ -2923,213 +2957,3357 @@ server_context_meta server_context::get_meta() const {
+@@ -2923,213 +2957,3401 @@ server_context_meta server_context::get_meta() const {
  
  
  
@@ -2778,7 +2778,11 @@ index 8aab0d4..52930dc 100644
 +        if (assigned_word.value("word", std::string()).empty()) {
 +            continue;
 +        }
-+        assigned_word["speaker"] = srv_audio_assign_word_to_realtime_speaker(assigned_word, speaker_spans);
++        std::string word_speaker = assigned_word.value("speaker", std::string());
++        if (word_speaker.empty()) {
++            word_speaker = srv_audio_assign_word_to_realtime_speaker(assigned_word, speaker_spans);
++        }
++        assigned_word["speaker"] = word_speaker;
 +        assigned_word["_global_word_index"] = idx;
 +        assigned_words.push_back(std::move(assigned_word));
 +    }
@@ -2879,6 +2883,46 @@ index 8aab0d4..52930dc 100644
 +        return speaker_segments;
 +    }
 +
++    json effective_words = words;
++    if (effective_words.is_array() && !effective_words.empty() && speaker_spans.is_array() && !speaker_spans.empty()) {
++        std::vector<size_t> assigned_word_indexes;
++        std::vector<json> assigned_words;
++        assigned_word_indexes.reserve(effective_words.size());
++        assigned_words.reserve(effective_words.size());
++
++        for (size_t idx = 0; idx < effective_words.size(); ++idx) {
++            if (!effective_words[idx].is_object()) {
++                continue;
++            }
++
++            json assigned_word = effective_words[idx];
++            assigned_word["word"] = srv_audio_sanitize_word_token(
++                json_value(assigned_word, "word", std::string()));
++            if (assigned_word.value("word", std::string()).empty()) {
++                continue;
++            }
++
++            assigned_word["speaker"] =
++                srv_audio_assign_word_to_realtime_speaker(assigned_word, speaker_spans);
++            assigned_words.push_back(std::move(assigned_word));
++            assigned_word_indexes.push_back(idx);
++        }
++
++        if (!assigned_words.empty()) {
++            srv_audio_smooth_realtime_sentence_speakers(assigned_words);
++            srv_audio_refine_realtime_sentence_boundaries(assigned_words, speaker_spans);
++            for (size_t i = 0; i < assigned_words.size(); ++i) {
++                const size_t idx = assigned_word_indexes[i];
++                effective_words[idx]["word"] = assigned_words[i].value(
++                    "word",
++                    json_value(effective_words[idx], "word", std::string()));
++                effective_words[idx]["speaker"] = assigned_words[i].value(
++                    "speaker",
++                    std::string("UNASSIGNED"));
++            }
++        }
++    }
++
 +    std::vector<json> assigned_pieces;
 +    assigned_pieces.reserve(effective_pieces.size());
 +    for (const auto & piece : effective_pieces) {
@@ -2890,17 +2934,17 @@ index 8aab0d4..52930dc 100644
 +        const int64_t start_word_index = normalized_piece.value("start_word_index", int64_t(-1));
 +        const int64_t end_word_index = normalized_piece.value("end_word_index", int64_t(-1));
 +        const bool has_word_range =
-+            words.is_array() &&
++            effective_words.is_array() &&
 +            start_word_index >= 0 &&
 +            end_word_index > start_word_index &&
-+            (size_t) end_word_index <= words.size() &&
-+            words[(size_t) start_word_index].is_object() &&
-+            words[(size_t) end_word_index - 1].is_object();
++            (size_t) end_word_index <= effective_words.size() &&
++            effective_words[(size_t) start_word_index].is_object() &&
++            effective_words[(size_t) end_word_index - 1].is_object();
 +
 +        std::string piece_text = srv_audio_sanitize_transcript_text(
 +            normalized_piece.value("text", std::string()));
 +        if (piece_text.empty() && has_word_range) {
-+            piece_text = srv_audio_join_word_range(words, (size_t) start_word_index, (size_t) end_word_index);
++            piece_text = srv_audio_join_word_range(effective_words, (size_t) start_word_index, (size_t) end_word_index);
 +        }
 +        if (piece_text.empty()) {
 +            continue;
@@ -2911,10 +2955,10 @@ index 8aab0d4..52930dc 100644
 +        if (has_word_range) {
 +            piece_start = std::max(
 +                0.0,
-+                json_value(words[(size_t) start_word_index], "start_sec", piece_start));
++                json_value(effective_words[(size_t) start_word_index], "start_sec", piece_start));
 +            piece_end = std::max(
 +                piece_start,
-+                json_value(words[(size_t) end_word_index - 1], "end_sec", piece_end));
++                json_value(effective_words[(size_t) end_word_index - 1], "end_sec", piece_end));
 +        }
 +        if (piece_end <= piece_start) {
 +            piece_end = piece_start + 0.001;
@@ -2933,7 +2977,7 @@ index 8aab0d4..52930dc 100644
 +        normalized_piece["end_sec"] = srv_audio_round3(piece_end);
 +        normalized_piece["num_words"] = piece_num_words;
 +        normalized_piece["speaker"] = srv_audio_assign_piece_to_realtime_speaker(normalized_piece, speaker_spans);
-+        auto split_pieces = srv_audio_split_piece_edges_by_word_speakers(normalized_piece, words, speaker_spans);
++        auto split_pieces = srv_audio_split_piece_edges_by_word_speakers(normalized_piece, effective_words, speaker_spans);
 +        for (auto & split_piece : split_pieces) {
 +            assigned_pieces.push_back(std::move(split_piece));
 +        }
@@ -3708,7 +3752,7 @@ index 8aab0d4..52930dc 100644
                      GGML_ASSERT(req.should_stop());
                      return false; // should_stop condition met
                  }
-@@ -3591,8 +6769,6 @@ void server_routes::init_routes() {
+@@ -3591,8 +6813,6 @@ void server_routes::init_routes() {
          auto res = create_response();
          std::vector<raw_buffer> files;
          json body = convert_responses_to_chatcmpl(json::parse(req.body));
@@ -3717,7 +3761,7 @@ index 8aab0d4..52930dc 100644
          json body_parsed = oaicompat_chat_params_parse(
              body,
              meta->chat_params,
-@@ -3609,8 +6785,6 @@ void server_routes::init_routes() {
+@@ -3609,8 +6829,6 @@ void server_routes::init_routes() {
          auto res = create_response();
          std::vector<raw_buffer> files;
          json body = convert_anthropic_to_oai(json::parse(req.body));
@@ -3726,7 +3770,7 @@ index 8aab0d4..52930dc 100644
          json body_parsed = oaicompat_chat_params_parse(
              body,
              meta->chat_params,
-@@ -3627,8 +6801,6 @@ void server_routes::init_routes() {
+@@ -3627,8 +6845,6 @@ void server_routes::init_routes() {
          auto res = create_response();
          std::vector<raw_buffer> files;
          json body = convert_anthropic_to_oai(json::parse(req.body));
@@ -3735,7 +3779,7 @@ index 8aab0d4..52930dc 100644
          json body_parsed = oaicompat_chat_params_parse(
              body,
              meta->chat_params,
-@@ -3850,6 +7022,709 @@ void server_routes::init_routes() {
+@@ -3850,6 +7066,709 @@ void server_routes::init_routes() {
          return res;
      };
  

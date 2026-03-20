@@ -34,7 +34,9 @@ voxtral_gpu_backend parse_voxtral_gpu_backend_name(const std::string & backend_n
     if (lowered.rfind("cuda", 0) == 0) {
         return voxtral_gpu_backend::cuda;
     }
-    if (lowered.rfind("metal", 0) == 0) {
+    if (lowered.rfind("metal", 0) == 0 ||
+        lowered.rfind("ggml-metal", 0) == 0 ||
+        lowered.rfind("mtl", 0) == 0) {
         return voxtral_gpu_backend::metal;
     }
     return voxtral_gpu_backend::auto_detect;
@@ -163,7 +165,9 @@ voxtral_stream_backend::voxtral_stream_backend(
     if (ctx_ == nullptr) {
         throw std::runtime_error("failed to initialize Voxtral runtime context");
     }
-    stream_ = voxtral_stream_init(*ctx_, {});
+    voxtral_stream_params stream_params = {};
+    stream_params.continuous_mode = true;
+    stream_ = voxtral_stream_init(*ctx_, stream_params);
     if (stream_ == nullptr) {
         voxtral_free(ctx_);
         ctx_ = nullptr;

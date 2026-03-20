@@ -24,6 +24,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::env;
 #[cfg(target_os = "macos")]
@@ -34,6 +35,7 @@ use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream, ToSocketAddrs,
     UdpSocket,
 };
+use std::panic::{catch_unwind, AssertUnwindSafe};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
@@ -69,7 +71,9 @@ const SCHEDULE_WAIT_POLL: Duration = Duration::from_millis(500);
 const SNAPSHOT_QUERY_RETRIES: usize = 3;
 const SNAPSHOT_QUERY_RETRY_DELAY: Duration = Duration::from_millis(350);
 const TELEMETRY_TTL: Duration = Duration::from_secs(8);
+const TELEMETRY_DIRECT_QUERY_TIMEOUT: Duration = Duration::from_millis(900);
 const RPC_ENDPOINT_PROBE_TIMEOUT: Duration = Duration::from_millis(350);
+const RPC_SERVER_REACHABILITY_CACHE_TTL: Duration = Duration::from_millis(750);
 const LINK_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const LINK_BENCHMARK_PING_SAMPLES: usize = 5;
 const LINK_BENCHMARK_CHUNK_BYTES: usize = 4 * 1024 * 1024;
@@ -137,6 +141,12 @@ struct DiscoveryRuntimeState {
 
 struct RpcServerProcess {
     started_at: Instant,
+}
+
+#[derive(Clone, Copy)]
+struct CachedRpcServerReachability {
+    reachable: bool,
+    checked_at: Instant,
 }
 
 #[derive(Clone)]
@@ -285,7 +295,11 @@ impl AgentClient {
     }
 
     pub fn get_local_telemetry(&self) -> Result<TelemetrySnapshot> {
-        match self.send(AgentRequest::GetLocalTelemetry, REQUEST_TIMEOUT_FAST)? {
+        self.get_local_telemetry_with_timeout(REQUEST_TIMEOUT_FAST)
+    }
+
+    fn get_local_telemetry_with_timeout(&self, timeout: Duration) -> Result<TelemetrySnapshot> {
+        match self.send(AgentRequest::GetLocalTelemetry, timeout)? {
             AgentResponse::LocalTelemetry { snapshot } => Ok(snapshot),
             AgentResponse::Error { message } => bail!(message),
             other => bail!("unexpected response: {:?}", other),
@@ -810,10 +824,11 @@ pub fn preferred_local_control_addr(control_addr: &str) -> String {
         .rsplit_once(':')
         .unwrap_or(("127.0.0.1", "46211"));
     let host = host.trim();
-    if !matches!(
+    let auto_host = matches!(
         host,
         "" | "0.0.0.0" | "::" | "[::]" | "127.0.0.1" | "localhost" | "::1" | "[::1]"
-    ) {
+    );
+    if !auto_host && !saved_local_control_host_is_stale(host) {
         return control_addr.to_string();
     }
     preferred_paired_link_local_host(false)
@@ -827,6 +842,15 @@ pub fn preferred_local_control_addr(control_addr: &str) -> String {
         .or_else(|| default_route_local_network_host(false))
         .map(|preferred| format!("{preferred}:{port}"))
         .unwrap_or_else(|| control_addr.to_string())
+}
+
+fn saved_local_control_host_is_stale(host: &str) -> bool {
+    let Ok(ipv4) = host.parse::<Ipv4Addr>() else {
+        return false;
+    };
+    !preferred_interface_candidates()
+        .iter()
+        .any(|candidate| candidate.ip == ipv4)
 }
 
 fn default_public_api_bind_addr() -> String {
@@ -914,21 +938,50 @@ fn public_api_status_for_state(state: &Arc<AgentRuntimeState>) -> PublicApiStatu
     }
 }
 
-static LOCAL_AGENT_THREAD: OnceLock<()> = OnceLock::new();
+static LOCAL_AGENT_STARTING: OnceLock<Mutex<bool>> = OnceLock::new();
+static LOCAL_AGENT_LAST_ERROR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static INTERFACE_CANDIDATE_CACHE: OnceLock<Mutex<Option<(Instant, Vec<InterfaceCandidate>)>>> =
+    OnceLock::new();
+static RPC_SERVER_REACHABILITY_CACHE: OnceLock<Mutex<Option<CachedRpcServerReachability>>> =
     OnceLock::new();
 #[cfg(target_os = "windows")]
 static FIREWALL_STATE_CACHE: OnceLock<Mutex<Option<CachedFirewallState>>> = OnceLock::new();
 static HOST_NAME_CACHE: OnceLock<Option<String>> = OnceLock::new();
 
 fn start_local_agent_thread(runtime_dir: PathBuf, control_addr: String) {
-    LOCAL_AGENT_THREAD.get_or_init(|| {
-        let bind_addr = bind_addr_from_local_control_addr(&control_addr);
-        thread::spawn(move || {
-            if let Err(err) = run_agent(runtime_dir, bind_addr) {
-                eprintln!("embedded cluster agent failed: {err}");
+    let start_state = LOCAL_AGENT_STARTING.get_or_init(|| Mutex::new(false));
+    let Ok(mut guard) = start_state.lock() else {
+        return;
+    };
+    if *guard {
+        return;
+    }
+    *guard = true;
+    drop(guard);
+    if let Ok(mut guard) = LOCAL_AGENT_LAST_ERROR
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *guard = None;
+    }
+
+    let bind_addr = bind_addr_from_local_control_addr(&control_addr);
+    thread::spawn(move || {
+        if let Err(err) = run_agent(runtime_dir, bind_addr) {
+            if let Ok(mut guard) = LOCAL_AGENT_LAST_ERROR
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+            {
+                *guard = Some(err.to_string());
             }
-        });
+            eprintln!("embedded cluster agent failed: {err}");
+        }
+        if let Ok(mut guard) = LOCAL_AGENT_STARTING
+            .get_or_init(|| Mutex::new(false))
+            .lock()
+        {
+            *guard = false;
+        }
     });
 }
 
@@ -958,6 +1011,15 @@ pub fn ensure_local_agent(runtime_dir: &Path, control_addr: &str) -> Result<Agen
         thread::sleep(CONNECT_RETRY_INTERVAL);
     }
 
+    if let Ok(guard) = LOCAL_AGENT_LAST_ERROR
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        if let Some(err) = guard.as_deref() {
+            bail!("local agent failed to start: {err}");
+        }
+    }
+
     bail!("local agent did not start at {control_addr}")
 }
 
@@ -974,7 +1036,7 @@ pub fn run_agent(runtime_dir: PathBuf, bind_addr: String) -> Result<()> {
     apply_local_node_identity_override(&mut local_node);
     let paired_peers = settings::load_controller_settings_or_default().paired_peers;
     let discovery_mode = if paired_peers.is_empty() {
-        DiscoveryMode::Off
+        DiscoveryMode::Pairing
     } else {
         DiscoveryMode::KnownPeers
     };
@@ -1017,28 +1079,34 @@ pub fn run_agent(runtime_dir: PathBuf, bind_addr: String) -> Result<()> {
         eprintln!("cluster agent public API start failed: {err}");
     }
 
+    let listener = TcpListener::bind(&bind_addr)
+        .with_context(|| format!("failed to bind agent listener on '{bind_addr}'"))?;
+    let discovery_socket =
+        bind_cluster_udp_socket(CLUSTER_AGENT_DISCOVERY_PORT, "discovery")?;
+    let telemetry_socket =
+        bind_cluster_udp_socket(CLUSTER_AGENT_TELEMETRY_PORT, "telemetry")?;
+
     start_discovery_loop(
         local_node.clone(),
         bind_addr.clone(),
         peers.clone(),
         state.clone(),
-    )?;
+        discovery_socket,
+    );
     start_telemetry_loop(
         local_node.clone(),
         bind_addr.clone(),
         api.clone(),
         state.clone(),
         telemetry_cache.clone(),
-    )?;
+        telemetry_socket,
+    );
     start_link_benchmark_monitor(
         local_node.clone(),
         bind_addr.clone(),
         peers.clone(),
         state.clone(),
     );
-
-    let listener = TcpListener::bind(&bind_addr)
-        .with_context(|| format!("failed to bind agent listener on '{bind_addr}'"))?;
 
     for accepted in listener.incoming() {
         match accepted {
@@ -1101,7 +1169,10 @@ fn sync_public_api_server(state: &Arc<AgentRuntimeState>) -> Result<()> {
 
     match start_public_server(
         public_api.config.clone(),
-        state.local_control_addr.clone(),
+        // The managed HTTP server runs inside the same process as the local agent,
+        // so it should always talk to the agent over loopback rather than a dynamic
+        // advertised control address such as link-local Thunderbolt IPs.
+        default_local_agent_addr(),
         state.models_dir.clone(),
     ) {
         Ok(handle) => {
@@ -1201,7 +1272,7 @@ fn handle_connection(
     match request {
         AgentRequest::LinkProbe { bytes } => {
             let response = handle_link_probe_connection(&mut stream, bytes);
-            write_message(&mut stream, &response)
+            write_agent_response(&mut stream, response)
         }
         AgentRequest::StreamModelArtifact {
             folder_name,
@@ -1224,18 +1295,56 @@ fn handle_connection(
             size_bytes,
         ),
         other => {
-            let response = handle_request(
-                other,
-                api,
-                peers,
-                telemetry_cache,
-                bind_addr,
-                runtime_dir,
-                state,
-            );
-            write_message(&mut stream, &response)
+            let response = match catch_unwind(AssertUnwindSafe(|| {
+                handle_request(
+                    other,
+                    api,
+                    peers,
+                    telemetry_cache,
+                    bind_addr,
+                    runtime_dir,
+                    state,
+                )
+            })) {
+                Ok(response) => response,
+                Err(payload) => {
+                    let detail = panic_payload_message(payload);
+                    eprintln!("cluster agent request panicked: {detail}");
+                    AgentResponse::Error {
+                        message: format!("cluster agent request panicked: {detail}"),
+                    }
+                }
+            };
+            write_agent_response(&mut stream, response)
         }
     }
+}
+
+fn write_agent_response(stream: &mut TcpStream, response: AgentResponse) -> Result<()> {
+    match write_message(stream, &response) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let detail = format!("{err:#}");
+            eprintln!("cluster agent failed to send response: {detail}");
+            write_message(
+                stream,
+                &AgentResponse::Error {
+                    message: format!("cluster agent failed to send response: {detail}"),
+                },
+            )
+            .context("failed to send fallback agent error response")
+        }
+    }
+}
+
+fn panic_payload_message(payload: Box<dyn Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "unknown panic".to_string()
 }
 
 fn handle_link_probe_connection(stream: &mut TcpStream, bytes: u64) -> AgentResponse {
@@ -1707,7 +1816,8 @@ fn snapshot_local_state(
     let (devices, execution_groups) =
         query_local_devices_and_groups(api, runtime_dir, rpc_servers)?;
     let (rpc_endpoint, rpc_running) = rpc_server_snapshot(state);
-    let advertised_control_addr = advertised_control_addr_for_bind(bind_addr);
+    let known_control_addrs = advertised_control_addrs_for_bind(bind_addr);
+    let advertised_control_addr = known_control_addrs.first().cloned();
     if interface_debug_enabled() {
         eprintln!(
             "snapshot_local_state bind_addr={bind_addr} advertised_control_addr={advertised_control_addr:?}"
@@ -1733,8 +1843,9 @@ fn snapshot_local_state(
     link_metrics.sort_by(|lhs, rhs| lhs.peer_control_addr.cmp(&rhs.peer_control_addr));
     let mut snapshot = NodeSnapshot {
         node,
-        control_addr: bind_addr.to_string(),
+        control_addr: state.local_control_addr.clone(),
         advertised_control_addr,
+        known_control_addrs,
         runtime_dir: runtime_dir.display().to_string(),
         models_dir: state.models_dir.display().to_string(),
         rpc_endpoint,
@@ -1768,8 +1879,16 @@ fn query_local_devices_and_groups(
         // background telemetry/snapshot refreshes don't inherit dead remote RPC backends.
         let preview_api = ClusterApi::load(runtime_dir)
             .context("failed to load isolated cluster api for rpc preview")?;
-        let devices = preview_api.list_devices_with_rpc(Some(rpc_servers))?;
-        let execution_groups = preview_api.list_execution_groups_with_rpc(Some(rpc_servers))?;
+        let execution_groups = preview_api.list_execution_groups()?;
+        let reachable_rpc_servers = reachable_rpc_preview_servers(rpc_servers);
+        if reachable_rpc_servers.is_empty() {
+            let devices = preview_api.list_devices()?;
+            return Ok((devices, execution_groups));
+        }
+        let reachable_rpc_servers_csv = reachable_rpc_servers.join(",");
+        let devices = preview_api.list_devices_with_rpc(Some(&reachable_rpc_servers_csv))?;
+        let execution_groups =
+            synthesize_preview_execution_groups_with_rpc(&devices, execution_groups);
         return Ok((devices, execution_groups));
     }
 
@@ -1777,6 +1896,93 @@ fn query_local_devices_and_groups(
     let devices = guard.list_devices()?;
     let execution_groups = guard.list_execution_groups()?;
     Ok((devices, execution_groups))
+}
+
+fn reachable_rpc_preview_servers(rpc_servers: &str) -> Vec<String> {
+    let mut reachable = Vec::new();
+    for endpoint in split_csv(rpc_servers) {
+        if rpc_endpoint_is_reachable(&endpoint) {
+            reachable.push(endpoint);
+        } else {
+            eprintln!("cluster rpc preview skipping unreachable endpoint '{endpoint}'");
+        }
+    }
+    reachable
+}
+
+fn synthesize_preview_execution_groups_with_rpc(
+    devices: &[crate::cluster_api::DeviceInfo],
+    mut execution_groups: Vec<crate::cluster_api::ExecutionGroupInfo>,
+) -> Vec<crate::cluster_api::ExecutionGroupInfo> {
+    let rpc_devices = devices
+        .iter()
+        .filter(|device| {
+            is_rpc_backend_name(&device.backend) || is_rpc_backend_name(&device.name)
+        })
+        .collect::<Vec<_>>();
+    if rpc_devices.is_empty() {
+        return execution_groups;
+    }
+
+    let rpc_indices = rpc_devices
+        .iter()
+        .map(|device| device.bridge_device_index)
+        .collect::<Vec<_>>();
+    let rpc_memory_free = rpc_devices
+        .iter()
+        .fold(0u64, |total, device| total.saturating_add(device.memory_free));
+    let rpc_memory_total = rpc_devices
+        .iter()
+        .fold(0u64, |total, device| total.saturating_add(device.memory_total));
+
+    for group in &mut execution_groups {
+        if group.id == "cluster:auto" {
+            continue;
+        }
+
+        let mut merged_indices = group
+            .devices_csv
+            .split(',')
+            .map(|part| part.trim())
+            .filter(|part| !part.is_empty())
+            .filter_map(|part| part.parse::<i32>().ok())
+            .collect::<Vec<_>>();
+        for rpc_index in &rpc_indices {
+            if !merged_indices.contains(rpc_index) {
+                merged_indices.push(*rpc_index);
+            }
+        }
+        if merged_indices.is_empty() {
+            continue;
+        }
+
+        group.devices_csv = merged_indices
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        group.device_count = i32::try_from(merged_indices.len()).unwrap_or(i32::MAX);
+        group.uses_local_split = group.uses_local_split || merged_indices.len() > 1;
+        group.memory_free = group.memory_free.saturating_add(rpc_memory_free);
+        group.memory_total = group.memory_total.saturating_add(rpc_memory_total);
+        if !group.backend_summary.to_ascii_lowercase().contains("rpc") {
+            group.backend_summary = if group.backend_summary.trim().is_empty() {
+                "RPC".to_string()
+            } else {
+                format!("{} + RPC", group.backend_summary)
+            };
+        }
+        let lowered_label = group.label.to_ascii_lowercase();
+        if !lowered_label.contains("remote") && !lowered_label.contains("rpc") {
+            group.label = if group.label.trim().is_empty() {
+                "Remote".to_string()
+            } else {
+                format!("{} + remote", group.label)
+            };
+        }
+    }
+
+    execution_groups
 }
 
 fn build_local_telemetry(
@@ -1797,7 +2003,8 @@ fn build_local_telemetry(
     drop(guard);
 
     let (rpc_endpoint, rpc_running) = rpc_server_snapshot(state);
-    let advertised_control_addr = advertised_control_addr_for_bind(bind_addr);
+    let known_control_addrs = advertised_control_addrs_for_bind(bind_addr);
+    let advertised_control_addr = known_control_addrs.first().cloned();
     let _advertised_rpc_endpoint = advertised_rpc_endpoint_for_bind(
         rpc_endpoint.as_deref(),
         advertised_control_addr.as_deref(),
@@ -1825,10 +2032,11 @@ fn build_local_telemetry(
         .unwrap_or_default();
     link_metrics.sort_by(|lhs, rhs| lhs.peer_control_addr.cmp(&rhs.peer_control_addr));
 
-    Ok(TelemetrySnapshot {
+    let mut snapshot = TelemetrySnapshot {
         node,
-        control_addr: bind_addr.to_string(),
+        control_addr: state.local_control_addr.clone(),
         advertised_control_addr,
+        known_control_addrs,
         unix_ms: unix_ms_now(),
         process_memory_bytes,
         process_virtual_memory_bytes,
@@ -1840,7 +2048,9 @@ fn build_local_telemetry(
         devices,
         instances,
         link_metrics,
-    })
+    };
+    sanitize_telemetry_snapshot(&mut snapshot);
+    Ok(snapshot)
 }
 
 fn collect_cluster_telemetry(
@@ -1857,9 +2067,8 @@ fn collect_cluster_telemetry(
     if let Ok(mut guard) = telemetry_cache.lock() {
         guard.retain(|_, entry| now.duration_since(entry.last_seen) <= TELEMETRY_TTL);
         for entry in guard.values() {
-            cached_by_addr.insert(entry.snapshot.control_addr.clone(), entry.snapshot.clone());
-            if let Some(advertised) = &entry.snapshot.advertised_control_addr {
-                cached_by_addr.insert(advertised.clone(), entry.snapshot.clone());
+            for control_addr in telemetry_control_addr_candidates(&entry.snapshot) {
+                cached_by_addr.insert(control_addr.clone(), entry.snapshot.clone());
             }
             out.push(entry.snapshot.clone());
         }
@@ -1867,31 +2076,53 @@ fn collect_cluster_telemetry(
 
     let mut seen_remote = HashSet::new();
     for peer in list_peers(peers) {
-        let connect_addr = preferred_peer_control_addr(&peer);
+        let candidates = peer_control_addr_candidates(&peer);
+        let connect_addr =
+            preferred_control_addr_from_candidates(&candidates, &peer.control_addr);
         if connect_addr == local_control_addr || !seen_remote.insert(connect_addr.clone()) {
             continue;
         }
-        if cached_by_addr.contains_key(&connect_addr)
-            || cached_by_addr.contains_key(&peer.control_addr)
-            || peer
-                .advertised_control_addr
-                .as_ref()
-                .is_some_and(|value| cached_by_addr.contains_key(value))
-        {
+        if candidates.iter().any(|value| cached_by_addr.contains_key(value)) {
             continue;
         }
 
-        match AgentClient::new(connect_addr.clone()).get_local_telemetry() {
-            Ok(mut snapshot) => {
-                snapshot.control_addr = connect_addr.clone();
-                if snapshot.advertised_control_addr.is_none() {
-                    snapshot.advertised_control_addr = peer.advertised_control_addr.clone();
+        let mut telemetry_result = None;
+        for candidate in &candidates {
+            match AgentClient::new(candidate.clone())
+                .get_local_telemetry_with_timeout(TELEMETRY_DIRECT_QUERY_TIMEOUT)
+            {
+                Ok(snapshot) => {
+                    telemetry_result = Some((candidate.clone(), snapshot));
+                    break;
                 }
-                out.push(snapshot);
+                Err(err) => {
+                    eprintln!("cluster telemetry fallback from '{candidate}' failed: {err}");
+                }
             }
-            Err(err) => {
-                eprintln!("cluster telemetry fallback from '{connect_addr}' failed: {err}");
+        }
+        if let Some((resolved_addr, mut snapshot)) = telemetry_result {
+            snapshot.control_addr = resolved_addr.clone();
+            snapshot.known_control_addrs = dedup_sorted_control_addrs(
+                std::iter::once(resolved_addr)
+                    .chain(snapshot.known_control_addrs.into_iter())
+                    .chain(candidates.into_iter())
+                    .collect(),
+            );
+            if snapshot.advertised_control_addr.is_none() {
+                snapshot.advertised_control_addr = snapshot.known_control_addrs.first().cloned();
             }
+            sanitize_telemetry_snapshot(&mut snapshot);
+            if let Ok(mut guard) = telemetry_cache.lock() {
+                guard.insert(
+                    snapshot.control_addr.clone(),
+                    TelemetryEntry {
+                        snapshot: snapshot.clone(),
+                        last_seen: now,
+                    },
+                );
+                guard.retain(|_, entry| now.duration_since(entry.last_seen) <= TELEMETRY_TTL);
+            }
+            out.push(snapshot);
         }
     }
     out.sort_by(|lhs, rhs| {
@@ -1905,9 +2136,7 @@ fn collect_cluster_telemetry(
 }
 
 fn preferred_peer_control_addr(peer: &PeerInfo) -> String {
-    let advertised = peer.advertised_control_addr.as_deref();
-    let direct = Some(peer.control_addr.as_str());
-    better_control_addr(advertised, direct).unwrap_or_else(|| peer.control_addr.clone())
+    preferred_control_addr_from_candidates(&peer_control_addr_candidates(peer), &peer.control_addr)
 }
 
 fn peer_info_preference_score(peer: &PeerInfo) -> i32 {
@@ -1932,6 +2161,77 @@ fn better_control_addr<'a>(lhs: Option<&'a str>, rhs: Option<&'a str>) -> Option
         (None, Some(right)) => Some(right.to_string()),
         (None, None) => None,
     }
+}
+
+fn dedup_sorted_control_addrs(addrs: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for addr in addrs {
+        let trimmed = addr.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value = trimmed.to_string();
+        if seen.insert(value.clone()) {
+            out.push(value);
+        }
+    }
+    out.sort_by(|lhs, rhs| {
+        host_preference_score(&addr_host(rhs))
+            .cmp(&host_preference_score(&addr_host(lhs)))
+            .then(lhs.cmp(rhs))
+    });
+    out
+}
+
+fn preferred_control_addr_from_candidates(candidates: &[String], fallback: &str) -> String {
+    candidates
+        .first()
+        .cloned()
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn control_addr_candidates_overlap(lhs: &[String], rhs: &[String]) -> bool {
+    lhs.iter().any(|candidate| rhs.iter().any(|other| other == candidate))
+}
+
+fn peer_control_addr_candidates(peer: &PeerInfo) -> Vec<String> {
+    let mut addrs = vec![peer.control_addr.clone()];
+    if let Some(advertised) = peer.advertised_control_addr.clone() {
+        addrs.push(advertised);
+    }
+    addrs.extend(peer.known_control_addrs.iter().cloned());
+    dedup_sorted_control_addrs(addrs)
+}
+
+fn snapshot_control_addr_candidates(snapshot: &NodeSnapshot) -> Vec<String> {
+    let mut addrs = vec![snapshot.control_addr.clone()];
+    if let Some(advertised) = snapshot.advertised_control_addr.clone() {
+        addrs.push(advertised);
+    }
+    addrs.extend(snapshot.known_control_addrs.iter().cloned());
+    dedup_sorted_control_addrs(addrs)
+}
+
+fn telemetry_control_addr_candidates(snapshot: &TelemetrySnapshot) -> Vec<String> {
+    let mut addrs = vec![snapshot.control_addr.clone()];
+    if let Some(advertised) = snapshot.advertised_control_addr.clone() {
+        addrs.push(advertised);
+    }
+    addrs.extend(snapshot.known_control_addrs.iter().cloned());
+    dedup_sorted_control_addrs(addrs)
+}
+
+fn discovery_control_addr_candidates(
+    announcement: &DiscoveryAnnouncement,
+    sender_control_addr: &str,
+) -> Vec<String> {
+    let mut addrs = vec![sender_control_addr.to_string()];
+    if let Some(advertised) = announcement.advertised_control_addr.clone() {
+        addrs.push(advertised);
+    }
+    addrs.extend(announcement.known_control_addrs.iter().cloned());
+    dedup_sorted_control_addrs(addrs)
 }
 
 fn host_preference_score(host: &str) -> i32 {
@@ -1969,9 +2269,10 @@ fn list_peers(peers: &Arc<Mutex<HashMap<String, DiscoveredPeer>>>) -> Vec<PeerIn
     let mut best_by_key: HashMap<String, PeerInfo> = HashMap::new();
     for peer in guard.values() {
         let mut info = peer.info.clone();
-        let preferred_control = preferred_peer_control_addr(&info);
+        let candidates = peer_control_addr_candidates(&info);
+        let preferred_control = preferred_control_addr_from_candidates(&candidates, &info.control_addr);
         info.control_addr = preferred_control.clone();
-        info.advertised_control_addr = Some(preferred_control);
+        info.known_control_addrs = candidates;
         let key = if info.node_id.trim().is_empty() {
             info.control_addr.clone()
         } else {
@@ -2015,6 +2316,11 @@ fn align_snapshot_to_connect_addr(snapshot: &mut NodeSnapshot, connect_addr: &st
 
     snapshot.control_addr = connect_addr.to_string();
     snapshot.advertised_control_addr = Some(connect_addr.to_string());
+    snapshot.known_control_addrs = dedup_sorted_control_addrs(
+        std::iter::once(connect_addr.to_string())
+            .chain(snapshot.known_control_addrs.iter().cloned())
+            .collect(),
+    );
 
     if let Some(rpc_endpoint) = snapshot
         .advertised_rpc_endpoint
@@ -2068,6 +2374,35 @@ fn sanitize_snapshot_memory(snapshot: &mut NodeSnapshot) {
             group.memory_free = group.memory_total;
         }
     }
+    for metrics in &mut snapshot.link_metrics {
+        sanitize_link_metrics(metrics);
+    }
+}
+
+fn sanitize_telemetry_snapshot(snapshot: &mut TelemetrySnapshot) {
+    if !snapshot.process_cpu_percent.is_finite() {
+        snapshot.process_cpu_percent = 0.0;
+    }
+    for device in &mut snapshot.devices {
+        if device.memory_free > device.memory_total {
+            device.memory_free = device.memory_total;
+        }
+    }
+    for metrics in &mut snapshot.link_metrics {
+        sanitize_link_metrics(metrics);
+    }
+}
+
+fn sanitize_link_metrics(metrics: &mut LinkMetrics) {
+    if !metrics.latency_ms.is_finite() {
+        metrics.latency_ms = 0.0;
+    }
+    if !metrics.goodput_mbps.is_finite() {
+        metrics.goodput_mbps = 0.0;
+    }
+    if !metrics.duration_ms.is_finite() {
+        metrics.duration_ms = 0.0;
+    }
 }
 
 fn rpc_endpoint_for_snapshot(node: &NodeSnapshot) -> Option<String> {
@@ -2078,12 +2413,25 @@ fn rpc_endpoint_for_snapshot(node: &NodeSnapshot) -> Option<String> {
     let endpoint = node
         .advertised_rpc_endpoint
         .clone()
-        .or_else(|| node.rpc_endpoint.clone())?;
-    if rpc_endpoint_is_reachable(&endpoint) {
-        Some(endpoint)
-    } else {
-        None
+        .or_else(|| node.rpc_endpoint.clone());
+    if let Some(endpoint) = endpoint {
+        if rpc_endpoint_is_reachable(&endpoint) {
+            return Some(endpoint);
+        }
     }
+    let port = node
+        .advertised_rpc_endpoint
+        .as_deref()
+        .or(node.rpc_endpoint.as_deref())
+        .and_then(|value| value.rsplit_once(':').map(|(_, port)| port.to_string()))
+        .unwrap_or_else(|| CLUSTER_AGENT_RPC_PORT.to_string());
+    snapshot_control_addr_candidates(node)
+        .into_iter()
+        .filter_map(|control_addr| {
+            let (host, _) = control_addr.rsplit_once(':')?;
+            Some(format!("{host}:{port}"))
+        })
+        .find(|endpoint| rpc_endpoint_is_reachable(endpoint))
 }
 
 fn rpc_endpoint_is_reachable(endpoint: &str) -> bool {
@@ -2099,16 +2447,26 @@ fn query_remote_snapshot_with_retry(
     control_addr: &str,
     rpc_servers: Option<&str>,
 ) -> Result<NodeSnapshot> {
+    query_remote_snapshot_with_candidates(&[control_addr.to_string()], rpc_servers)
+        .map(|(_, snapshot)| snapshot)
+}
+
+fn query_remote_snapshot_with_candidates(
+    control_addrs: &[String],
+    rpc_servers: Option<&str>,
+) -> Result<(String, NodeSnapshot)> {
     let mut last_error = None;
-    for attempt in 0..SNAPSHOT_QUERY_RETRIES {
-        match AgentClient::new(control_addr.to_string())
-            .get_snapshot_with_rpc(rpc_servers.map(|value| value.to_string()))
-        {
-            Ok(snapshot) => return Ok(snapshot),
-            Err(err) => {
-                last_error = Some(err);
-                if attempt + 1 < SNAPSHOT_QUERY_RETRIES {
-                    thread::sleep(SNAPSHOT_QUERY_RETRY_DELAY);
+    for control_addr in dedup_sorted_control_addrs(control_addrs.to_vec()) {
+        for attempt in 0..SNAPSHOT_QUERY_RETRIES {
+            match AgentClient::new(control_addr.clone())
+                .get_snapshot_with_rpc(rpc_servers.map(|value| value.to_string()))
+            {
+                Ok(snapshot) => return Ok((control_addr.clone(), snapshot)),
+                Err(err) => {
+                    last_error = Some(err);
+                    if attempt + 1 < SNAPSHOT_QUERY_RETRIES {
+                        thread::sleep(SNAPSHOT_QUERY_RETRY_DELAY);
+                    }
                 }
             }
         }
@@ -2125,6 +2483,10 @@ fn control_addr_allowed(node: &NodeSnapshot, allowed: &HashSet<String>) -> bool 
             .as_ref()
             .map(|value| allowed.contains(value))
             .unwrap_or(false)
+        || node
+            .known_control_addrs
+            .iter()
+            .any(|value| allowed.contains(value))
 }
 
 fn collect_cluster_snapshots(
@@ -2149,7 +2511,9 @@ fn collect_cluster_snapshots(
     }
 
     for peer in list_peers(peers).into_iter().filter(|peer| peer.trusted) {
-        let connect_addr = preferred_peer_control_addr(&peer);
+        let candidates = peer_control_addr_candidates(&peer);
+        let connect_addr =
+            preferred_control_addr_from_candidates(&candidates, &peer.control_addr);
         let candidate = NodeSnapshot {
             node: crate::cluster_api::NodeInfo {
                 node_id: peer.node_id.clone(),
@@ -2159,6 +2523,7 @@ fn collect_cluster_snapshots(
             },
             control_addr: connect_addr.clone(),
             advertised_control_addr: peer.advertised_control_addr.clone(),
+            known_control_addrs: candidates.clone(),
             runtime_dir: String::new(),
             models_dir: String::new(),
             rpc_endpoint: peer.rpc_endpoint.clone(),
@@ -2178,17 +2543,24 @@ fn collect_cluster_snapshots(
             continue;
         }
 
-        let mut snapshot = query_remote_snapshot_with_retry(&connect_addr, None)
+        let (resolved_addr, mut snapshot) = query_remote_snapshot_with_candidates(&candidates, None)
             .with_context(|| format!("failed to query node snapshot from '{connect_addr}'"))?;
-        align_snapshot_to_connect_addr(&mut snapshot, &connect_addr);
+        align_snapshot_to_connect_addr(&mut snapshot, &resolved_addr);
         sanitize_snapshot_memory(&mut snapshot);
         if snapshot.advertised_control_addr.is_none() {
             snapshot.advertised_control_addr = peer.advertised_control_addr.clone();
         }
+        snapshot.known_control_addrs = dedup_sorted_control_addrs(
+            snapshot
+                .known_control_addrs
+                .into_iter()
+                .chain(candidates.into_iter())
+                .collect(),
+        );
         if snapshot.advertised_rpc_endpoint.is_none() {
             snapshot.advertised_rpc_endpoint = peer.advertised_rpc_endpoint.clone();
         }
-        let persist_needed = update_peer_from_snapshot(peers, &snapshot, &connect_addr);
+        let persist_needed = update_peer_from_snapshot(peers, &snapshot, &resolved_addr);
         if persist_needed {
             let _ = persist_paired_peers(runtime_dir, &state.local_node.node_id, peers);
         }
@@ -3319,14 +3691,12 @@ fn build_placement_candidates(
     allowed_control_addrs: Option<&[String]>,
 ) -> Result<Vec<PlacementCandidate>> {
     ensure_cluster_rpc_candidates(state, peers);
-    let nodes = collect_cluster_snapshots(
-        api,
-        peers,
-        bind_addr,
-        runtime_dir,
-        state,
-        allowed_control_addrs,
-    )?;
+    let nodes = collect_cluster_snapshots(api, peers, bind_addr, runtime_dir, state, None)?;
+    let allowed: HashSet<String> = allowed_control_addrs
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|value| normalize_control_addr(value).ok())
+        .collect();
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
     let mut owner_params_cache: HashMap<String, CreateInstanceParams> = HashMap::new();
@@ -3336,12 +3706,15 @@ fn build_placement_candidates(
         normalize_csv_value(&normalize_optional_text(params.rpc_servers.as_deref()));
 
     for owner in &nodes {
+        if !allowed.is_empty() && !control_addr_allowed(owner, &allowed) {
+            continue;
+        }
         if let Some(preferred_owner) = params.preferred_owner_control_addr.as_deref() {
-            let owner_matches = owner.control_addr == preferred_owner
-                || owner
-                    .advertised_control_addr
-                    .as_deref()
-                    .is_some_and(|addr| addr == preferred_owner);
+            let preferred_owner = match normalize_control_addr(preferred_owner) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            let owner_matches = control_addr_allowed(owner, &HashSet::from([preferred_owner]));
             if !owner_matches {
                 continue;
             }
@@ -3969,7 +4342,11 @@ fn remove_peer_by_addr(peers: &Arc<Mutex<HashMap<String, DiscoveredPeer>>>, cont
         return;
     };
     if let Ok(mut guard) = peers.lock() {
-        guard.retain(|_, peer| peer.info.control_addr != normalized);
+        guard.retain(|_, peer| {
+            !peer_control_addr_candidates(&peer.info)
+                .iter()
+                .any(|candidate| candidate == &normalized)
+        });
     }
 }
 
@@ -3981,6 +4358,7 @@ fn placeholder_peer_info(control_addr: &str) -> PeerInfo {
         arch: String::new(),
         control_addr: control_addr.to_string(),
         advertised_control_addr: Some(control_addr.to_string()),
+        known_control_addrs: vec![control_addr.to_string()],
         rpc_endpoint: None,
         advertised_rpc_endpoint: None,
         rpc_running: false,
@@ -4040,6 +4418,11 @@ fn load_persisted_paired_peers(
                 arch: String::new(),
                 control_addr: control_addr.clone(),
                 advertised_control_addr: Some(control_addr.clone()),
+                known_control_addrs: dedup_sorted_control_addrs(
+                    std::iter::once(control_addr.clone())
+                        .chain(peer.known_control_addrs.into_iter())
+                        .collect(),
+                ),
                 rpc_endpoint: None,
                 advertised_rpc_endpoint: None,
                 rpc_running: false,
@@ -4076,17 +4459,18 @@ fn persist_paired_peers(
     local_node_id: &str,
     peers: &Arc<Mutex<HashMap<String, DiscoveredPeer>>>,
 ) -> Result<()> {
-    let mut entries = {
+    let entries = {
         let guard = peers
             .lock()
             .map_err(|_| anyhow::anyhow!("peer registry mutex poisoned"))?;
-        let mut items = guard
+        let items = guard
             .values()
             .filter(|peer| peer.manual)
             .map(|peer| settings::PairedPeerSettings {
                 node_id: peer.info.node_id.clone(),
                 display_name: peer.info.display_name.clone(),
                 control_addr: preferred_peer_control_addr(&peer.info),
+                known_control_addrs: peer_control_addr_candidates(&peer.info),
                 shared_token_obfuscated: peer
                     .shared_token
                     .as_deref()
@@ -4094,15 +4478,55 @@ fn persist_paired_peers(
                     .unwrap_or_default(),
             })
             .collect::<Vec<_>>();
-        items.sort_by(|lhs, rhs| {
+        let mut merged = Vec::<settings::PairedPeerSettings>::new();
+        for mut item in items {
+            item.known_control_addrs = dedup_sorted_control_addrs(
+                std::iter::once(item.control_addr.clone())
+                    .chain(item.known_control_addrs.into_iter())
+                    .collect(),
+            );
+            if let Some(existing) = merged.iter_mut().find(|existing| {
+                (!item.node_id.trim().is_empty() && existing.node_id == item.node_id)
+                    || control_addr_candidates_overlap(
+                        &existing.known_control_addrs,
+                        &item.known_control_addrs,
+                    )
+            }) {
+                if existing.node_id.trim().is_empty() && !item.node_id.trim().is_empty() {
+                    existing.node_id = item.node_id.clone();
+                }
+                if existing.display_name.trim().is_empty() && !item.display_name.trim().is_empty() {
+                    existing.display_name = item.display_name.clone();
+                }
+                if existing.shared_token_obfuscated.trim().is_empty()
+                    && !item.shared_token_obfuscated.trim().is_empty()
+                {
+                    existing.shared_token_obfuscated = item.shared_token_obfuscated.clone();
+                }
+                existing.known_control_addrs = dedup_sorted_control_addrs(
+                    existing
+                        .known_control_addrs
+                        .iter()
+                        .cloned()
+                        .chain(item.known_control_addrs.iter().cloned())
+                        .collect(),
+                );
+                existing.control_addr = preferred_control_addr_from_candidates(
+                    &existing.known_control_addrs,
+                    &existing.control_addr,
+                );
+            } else {
+                item.control_addr =
+                    preferred_control_addr_from_candidates(&item.known_control_addrs, &item.control_addr);
+                merged.push(item);
+            }
+        }
+        merged.sort_by(|lhs, rhs| {
             lhs.display_name
                 .cmp(&rhs.display_name)
                 .then(lhs.control_addr.cmp(&rhs.control_addr))
         });
-        items.dedup_by(|lhs, rhs| {
-            lhs.node_id == rhs.node_id && lhs.control_addr == rhs.control_addr
-        });
-        items
+        merged
     };
 
     settings::update_controller_settings(|settings| {
@@ -4114,7 +4538,6 @@ fn persist_paired_peers(
     if legacy_path.exists() {
         fs::remove_file(&legacy_path).ok();
     }
-    entries.clear();
     Ok(())
 }
 
@@ -4206,7 +4629,7 @@ fn discovery_status_from_guard(guard: &mut DiscoveryRuntimeState) -> DiscoverySt
         .unwrap_or(0);
     DiscoveryStatus {
         mode: guard.mode,
-        active: guard.mode != DiscoveryMode::Off && guard.active_until.is_some(),
+        active: guard.mode != DiscoveryMode::Off,
         expires_unix_ms,
     }
 }
@@ -4286,6 +4709,7 @@ fn receive_pairing_request(
         arch: request.requester_arch.clone(),
         control_addr: request.requester_control_addr.clone(),
         advertised_control_addr: Some(request.requester_control_addr.clone()),
+        known_control_addrs: vec![request.requester_control_addr.clone()],
         rpc_endpoint: None,
         advertised_rpc_endpoint: None,
         rpc_running: false,
@@ -4339,6 +4763,7 @@ fn accept_pairing_request(
         control_addr: preferred_control_addr_for_pairing(state),
         advertised_control_addr: advertised_control_addr_for_bind(&state.bind_addr)
             .or_else(|| Some(preferred_control_addr_for_pairing(state))),
+        known_control_addrs: advertised_control_addrs_for_bind(&state.bind_addr),
         rpc_endpoint: None,
         advertised_rpc_endpoint: None,
         rpc_running: settings::multi_node_rpc_enabled(),
@@ -4363,6 +4788,7 @@ fn accept_pairing_request(
         arch: request.requester_arch.clone(),
         control_addr: requester_control_addr.clone(),
         advertised_control_addr: Some(requester_control_addr),
+        known_control_addrs: vec![request.requester_control_addr.clone()],
         rpc_endpoint: None,
         advertised_rpc_endpoint: None,
         rpc_running: false,
@@ -4409,6 +4835,11 @@ fn finalize_pairing_request(
     let mut paired_peer = peer;
     paired_peer.control_addr = peer_control_addr.clone();
     paired_peer.advertised_control_addr = Some(peer_control_addr);
+    paired_peer.known_control_addrs = dedup_sorted_control_addrs(
+        std::iter::once(paired_peer.control_addr.clone())
+            .chain(paired_peer.known_control_addrs.iter().cloned())
+            .collect(),
+    );
     paired_peer.trusted = true;
     paired_peer.last_seen_unix_ms = unix_ms_now();
     insert_or_update_peer(peers, paired_peer, true, Some(shared_token.to_string()));
@@ -4451,10 +4882,12 @@ fn insert_or_update_peer(
     shared_token: Option<String>,
 ) {
     if let Ok(mut guard) = peers.lock() {
+        let incoming_candidates = peer_control_addr_candidates(&info);
         let existing = guard.iter().find_map(|(key, peer)| {
             let same_node = !info.node_id.trim().is_empty() && peer.info.node_id == info.node_id;
-            let same_addr = peer.info.control_addr == info.control_addr
-                || peer.info.advertised_control_addr.as_deref() == Some(info.control_addr.as_str());
+            let same_addr = peer_control_addr_candidates(&peer.info)
+                .iter()
+                .any(|addr| incoming_candidates.iter().any(|candidate| candidate == addr));
             if same_node || same_addr {
                 Some((key.clone(), peer.clone()))
             } else {
@@ -4492,6 +4925,31 @@ fn insert_or_update_peer(
                 info.advertised_rpc_endpoint = current.info.advertised_rpc_endpoint.clone();
             }
             info.rpc_running = info.rpc_running || current.info.rpc_running;
+            info.known_control_addrs = dedup_sorted_control_addrs(
+                current
+                    .info
+                    .known_control_addrs
+                    .iter()
+                    .cloned()
+                    .chain(peer_control_addr_candidates(&current.info))
+                    .chain(info.known_control_addrs.iter().cloned())
+                    .chain(incoming_candidates.iter().cloned())
+                    .collect(),
+            );
+        } else {
+            info.known_control_addrs = dedup_sorted_control_addrs(
+                info.known_control_addrs
+                    .iter()
+                    .cloned()
+                    .chain(incoming_candidates.iter().cloned())
+                    .collect(),
+            );
+        }
+        let preferred_control =
+            preferred_control_addr_from_candidates(&peer_control_addr_candidates(&info), &info.control_addr);
+        info.control_addr = preferred_control.clone();
+        if info.advertised_control_addr.is_none() {
+            info.advertised_control_addr = Some(preferred_control);
         }
         guard.insert(
             key,
@@ -4514,19 +4972,18 @@ fn update_peer_from_snapshot(
     snapshot: &NodeSnapshot,
     connect_addr: &str,
 ) -> bool {
+    let snapshot_candidates = dedup_sorted_control_addrs(
+        std::iter::once(connect_addr.to_string())
+            .chain(snapshot_control_addr_candidates(snapshot))
+            .collect(),
+    );
     let existing = peers.lock().ok().and_then(|guard| {
         guard.values().find_map(|peer| {
             let same_node = !snapshot.node.node_id.trim().is_empty()
                 && peer.info.node_id == snapshot.node.node_id;
-            let same_addr = peer.info.control_addr == connect_addr
-                || peer.info.advertised_control_addr.as_deref() == Some(connect_addr)
-                || snapshot
-                    .advertised_control_addr
-                    .as_deref()
-                    .is_some_and(|addr| {
-                        peer.info.control_addr == addr
-                            || peer.info.advertised_control_addr.as_deref() == Some(addr)
-                    });
+            let same_addr = peer_control_addr_candidates(&peer.info)
+                .iter()
+                .any(|addr| snapshot_candidates.iter().any(|candidate| candidate == addr));
             if same_node || same_addr {
                 Some((peer.info.clone(), peer.manual, peer.shared_token.clone()))
             } else {
@@ -4555,6 +5012,7 @@ fn update_peer_from_snapshot(
             snapshot.advertised_control_addr.as_deref(),
             Some(connect_addr),
         ),
+        known_control_addrs: snapshot_candidates,
         rpc_endpoint: snapshot.rpc_endpoint.clone(),
         advertised_rpc_endpoint: snapshot
             .advertised_rpc_endpoint
@@ -4592,22 +5050,19 @@ fn handle_discovery_announcement(
     announcement: DiscoveryAnnouncement,
     sender_control_addr: String,
 ) {
-    if mode == DiscoveryMode::Off {
-        return;
-    }
-    let control_addr = better_control_addr(
-        announcement.advertised_control_addr.as_deref(),
-        Some(sender_control_addr.as_str()),
-    )
-    .unwrap_or(sender_control_addr);
+    let announcement_candidates =
+        discovery_control_addr_candidates(&announcement, sender_control_addr.as_str());
+    let control_addr =
+        preferred_control_addr_from_candidates(&announcement_candidates, sender_control_addr.as_str());
     let mut persist_needed = false;
     let mut matched_known_pair = false;
     if let Ok(mut guard) = peers.lock() {
         let existing = guard.iter_mut().find_map(|(_, peer)| {
             let same_node = !announcement.node.node_id.trim().is_empty()
                 && peer.info.node_id == announcement.node.node_id;
-            let same_addr = peer.info.control_addr == control_addr
-                || peer.info.advertised_control_addr.as_deref() == Some(control_addr.as_str());
+            let same_addr = peer_control_addr_candidates(&peer.info)
+                .iter()
+                .any(|addr| announcement_candidates.iter().any(|candidate| candidate == addr));
             if same_node || same_addr {
                 Some(peer)
             } else {
@@ -4617,18 +5072,20 @@ fn handle_discovery_announcement(
         if let Some(peer) = existing {
             matched_known_pair = peer.manual;
             let previous_addr = preferred_peer_control_addr(&peer.info);
-            let next_addr = if peer.manual {
-                better_control_addr(Some(previous_addr.as_str()), Some(control_addr.as_str()))
-                    .unwrap_or_else(|| control_addr.clone())
-            } else {
-                control_addr.clone()
-            };
+            let next_candidates = dedup_sorted_control_addrs(
+                peer_control_addr_candidates(&peer.info)
+                    .into_iter()
+                    .chain(announcement_candidates.iter().cloned())
+                    .collect(),
+            );
+            let next_addr = preferred_control_addr_from_candidates(&next_candidates, &control_addr);
             peer.info.node_id = announcement.node.node_id.clone();
             peer.info.display_name = announcement.node.display_name.clone();
             peer.info.os_name = announcement.node.os_name.clone();
             peer.info.arch = announcement.node.arch.clone();
             peer.info.control_addr = next_addr.clone();
             peer.info.advertised_control_addr = Some(next_addr.clone());
+            peer.info.known_control_addrs = next_candidates;
             peer.info.advertised_rpc_endpoint = announcement.advertised_rpc_endpoint.clone();
             peer.info.rpc_running = announcement.rpc_running;
             peer.info.last_seen_unix_ms = unix_ms_now();
@@ -4636,7 +5093,7 @@ fn handle_discovery_announcement(
             if peer.manual && previous_addr != next_addr {
                 persist_needed = true;
             }
-        } else if mode == DiscoveryMode::Pairing {
+        } else {
             let peer_info = PeerInfo {
                 node_id: announcement.node.node_id,
                 display_name: announcement.node.display_name,
@@ -4644,6 +5101,7 @@ fn handle_discovery_announcement(
                 arch: announcement.node.arch,
                 control_addr: control_addr.clone(),
                 advertised_control_addr: Some(control_addr.clone()),
+                known_control_addrs: announcement_candidates.clone(),
                 rpc_endpoint: None,
                 advertised_rpc_endpoint: announcement.advertised_rpc_endpoint.clone(),
                 rpc_running: announcement.rpc_running,
@@ -4674,16 +5132,18 @@ fn current_discovery_announcement(
     bind_addr: &str,
     control_port: u16,
 ) -> DiscoveryAnnouncement {
+    let known_control_addrs = advertised_control_addrs_for_bind(bind_addr);
     DiscoveryAnnouncement {
         protocol_version: 1,
         node: local_node.clone(),
         control_port,
-        advertised_control_addr: advertised_control_addr_for_bind(bind_addr),
+        advertised_control_addr: known_control_addrs.first().cloned(),
+        known_control_addrs: known_control_addrs.clone(),
         advertised_rpc_endpoint: {
             let rpc_endpoint = rpc_loopback_endpoint();
             advertised_rpc_endpoint_for_bind(
                 Some(&rpc_endpoint),
-                advertised_control_addr_for_bind(bind_addr).as_deref(),
+                known_control_addrs.first().map(|value| value.as_str()),
             )
         },
         rpc_running: rpc_server_is_reachable(),
@@ -4696,37 +5156,12 @@ fn start_discovery_loop(
     bind_addr: String,
     peers: Arc<Mutex<HashMap<String, DiscoveredPeer>>>,
     state: Arc<AgentRuntimeState>,
-) -> Result<()> {
+    socket: UdpSocket,
+) {
     let control_port = bind_addr
         .rsplit_once(':')
         .and_then(|(_, port)| port.parse::<u16>().ok())
         .unwrap_or(CLUSTER_AGENT_CONTROL_PORT);
-
-    let socket = UdpSocket::bind(SocketAddrV4::new(
-        Ipv4Addr::UNSPECIFIED,
-        CLUSTER_AGENT_DISCOVERY_PORT,
-    ))
-    .with_context(|| {
-        format!(
-            "failed to bind discovery socket on UDP {}",
-            CLUSTER_AGENT_DISCOVERY_PORT
-        )
-    })?;
-    socket.set_nonblocking(false).ok();
-    socket
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .ok();
-    socket.set_broadcast(true).ok();
-    socket
-        .join_multicast_v4(&DISCOVERY_MULTICAST_IP, &Ipv4Addr::UNSPECIFIED)
-        .ok();
-    for candidate in preferred_interface_candidates() {
-        socket
-            .join_multicast_v4(&DISCOVERY_MULTICAST_IP, &candidate.ip)
-            .ok();
-    }
-    socket.set_multicast_ttl_v4(1).ok();
-    socket.set_multicast_loop_v4(false).ok();
 
     thread::spawn(move || {
         let multicast_addr =
@@ -4793,8 +5228,6 @@ fn start_discovery_loop(
             }
         }
     });
-
-    Ok(())
 }
 
 fn start_telemetry_loop(
@@ -4803,32 +5236,8 @@ fn start_telemetry_loop(
     api: SharedClusterApi,
     state: Arc<AgentRuntimeState>,
     telemetry_cache: Arc<Mutex<HashMap<String, TelemetryEntry>>>,
-) -> Result<()> {
-    let socket = UdpSocket::bind(SocketAddrV4::new(
-        Ipv4Addr::UNSPECIFIED,
-        CLUSTER_AGENT_TELEMETRY_PORT,
-    ))
-    .with_context(|| {
-        format!(
-            "failed to bind telemetry socket on UDP {}",
-            CLUSTER_AGENT_TELEMETRY_PORT
-        )
-    })?;
-    socket.set_nonblocking(false).ok();
-    socket
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .ok();
-    socket.set_broadcast(true).ok();
-    socket
-        .join_multicast_v4(&DISCOVERY_MULTICAST_IP, &Ipv4Addr::UNSPECIFIED)
-        .ok();
-    for candidate in preferred_interface_candidates() {
-        socket
-            .join_multicast_v4(&DISCOVERY_MULTICAST_IP, &candidate.ip)
-            .ok();
-    }
-    socket.set_multicast_ttl_v4(1).ok();
-    socket.set_multicast_loop_v4(false).ok();
+    socket: UdpSocket,
+) {
     thread::spawn(move || {
         let multicast_addr =
             SocketAddrV4::new(DISCOVERY_MULTICAST_IP, CLUSTER_AGENT_TELEMETRY_PORT);
@@ -4895,8 +5304,27 @@ fn start_telemetry_loop(
             }
         }
     });
+}
 
-    Ok(())
+fn bind_cluster_udp_socket(port: u16, purpose: &str) -> Result<UdpSocket> {
+    let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port))
+        .with_context(|| format!("failed to bind {purpose} socket on UDP {port}"))?;
+    socket.set_nonblocking(false).ok();
+    socket
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .ok();
+    socket.set_broadcast(true).ok();
+    socket
+        .join_multicast_v4(&DISCOVERY_MULTICAST_IP, &Ipv4Addr::UNSPECIFIED)
+        .ok();
+    for candidate in preferred_interface_candidates() {
+        socket
+            .join_multicast_v4(&DISCOVERY_MULTICAST_IP, &candidate.ip)
+            .ok();
+    }
+    socket.set_multicast_ttl_v4(1).ok();
+    socket.set_multicast_loop_v4(false).ok();
+    Ok(socket)
 }
 
 fn start_link_benchmark_monitor(
@@ -5404,7 +5832,7 @@ fn ensure_rpc_server_running(state: &Arc<AgentRuntimeState>) -> Result<()> {
 
     stop_legacy_rpc_server_processes();
 
-    if rpc_server_is_reachable() {
+    if refresh_rpc_server_reachability() {
         let mut guard = state
             .rpc_server
             .lock()
@@ -5431,6 +5859,7 @@ fn ensure_rpc_server_running(state: &Arc<AgentRuntimeState>) -> Result<()> {
 
 fn spawn_managed_rpc_server(state: &Arc<AgentRuntimeState>) -> Result<()> {
     let runtime_dir = state.runtime_dir.clone();
+    clear_rpc_server_reachability_cache();
     thread::Builder::new()
         .name("engine-rpc-host".to_string())
         .spawn(move || {
@@ -5455,7 +5884,7 @@ fn spawn_managed_rpc_server(state: &Arc<AgentRuntimeState>) -> Result<()> {
 fn wait_for_rpc_server_ready(timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if rpc_server_is_reachable() {
+        if refresh_rpc_server_reachability() {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
@@ -5469,6 +5898,7 @@ fn sh_single_quote(value: &str) -> String {
 }
 
 pub fn stop_local_support_processes(_runtime_dir: &Path) {
+    clear_rpc_server_reachability_cache();
     stop_legacy_rpc_server_processes();
 }
 
@@ -5516,28 +5946,15 @@ fn restart_matching_peer_rpc_servers(
                     .as_ref()
                     .map(|value| value.to_ascii_lowercase() == endpoint_norm)
                     .unwrap_or(false);
-                let advertised_control_host_match = peer
-                    .info
-                    .advertised_control_addr
-                    .as_ref()
-                    .map(|value| addr_host(&value.to_ascii_lowercase()) == endpoint_host)
-                    .unwrap_or(false);
-                let control_host_match =
-                    addr_host(&peer.info.control_addr.to_ascii_lowercase()) == endpoint_host;
+                let control_host_match = peer_control_addr_candidates(&peer.info)
+                    .iter()
+                    .any(|value| addr_host(&value.to_ascii_lowercase()) == endpoint_host);
 
-                if !(advertised_match
-                    || direct_match
-                    || advertised_control_host_match
-                    || control_host_match)
-                {
+                if !(advertised_match || direct_match || control_host_match) {
                     continue;
                 }
 
-                let control_addr = peer
-                    .info
-                    .advertised_control_addr
-                    .clone()
-                    .unwrap_or_else(|| peer.info.control_addr.clone());
+                let control_addr = preferred_peer_control_addr(&peer.info);
                 if seen.insert(control_addr.clone()) {
                     targets.push(control_addr);
                 }
@@ -5565,7 +5982,42 @@ fn rpc_bind_endpoint() -> String {
 }
 
 fn rpc_server_is_reachable() -> bool {
-    TcpStream::connect(rpc_loopback_endpoint()).is_ok()
+    cached_rpc_server_reachability(false)
+}
+
+fn refresh_rpc_server_reachability() -> bool {
+    cached_rpc_server_reachability(true)
+}
+
+fn clear_rpc_server_reachability_cache() {
+    if let Ok(mut guard) = RPC_SERVER_REACHABILITY_CACHE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *guard = None;
+    }
+}
+
+fn cached_rpc_server_reachability(force_refresh: bool) -> bool {
+    let cache = RPC_SERVER_REACHABILITY_CACHE.get_or_init(|| Mutex::new(None));
+    if !force_refresh {
+        if let Ok(guard) = cache.lock() {
+            if let Some(cached) = guard.as_ref() {
+                if cached.checked_at.elapsed() <= RPC_SERVER_REACHABILITY_CACHE_TTL {
+                    return cached.reachable;
+                }
+            }
+        }
+    }
+
+    let reachable = rpc_endpoint_is_reachable(&rpc_loopback_endpoint());
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some(CachedRpcServerReachability {
+            reachable,
+            checked_at: Instant::now(),
+        });
+    }
+    reachable
 }
 
 fn rpc_server_snapshot(state: &Arc<AgentRuntimeState>) -> (Option<String>, bool) {
@@ -5710,7 +6162,14 @@ fn bind_addr_from_local_control_addr(control_addr: &str) -> String {
         "" | "localhost" => "127.0.0.1",
         value => value,
     };
-    if matches!(host, "127.0.0.1" | "::1" | "[::1]") {
+    if matches!(host, "0.0.0.0" | "::" | "[::]" | "127.0.0.1" | "::1" | "[::1]") {
+        return format!("0.0.0.0:{port}");
+    }
+    if host
+        .parse::<Ipv4Addr>()
+        .ok()
+        .is_some_and(|ip| preferred_interface_candidates().iter().any(|candidate| candidate.ip == ip))
+    {
         return format!("0.0.0.0:{port}");
     }
     format!("{host}:{port}")
@@ -5816,10 +6275,51 @@ fn preferred_local_network_bind_host() -> Option<String> {
         .or_else(|| default_route_local_network_host(true))
 }
 
+fn advertised_control_addrs_for_bind(bind_addr: &str) -> Vec<String> {
+    let Some((_, port)) = bind_addr.rsplit_once(':') else {
+        return Vec::new();
+    };
+    let mut hosts = Vec::new();
+    let bind_host = bind_addr
+        .rsplit_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(bind_addr)
+        .trim()
+        .to_string();
+    if is_cluster_reachable_host(&bind_host) {
+        hosts.push(bind_host);
+    }
+    if let Some(host) = std::env::var("ENGINE_CLUSTER_ADVERTISE_HOST")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && is_cluster_reachable_host(value))
+    {
+        hosts.push(host);
+    }
+    if let Some(host) = preferred_paired_link_local_host(false) {
+        hosts.push(host);
+    }
+    if let Some(host) = preferred_direct_link_host() {
+        hosts.push(host);
+    }
+    hosts.extend(
+        preferred_interface_candidates()
+            .into_iter()
+            .map(|candidate| candidate.ip.to_string()),
+    );
+    if let Some(host) = default_route_local_network_host(false) {
+        hosts.push(host);
+    }
+    dedup_sorted_control_addrs(
+        hosts
+            .into_iter()
+            .map(|host| format!("{host}:{port}"))
+            .collect(),
+    )
+}
+
 fn advertised_control_addr_for_bind(bind_addr: &str) -> Option<String> {
-    let (_, port) = bind_addr.rsplit_once(':')?;
-    let host = advertised_host_for_bind(bind_addr)?;
-    Some(format!("{host}:{port}"))
+    advertised_control_addrs_for_bind(bind_addr).into_iter().next()
 }
 
 fn advertised_rpc_endpoint_for_bind(
