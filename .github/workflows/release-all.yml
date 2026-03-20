@@ -22,6 +22,11 @@ on:
         required: false
         type: boolean
         default: false
+      include_ubuntu:
+        description: Include Ubuntu Vulkan build in this release
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: release-all-${{ github.ref }}
@@ -102,12 +107,13 @@ jobs:
     secrets: inherit
 
   build-ubuntu-vulkan:
+    if: ${{ inputs.include_ubuntu }}
     needs: resolve-release-meta
     uses: ./.github/workflows/ubuntu-x64.yml
     secrets: inherit
 
   prepare-runtime-release-assets:
-    if: ${{ always() && needs.resolve-release-meta.result == 'success' && needs.build-windows-vulkan.result == 'success' && needs.build-macos-metal.result == 'success' && needs.build-ubuntu-vulkan.result == 'success' && (needs.build-windows-cuda.result == 'success' || needs.build-windows-cuda.result == 'skipped') }}
+    if: ${{ always() && needs.resolve-release-meta.result == 'success' && needs.build-windows-vulkan.result == 'success' && needs.build-macos-metal.result == 'success' && (needs.build-ubuntu-vulkan.result == 'success' || needs.build-ubuntu-vulkan.result == 'skipped') && (needs.build-windows-cuda.result == 'success' || needs.build-windows-cuda.result == 'skipped') }}
     needs:
       - resolve-release-meta
       - build-windows-cuda
@@ -118,6 +124,7 @@ jobs:
     env:
       RELEASE_TAG: ${{ needs.resolve-release-meta.outputs.tag }}
       INCLUDE_CUDA: ${{ inputs.include_cuda }}
+      INCLUDE_UBUNTU: ${{ inputs.include_ubuntu }}
       GITHUB_REPOSITORY: ${{ github.repository }}
     steps:
       - name: Checkout
@@ -137,10 +144,12 @@ jobs:
           expected=(
             "engine-win-vulkan-x64"
             "engine-macos-arm64-metal"
-            "engine-ubuntu-x64-vulkan"
           )
           if [[ "$INCLUDE_CUDA" == "true" ]]; then
             expected+=("engine-win-cuda-x64")
+          fi
+          if [[ "$INCLUDE_UBUNTU" == "true" ]]; then
+            expected+=("engine-ubuntu-x64-vulkan")
           fi
           for name in "${expected[@]}"; do
             if [[ ! -d "dist/$name" ]]; then
@@ -167,7 +176,9 @@ jobs:
           fi
           (cd dist/engine-win-vulkan-x64 && zip -r "../../release-assets/${win_vulkan_asset}" .)
           (cd dist/engine-macos-arm64-metal && zip -r "../../release-assets/${macos_metal_asset}" .)
-          tar -C dist/engine-ubuntu-x64-vulkan -czf "release-assets/${ubuntu_vulkan_asset}" .
+          if [[ "$INCLUDE_UBUNTU" == "true" ]]; then
+            tar -C dist/engine-ubuntu-x64-vulkan -czf "release-assets/${ubuntu_vulkan_asset}" .
+          fi
 
       - name: Verify Runtime Zip Methods
         shell: bash
@@ -199,6 +210,7 @@ jobs:
           RELEASE_TAG="$RELEASE_TAG" \
           GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
           INCLUDE_CUDA="$INCLUDE_CUDA" \
+          INCLUDE_UBUNTU="$INCLUDE_UBUNTU" \
           WIN_VULKAN_ASSET="$win_vulkan_asset" \
           MACOS_METAL_ASSET="$macos_metal_asset" \
           UBUNTU_VULKAN_ASSET="$ubuntu_vulkan_asset" \
@@ -212,6 +224,7 @@ jobs:
           repo = os.environ["GITHUB_REPOSITORY"]
           tag = os.environ["RELEASE_TAG"]
           include_cuda = os.environ.get("INCLUDE_CUDA", "").lower() == "true"
+          include_ubuntu = os.environ.get("INCLUDE_UBUNTU", "").lower() == "true"
           generated_at = os.environ["GENERATED_AT"]
           dist_dir = Path("release-assets")
           sha_file = dist_dir / ".runtime-SHA256SUMS.txt"
@@ -259,13 +272,14 @@ jobs:
               "zip",
               os.environ["MACOS_METAL_ASSET"],
           )
-          add_asset(
-              "ubuntu-x64-vulkan",
-              "ubuntu-x64",
-              "vulkan",
-              "tar.gz",
-              os.environ["UBUNTU_VULKAN_ASSET"],
-          )
+          if include_ubuntu:
+              add_asset(
+                  "ubuntu-x64-vulkan",
+                  "ubuntu-x64",
+                  "vulkan",
+                  "tar.gz",
+                  os.environ["UBUNTU_VULKAN_ASSET"],
+              )
           if include_cuda:
               add_asset(
                   "windows-x64-cuda",
@@ -401,6 +415,7 @@ jobs:
       RELEASE_TITLE: ${{ needs.resolve-release-meta.outputs.title }}
       RELEASE_PRERELEASE: ${{ inputs.prerelease }}
       INCLUDE_CUDA: ${{ inputs.include_cuda }}
+      INCLUDE_UBUNTU: ${{ inputs.include_ubuntu }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
@@ -445,33 +460,57 @@ jobs:
           win_cuda_asset="${release_prefix}-windows-x64-cuda.zip"
           controller_win_asset="Engine.exe"
           controller_macos_asset="Engine.dmg"
+          image_url="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/clusterui/assets/engine.png"
           {
             echo "# ${RELEASE_TITLE}"
             echo
+            echo "<p align=\"center\"><img src=\"${image_url}\" alt=\"Engine controller app\" width=\"320\"></p>"
+            echo
+            echo "Experimental cluster controller for orchestrating single-node and multi-node runtimes across multiple graphics cards on the same and/or different machines."
+            echo
+            echo "> Experimental development release. Expect instability and bugs, especially on clusters larger than 2 nodes."
+            echo
             echo "## Downloads"
             echo
-            echo "| System | Backend | Asset | Download |"
+            echo "### Controller Apps"
+            echo
+            echo "| Platform | Package | Download |"
+            echo "|---|---|---|"
+            echo "| Windows x64 | \`${controller_win_asset}\` | [Download](${base_url}/${controller_win_asset}) |"
+            echo "| macOS arm64 (Apple Silicon) | \`${controller_macos_asset}\` | [Download](${base_url}/${controller_macos_asset}) |"
+            echo
+            echo "### Runtime Bundles"
+            echo
+            echo "| Platform | Backend | Package | Download |"
             echo "|---|---|---|---|"
             if [[ "$INCLUDE_CUDA" == "true" ]]; then
               echo "| Windows x64 | CUDA 13.1 + CPU | \`${win_cuda_asset}\` | [Download](${base_url}/${win_cuda_asset}) |"
             fi
             echo "| Windows x64 | Vulkan + CPU | \`${win_vulkan_asset}\` | [Download](${base_url}/${win_vulkan_asset}) |"
             echo "| macOS arm64 (Apple Silicon) | Metal (GPU) | \`${macos_metal_asset}\` | [Download](${base_url}/${macos_metal_asset}) |"
-            echo "| Ubuntu x64 | Vulkan + CPU | \`${ubuntu_vulkan_asset}\` | [Download](${base_url}/${ubuntu_vulkan_asset}) |"
-            echo "| Windows x64 | Engine controller app | \`${controller_win_asset}\` | [Download](${base_url}/${controller_win_asset}) |"
-            echo "| macOS arm64 (Apple Silicon) | Engine controller app | \`${controller_macos_asset}\` | [Download](${base_url}/${controller_macos_asset}) |"
-            echo "| Runtime manifest | Metadata JSON | \`engine-manifest.json\` | [Download](${base_url}/engine-manifest.json) |"
-            echo "| Checksums | SHA256 | \`SHA256SUMS.txt\` | [Download](${base_url}/SHA256SUMS.txt) |"
+            if [[ "$INCLUDE_UBUNTU" == "true" ]]; then
+              echo "| Ubuntu x64 | Vulkan + CPU | \`${ubuntu_vulkan_asset}\` | [Download](${base_url}/${ubuntu_vulkan_asset}) |"
+            fi
+            echo
+            echo "### Metadata"
+            echo
+            echo "| Asset | Type | Download |"
+            echo "|---|---|---|"
+            echo "| \`engine-manifest.json\` | Runtime manifest | [Download](${base_url}/engine-manifest.json) |"
+            echo "| \`SHA256SUMS.txt\` | Checksums | [Download](${base_url}/SHA256SUMS.txt) |"
             echo
             echo "## Runtime Notes"
             echo
-            echo "- Windows and Ubuntu builds include CPU runtime support."
+            echo "- Windows runtime builds include CPU runtime support."
+            if [[ "$INCLUDE_UBUNTU" == "true" ]]; then
+              echo "- Ubuntu runtime builds include CPU runtime support."
+            fi
             if [[ "$INCLUDE_CUDA" == "true" ]]; then
               echo "- Windows CUDA build includes CUDA 13.1 runtime components. If your GPU or driver does not support CUDA 13.1, use the Windows Vulkan build instead."
             fi
             echo "- macOS build supports Apple Silicon only (M1, M2, M3, M4 and newer Arm-based Macs) and is distributed as a Metal-focused GPU build that leverages unified memory."
             echo "- Vulkan builds are GPU vendor-agnostic and can be a better fallback across mixed hardware."
-            echo "- \`Engine.exe\` on Windows and \`Engine.dmg\` on macOS are the multi-node controller app builds."
+            echo "- \`Engine.exe\` on Windows and \`Engine.dmg\` on macOS are experimental cluster controller builds."
             echo "- The macOS controller download contains \`Engine.app\` inside the DMG."
             echo "- Any connected node can act as initiator, runtime owner, or worker node."
             echo "- Cluster participation is backend-agnostic across machines: Windows nodes can use Vulkan or CUDA, while macOS nodes use Metal."
