@@ -10,6 +10,7 @@ pub struct llama_server_bridge {
 pub struct llama_server_bridge_params {
     pub model_path: *const c_char,
     pub mmproj_path: *const c_char,
+    pub cluster_instance_name: *const c_char,
 
     pub n_ctx: i32,
     pub n_batch: i32,
@@ -28,6 +29,11 @@ pub struct llama_server_bridge_params {
     pub seed: i32,
     pub ctx_shift: i32,
     pub kv_unified: i32,
+    pub use_mmap: i32,
+    pub use_direct_io: i32,
+    pub use_mlock: i32,
+    pub no_host: i32,
+    pub no_extra_bufts: i32,
 
     pub devices: *const c_char,
     pub tensor_split: *const c_char,

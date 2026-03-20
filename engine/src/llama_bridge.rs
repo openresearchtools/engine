@@ -630,8 +630,12 @@ pub struct OwnedBridgeParams {
 
 impl OwnedBridgeParams {
     pub fn new() -> Self {
+        let mut raw = unsafe { llama_server_bridge_default_params() };
+        raw.use_mmap = 0;
+        raw.use_direct_io = 0;
+        raw.use_mlock = 0;
         Self {
-            raw: unsafe { llama_server_bridge_default_params() },
+            raw,
             model_path: None,
             mmproj_path: None,
             cluster_instance_name: None,
@@ -1383,6 +1387,9 @@ fn make_bridge(
     params.cache_ram_mib = 0;
     params.ctx_shift = 1;
     params.kv_unified = 1;
+    params.use_mmap = 0;
+    params.use_direct_io = 0;
+    params.use_mlock = 0;
     params.devices = devices_c
         .as_ref()
         .map(|s| s.as_ptr())

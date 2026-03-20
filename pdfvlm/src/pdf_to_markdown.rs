@@ -185,6 +185,9 @@ impl SharedBridge {
         params.seed = -1;
         params.ctx_shift = 1;
         params.kv_unified = 1;
+        params.use_mmap = 0;
+        params.use_direct_io = 0;
+        params.use_mlock = 0;
         params.devices = c_devices
             .as_ref()
             .map(|s| s.as_ptr())

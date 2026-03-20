@@ -3488,7 +3488,7 @@ struct llama_server_bridge_params llama_server_bridge_default_params(void) {
     p.seed = -1;
     p.ctx_shift = 1;
     p.kv_unified = 1;
-    p.use_mmap = 1;
+    p.use_mmap = 0;
     p.use_direct_io = 0;
     p.use_mlock = 0;
     p.no_host = 0;
