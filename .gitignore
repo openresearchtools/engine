@@ -17,3 +17,6 @@
 *.so
 *.dylib
 *.exe
+
+# macOS Finder metadata
+.DS_Store
