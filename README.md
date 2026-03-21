@@ -10,15 +10,15 @@ Openresearchtools-Engine is a local AI runtime primarily based on Llama.CPP, tha
 Experimental cluster controller for orchestrating single-node and multi-node runtimes across multiple graphics cards on the same and/or different machines.
 | Platform | Package | Download |
 |---|---|---|
-| Windows x64 | `Engine.exe` | [Download](https://github.com/openresearchtools/engine/releases/download/v1.15/Engine.exe) 
-| macOS arm64 (Apple Silicon) | `Engine.dmg` | [Download](https://github.com/openresearchtools/engine/releases/download/v1.15/Engine.dmg) 
+| Windows x64 | `Engine.exe` | [Download](https://github.com/openresearchtools/engine/releases/download/v1.15/Engine.exe) |
+| macOS arm64 (Apple Silicon) | `Engine.dmg` | [Download](https://github.com/openresearchtools/engine/releases/download/v1.15/Engine.dmg) |
 
 > Experimental development release. Expect instability and bugs, especially on clusters larger than 2 nodes.
 
 ## A few example apps using Embeded engine: 
-Live and file based transcription and diarization: [**Transcribe Offline**](https://github.com/openresearchtools/transcribeoffline) |
+Live and file based transcription and diarization: [**Transcribe Offline**](https://github.com/openresearchtools/transcribeoffline) 
 
-PDF to Markdown VLM based Converter and Editor: [**PDF Markdown Studio**](https://github.com/openresearchtools/PDF-Markdown-Studio) |
+PDF to Markdown VLM based Converter and Editor: [**PDF Markdown Studio**](https://github.com/openresearchtools/PDF-Markdown-Studio) 
 ## Implementation goals
 It aims to unify chat, vision, embeddings, reranking, audio transcription/diarization, and PDF-to-Markdown in one native stack (Rust + C++), so you don't have to glue together separate runtimes for each task.
 * **Collapse multi-service pipelines into one embeddable engine** with a consistent API surface.
