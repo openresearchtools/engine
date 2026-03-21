@@ -15,7 +15,7 @@ Experimental cluster controller for orchestrating single-node and multi-node run
 
 > Experimental development release. Expect instability and bugs, especially on clusters larger than 2 nodes.
 
-## A few example apps using Embeded engine: 
+## A few example apps using openresearchtools-engine: 
 Live and file based transcription and diarization: [**Transcribe Offline**](https://github.com/openresearchtools/transcribeoffline) 
 
 PDF to Markdown VLM based Converter and Editor: [**PDF Markdown Studio**](https://github.com/openresearchtools/PDF-Markdown-Studio) 
