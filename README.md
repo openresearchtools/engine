@@ -15,6 +15,9 @@ Experimental cluster controller for orchestrating single-node and multi-node run
 
 > Experimental development release. Expect instability and bugs, especially on clusters larger than 2 nodes.
 
+## A few example apps using Embeded engine: 
+Live and file based transcription and diarization: [**Transcribe Offline**](https://github.com/openresearchtools/transcribeoffline)
+PDF to Markdown VLM based Converter and Editor: [**PDF Markdown Studio**](https://github.com/openresearchtools/PDF-Markdown-Studio)
 ## Implementation goals
 It aims to unify chat, vision, embeddings, reranking, audio transcription/diarization, and PDF-to-Markdown in one native stack (Rust + C++), so you don't have to glue together separate runtimes for each task.
 * **Collapse multi-service pipelines into one embeddable engine** with a consistent API surface.
