@@ -8,17 +8,12 @@ Openresearchtools-Engine is a local AI runtime primarily based on Llama.CPP, tha
 <p align="center"><img src="https://raw.githubusercontent.com/openresearchtools/engine/2683eb691e24343cc4d1ce261ac2e7fc0f2a9a49/clusterui/assets/engine.png" alt="Engine controller app" width="320"></p>
 
 Experimental cluster controller for orchestrating single-node and multi-node runtimes across multiple graphics cards on the same and/or different machines.
-
-> Experimental development release. Expect instability and bugs, especially on clusters larger than 2 nodes.
-## Downloads
-
-### Controller Apps
-
 | Platform | Package | Download |
 |---|---|---|
 | Windows x64 | `Engine.exe` | [Download](https://github.com/openresearchtools/engine/releases/download/v1.15/Engine.exe) |
 | macOS arm64 (Apple Silicon) | `Engine.dmg` | [Download](https://github.com/openresearchtools/engine/releases/download/v1.15/Engine.dmg) |
 
+> Experimental development release. Expect instability and bugs, especially on clusters larger than 2 nodes.
 
 ## Implementation goals
 It aims to unify chat, vision, embeddings, reranking, audio transcription/diarization, and PDF-to-Markdown in one native stack (Rust + C++), so you don't have to glue together separate runtimes for each task.
