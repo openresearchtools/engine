@@ -895,3 +895,25 @@ For full notices, license types, and source provenance:
 
 * `third_party/LICENSES.md`
 * `third_party/README.md`
+
+## How to cite
+
+Suggested citation:
+
+Rutkauskas, L. (2026). *Openresearchtools-Engine* (Version 1.0.0) [Computer software].
+OpenResearchTools. <https://github.com/openresearchtools/engine>.
+
+BibTeX:
+
+```bibtex
+@software{Rutkauskas_PDFMarkdownStudio_2026,
+  author    = {Rutkauskas, L.},
+  title     = {Openresearchtools-Engine},
+  version   = {1.0.0},
+  date      = {2026-03-04},
+  url       = {https://github.com/openresearchtools/engine},
+  publisher = {OpenResearchTools},
+  license   = {MIT}
+}
+```
+
