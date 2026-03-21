@@ -906,7 +906,7 @@ OpenResearchTools. <https://github.com/openresearchtools/engine>.
 BibTeX:
 
 ```bibtex
-@software{Rutkauskas_PDFMarkdownStudio_2026,
+@software{Rutkauskas_Openresearchtools-Engine_2026,
   author    = {Rutkauskas, L.},
   title     = {Openresearchtools-Engine},
   version   = {1.0.0},
