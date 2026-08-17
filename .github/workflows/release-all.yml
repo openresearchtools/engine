@@ -121,8 +121,8 @@ jobs:
           patterns=(
             '*windows-x64*.zip'
             '*macos-arm64*.zip'
-            'Engine.exe'
-            'Engine.dmg'
+            '*.exe'
+            '*.dmg'
           )
           for pattern in "${patterns[@]}"; do
             gh release download "$CARRY_FORWARD_TAG" \
@@ -143,8 +143,10 @@ jobs:
             echo "The source release has no macOS Metal runtime." >&2
             exit 1
           }
-          test -f carried-assets/Engine.exe
-          test -f carried-assets/Engine.dmg
+          find carried-assets -maxdepth 1 -type f -name '*.dmg' -print -quit | grep -q . || {
+            echo "The source release has no macOS controller disk image." >&2
+            exit 1
+          }
 
       - name: Assemble release assets and runtime manifest
         shell: bash
