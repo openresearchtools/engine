@@ -2,6 +2,20 @@
 
 All build/test outputs must stay outside this repo, under `..\ENGINEbuilds`.
 
+## Linux x86_64 Debian packages
+
+Linux releases are two co-installable `.deb` packages with fixed artifacts
+`engine-amd64.deb` (Vulkan) and `engine-amd64-cuda.deb` (CUDA). Build both in
+containers with:
+
+```bash
+./build/linux/container_build_debs.sh --version 1.0.0 --backend all
+```
+
+All generated files are written to `../ENGINEbuilds`. See
+[`docs/linux-debian-packages.md`](../docs/linux-debian-packages.md) for package
+metadata, installed paths, the embedding contract, and release behavior.
+
 ## Prerequisites
 
 - CMake on PATH (or pass `-CmakeExe`).

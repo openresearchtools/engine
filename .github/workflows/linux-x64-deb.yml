@@ -1,0 +1,128 @@
+name: Build Linux x64 Debian packages
+run-name: Build Linux x64 Debian packages - ${{ github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_version:
+        description: Debian package version (for example 1.12)
+        required: true
+        default: "0.1.0"
+  workflow_call:
+    inputs:
+      package_version:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Linux x64 ${{ matrix.backend }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [vulkan, cuda]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Free disk space for native toolchains
+        uses: ggml-org/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Debian package in container
+        shell: bash
+        env:
+          BACKEND: ${{ matrix.backend }}
+          PACKAGE_VERSION: ${{ inputs.package_version }}
+        run: |
+          set -euo pipefail
+          output_root="$(cd "$GITHUB_WORKSPACE/.." && pwd)/ENGINEbuilds/gha-linux-deb/$BACKEND"
+          mkdir -p "$output_root"
+          docker buildx build \
+            --progress plain \
+            --platform linux/amd64 \
+            --target artifact \
+            --build-arg "BACKEND=$BACKEND" \
+            --build-arg "PACKAGE_VERSION=$PACKAGE_VERSION" \
+            --cache-from "type=gha,scope=engine-linux-$BACKEND" \
+            --cache-to "type=gha,mode=max,scope=engine-linux-$BACKEND" \
+            --output "type=local,dest=$output_root" \
+            --file "$GITHUB_WORKSPACE/build/linux/engine-linux-x64.Dockerfile" \
+            "$GITHUB_WORKSPACE"
+          echo "OUTPUT_ROOT=$output_root" >> "$GITHUB_ENV"
+
+      - name: Verify Debian metadata and runtime layout
+        shell: bash
+        env:
+          BACKEND: ${{ matrix.backend }}
+        run: |
+          set -euo pipefail
+          if [[ "$BACKEND" == vulkan ]]; then
+            artifact="$OUTPUT_ROOT/engine-amd64.deb"
+            expected_package=openresearchtools-engine
+          else
+            artifact="$OUTPUT_ROOT/engine-amd64-cuda.deb"
+            expected_package=openresearchtools-engine-cuda
+          fi
+          test -s "$artifact"
+          test "$(dpkg-deb -f "$artifact" Package)" = "$expected_package"
+          test "$(dpkg-deb -f "$artifact" Version)" = '${{ inputs.package_version }}'
+          test "$(dpkg-deb -f "$artifact" Architecture)" = amd64
+          test "$(dpkg-deb -f "$artifact" Section)" = science
+          test "$(dpkg-deb -f "$artifact" Priority)" = optional
+          test "$(dpkg-deb -f "$artifact" Homepage)" = https://github.com/openresearchtools/engine
+          dpkg-deb -c "$artifact" | grep -F "/opt/openresearchtools/engine/$BACKEND/engine-runtime.json"
+          dpkg-deb -c "$artifact" | grep -F "/usr/bin/openresearchtools-engine-$BACKEND"
+          dpkg-deb -c "$artifact" | grep -F "/usr/share/doc/$expected_package/copyright"
+          package_root="$RUNNER_TEMP/package-$BACKEND"
+          rm -rf "$package_root"
+          dpkg-deb -x "$artifact" "$package_root"
+          python3 - "$package_root/opt/openresearchtools/engine/$BACKEND/engine-runtime.json" "$expected_package" "$BACKEND" <<'PY'
+          import json
+          import sys
+
+          path, package, backend = sys.argv[1:]
+          runtime = json.load(open(path, encoding="utf-8"))
+          assert runtime["package"] == package
+          assert runtime["backend"] == backend
+          assert runtime["architecture"] == "amd64"
+          assert runtime["root"] == f"/opt/openresearchtools/engine/{backend}"
+          PY
+          if [[ "$BACKEND" == cuda ]]; then
+            for relative in \
+              opt/openresearchtools/engine/cuda/NVIDIA-CUDA-EULA.txt \
+              opt/openresearchtools/engine/cuda/NVIDIA-CUDA-RUNTIME-NOTICE.txt \
+              opt/openresearchtools/engine/cuda/vendor/cuda/NVIDIA-CUDA-EULA.txt \
+              opt/openresearchtools/engine/cuda/vendor/cuda/NVIDIA-CUDA-RUNTIME-NOTICE.txt \
+              usr/share/doc/openresearchtools-engine-cuda/NVIDIA-CUDA-EULA.txt \
+              usr/share/doc/openresearchtools-engine-cuda/NVIDIA-CUDA-RUNTIME-NOTICE.txt; do
+              test -s "$package_root/$relative"
+            done
+            find "$package_root/opt/openresearchtools/engine/cuda/vendor/cuda" -name 'libcudart.so*' -print -quit | grep -q .
+            find "$package_root/opt/openresearchtools/engine/cuda/vendor/cuda" -name 'libcublas.so*' -print -quit | grep -q .
+            find "$package_root/opt/openresearchtools/engine/cuda/vendor/cuda" -name 'libcublasLt.so*' -print -quit | grep -q .
+          else
+            ! find "$package_root" -iname '*CUDA*' -print -quit | grep -q .
+          fi
+
+      - name: Upload Debian package
+        uses: actions/upload-artifact@v6
+        with:
+          name: engine-linux-deb-${{ matrix.backend }}
+          path: ${{ env.OUTPUT_ROOT }}/*.deb
+          if-no-files-found: error

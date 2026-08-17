@@ -12,18 +12,12 @@ on:
         description: Optional release title override.
         required: false
         default: ""
+      carry_forward_release_tag:
+        description: "Earlier release containing Windows/macOS assets. Empty selects the latest earlier release."
+        required: false
+        default: ""
       prerelease:
         description: Mark release as prerelease
-        required: false
-        type: boolean
-        default: false
-      include_cuda:
-        description: Include Windows CUDA build in this release
-        required: false
-        type: boolean
-        default: false
-      include_ubuntu:
-        description: Include Ubuntu Vulkan build in this release
         required: false
         type: boolean
         default: false
@@ -38,507 +32,238 @@ permissions:
 
 jobs:
   resolve-release-meta:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       title: ${{ steps.meta.outputs.title }}
+      package_version: ${{ steps.meta.outputs.package_version }}
+      carry_forward_release_tag: ${{ steps.meta.outputs.carry_forward_release_tag }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - name: Resolve Tag and Title
+      - name: Resolve release metadata
         id: meta
         shell: bash
         run: |
           set -euo pipefail
-
-          input_tag="${{ inputs.tag }}"
+          input_tag='${{ inputs.tag }}'
           if [[ -n "$input_tag" ]]; then
             tag="$input_tag"
           else
             git fetch --tags --force
             last_minor="$(git tag -l 'v1.*' | sed -n 's/^v1\.\([0-9]\+\)$/\1/p' | sort -n | tail -n1)"
-            if [[ -z "$last_minor" ]]; then
-              next_minor=0
-            else
-              next_minor=$((last_minor + 1))
-            fi
-            if (( next_minor > 99 )); then
-              echo "Auto-tag reached v1.99 limit. Set workflow input 'tag' (for example v2.0) to continue."
-              exit 1
-            fi
-            tag="v1.${next_minor}"
+            next_minor=$(( ${last_minor:- -1} + 1 ))
+            tag="v1.$next_minor"
           fi
 
-          input_title="${{ inputs.title }}"
-          if [[ -n "$input_title" ]]; then
-            title="$input_title"
-          else
-            title="Openresearchtools-Engine ${tag}"
+          input_title='${{ inputs.title }}'
+          title="${input_title:-Openresearchtools-Engine $tag}"
+          package_version="${tag#v}"
+          package_version="$(printf '%s' "$package_version" | sed 's/[^0-9A-Za-z.+:~-]/~/g')"
+          [[ "$package_version" =~ ^[0-9] ]] || package_version="0~$package_version"
+
+          carry_tag='${{ inputs.carry_forward_release_tag }}'
+          if [[ -z "$carry_tag" ]]; then
+            carry_tag="$(gh release list --limit 50 --json tagName,isDraft --jq ".[] | select(.isDraft == false and .tagName != \"$tag\") | .tagName" | head -n1)"
           fi
+          [[ -n "$carry_tag" ]] || {
+            echo "No earlier release was found. Set carry_forward_release_tag explicitly." >&2
+            exit 1
+          }
+          gh release view "$carry_tag" >/dev/null
 
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "title=$title" >> "$GITHUB_OUTPUT"
-          echo "Resolved tag: $tag"
-          echo "Resolved title: $title"
+          echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
+          echo "carry_forward_release_tag=$carry_tag" >> "$GITHUB_OUTPUT"
+          echo "Linux package version: $package_version"
+          echo "Carrying Windows/macOS assets from: $carry_tag"
 
-  build-windows-cuda:
-    if: ${{ inputs.include_cuda }}
+  build-linux-debs:
     needs: resolve-release-meta
-    uses: ./.github/workflows/windows-x64.yml
+    uses: ./.github/workflows/linux-x64-deb.yml
     with:
-      backend: cuda
+      package_version: ${{ needs.resolve-release-meta.outputs.package_version }}
     secrets: inherit
 
-  build-windows-vulkan:
-    needs: resolve-release-meta
-    uses: ./.github/workflows/windows-x64.yml
-    with:
-      backend: vulkan
-    secrets: inherit
-
-  build-macos-metal:
-    needs: resolve-release-meta
-    uses: ./.github/workflows/macos-arm64.yml
-    with:
-      backend: metal
-    secrets: inherit
-
-  build-ubuntu-vulkan:
-    if: ${{ inputs.include_ubuntu }}
-    needs: resolve-release-meta
-    uses: ./.github/workflows/ubuntu-x64.yml
-    secrets: inherit
-
-  prepare-runtime-release-assets:
-    if: ${{ always() && needs.resolve-release-meta.result == 'success' && needs.build-windows-vulkan.result == 'success' && needs.build-macos-metal.result == 'success' && (needs.build-ubuntu-vulkan.result == 'success' || needs.build-ubuntu-vulkan.result == 'skipped') && (needs.build-windows-cuda.result == 'success' || needs.build-windows-cuda.result == 'skipped') }}
-    needs:
-      - resolve-release-meta
-      - build-windows-cuda
-      - build-windows-vulkan
-      - build-macos-metal
-      - build-ubuntu-vulkan
-    runs-on: ubuntu-latest
+  publish-release:
+    needs: [resolve-release-meta, build-linux-debs]
+    runs-on: ubuntu-24.04
     env:
       RELEASE_TAG: ${{ needs.resolve-release-meta.outputs.tag }}
-      INCLUDE_CUDA: ${{ inputs.include_cuda }}
-      INCLUDE_UBUNTU: ${{ inputs.include_ubuntu }}
-      GITHUB_REPOSITORY: ${{ github.repository }}
+      RELEASE_TITLE: ${{ needs.resolve-release-meta.outputs.title }}
+      RELEASE_PRERELEASE: ${{ inputs.prerelease }}
+      CARRY_FORWARD_TAG: ${{ needs.resolve-release-meta.outputs.carry_forward_release_tag }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Download Runtime Build Artifacts
+      - name: Download Linux build artifacts
         uses: actions/download-artifact@v7
         with:
-          pattern: engine-*
-          path: dist
-          merge-multiple: false
+          pattern: engine-linux-deb-*
+          path: linux-artifacts
+          merge-multiple: true
 
-      - name: Validate Downloaded Runtime Artifacts
+      - name: Carry forward Windows and macOS assets
         shell: bash
         run: |
           set -euo pipefail
-          expected=(
-            "engine-win-vulkan-x64"
-            "engine-macos-arm64-metal"
+          mkdir -p carried-assets
+          patterns=(
+            '*windows-x64*.zip'
+            '*macos-arm64*.zip'
+            'Engine.exe'
+            'Engine.dmg'
           )
-          if [[ "$INCLUDE_CUDA" == "true" ]]; then
-            expected+=("engine-win-cuda-x64")
-          fi
-          if [[ "$INCLUDE_UBUNTU" == "true" ]]; then
-            expected+=("engine-ubuntu-x64-vulkan")
-          fi
-          for name in "${expected[@]}"; do
-            if [[ ! -d "dist/$name" ]]; then
-              echo "Missing expected artifact directory: dist/$name"
-              ls -la dist || true
-              exit 1
-            fi
+          for pattern in "${patterns[@]}"; do
+            gh release download "$CARRY_FORWARD_TAG" \
+              --repo "$GH_REPO" \
+              --pattern "$pattern" \
+              --dir carried-assets || true
           done
+          find carried-assets -maxdepth 1 -type f -print
+          find carried-assets -maxdepth 1 -type f -name '*windows-x64-vulkan.zip' -print -quit | grep -q . || {
+            echo "The source release has no Windows Vulkan runtime." >&2
+            exit 1
+          }
+          find carried-assets -maxdepth 1 -type f -name '*windows-x64-cuda.zip' -print -quit | grep -q . || {
+            echo "The source release has no Windows CUDA runtime." >&2
+            exit 1
+          }
+          find carried-assets -maxdepth 1 -type f -name '*macos-arm64-metal.zip' -print -quit | grep -q . || {
+            echo "The source release has no macOS Metal runtime." >&2
+            exit 1
+          }
+          test -f carried-assets/Engine.exe
+          test -f carried-assets/Engine.dmg
 
-      - name: Collect Runtime Release Assets
+      - name: Assemble release assets and runtime manifest
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          safe_tag="$(echo "$RELEASE_TAG" | tr ' /' '--')"
-          release_prefix="Openresearchtools-Engine-${safe_tag}"
-          win_vulkan_asset="${release_prefix}-windows-x64-vulkan.zip"
-          macos_metal_asset="${release_prefix}-macos-arm64-metal.zip"
-          ubuntu_vulkan_asset="${release_prefix}-ubuntu-x64-vulkan.tar.gz"
-          win_cuda_asset="${release_prefix}-windows-x64-cuda.zip"
+          cp linux-artifacts/engine-amd64.deb release-assets/engine-amd64.deb
+          cp linux-artifacts/engine-amd64-cuda.deb release-assets/engine-amd64-cuda.deb
+          cp -a carried-assets/. release-assets/
+          for previous in carried-assets/*; do
+            name="$(basename "$previous")"
+            cmp --silent "$previous" "release-assets/$name" || {
+              echo "Carried-forward asset changed while assembling release: $name" >&2
+              exit 1
+            }
+          done
+          sha256sum release-assets/* > release-assets/SHA256SUMS.txt
 
-          if [[ "$INCLUDE_CUDA" == "true" ]]; then
-            (cd dist/engine-win-cuda-x64 && zip -r "../../release-assets/${win_cuda_asset}" .)
-          fi
-          (cd dist/engine-win-vulkan-x64 && zip -r "../../release-assets/${win_vulkan_asset}" .)
-          (cd dist/engine-macos-arm64-metal && zip -r "../../release-assets/${macos_metal_asset}" .)
-          if [[ "$INCLUDE_UBUNTU" == "true" ]]; then
-            tar -C dist/engine-ubuntu-x64-vulkan -czf "release-assets/${ubuntu_vulkan_asset}" .
-          fi
-
-      - name: Verify Runtime Zip Methods
-        shell: bash
-        run: |
-          set -euo pipefail
-          zip_paths=()
-          while IFS= read -r -d '' zip_file; do
-            zip_paths+=("$zip_file")
-          done < <(find release-assets -maxdepth 1 -type f -name '*.zip' -print0)
-          if [[ ${#zip_paths[@]} -eq 0 ]]; then
-            echo "No runtime zip assets found to verify."
-            exit 0
-          fi
-          python3 build/verify_runtime_zip_methods.py "${zip_paths[@]}"
-
-      - name: Generate Runtime Manifest
-        shell: bash
-        run: |
-          set -euo pipefail
-          safe_tag="$(echo "$RELEASE_TAG" | tr ' /' '--')"
-          release_prefix="Openresearchtools-Engine-${safe_tag}"
-          win_vulkan_asset="${release_prefix}-windows-x64-vulkan.zip"
-          macos_metal_asset="${release_prefix}-macos-arm64-metal.zip"
-          ubuntu_vulkan_asset="${release_prefix}-ubuntu-x64-vulkan.tar.gz"
-          win_cuda_asset="${release_prefix}-windows-x64-cuda.zip"
-          generated_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-          sha256sum release-assets/* > release-assets/.runtime-SHA256SUMS.txt
-
-          RELEASE_TAG="$RELEASE_TAG" \
-          GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
-          INCLUDE_CUDA="$INCLUDE_CUDA" \
-          INCLUDE_UBUNTU="$INCLUDE_UBUNTU" \
-          WIN_VULKAN_ASSET="$win_vulkan_asset" \
-          MACOS_METAL_ASSET="$macos_metal_asset" \
-          UBUNTU_VULKAN_ASSET="$ubuntu_vulkan_asset" \
-          WIN_CUDA_ASSET="$win_cuda_asset" \
-          GENERATED_AT="$generated_at" \
-          python3 - <<'PY'
+          RELEASE_ASSETS="$PWD/release-assets" python3 - <<'PY'
+          import hashlib
           import json
           import os
+          from datetime import datetime, timezone
           from pathlib import Path
 
-          repo = os.environ["GITHUB_REPOSITORY"]
+          root = Path(os.environ["RELEASE_ASSETS"])
+          repo = os.environ["GH_REPO"]
           tag = os.environ["RELEASE_TAG"]
-          include_cuda = os.environ.get("INCLUDE_CUDA", "").lower() == "true"
-          include_ubuntu = os.environ.get("INCLUDE_UBUNTU", "").lower() == "true"
-          generated_at = os.environ["GENERATED_AT"]
-          dist_dir = Path("release-assets")
-          sha_file = dist_dir / ".runtime-SHA256SUMS.txt"
-          sha = {}
-          if sha_file.exists():
-              for line in sha_file.read_text(encoding="utf-8").splitlines():
-                  line = line.strip()
-                  if not line:
-                      continue
-                  parts = line.split(maxsplit=1)
-                  if len(parts) != 2:
-                      continue
-                  digest, name = parts
-                  sha[Path(name).name] = digest
+
+          def sha256(path: Path) -> str:
+              digest = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
 
           assets = []
-
-          def add_asset(asset_id, platform, backend, archive, filename):
-              path = dist_dir / filename
-              if not path.exists():
-                  return
-              assets.append(
-                  {
-                      "id": asset_id,
-                      "platform": platform,
-                      "backend": backend,
-                      "archive": archive,
-                      "file_name": filename,
-                      "url": f"https://github.com/{repo}/releases/download/{tag}/{filename}",
-                      "sha256": sha.get(filename, ""),
-                  }
-              )
-
-          add_asset(
-              "windows-x64-vulkan",
-              "windows-x64",
-              "vulkan",
-              "zip",
-              os.environ["WIN_VULKAN_ASSET"],
-          )
-          add_asset(
-              "macos-arm64-metal",
-              "macos-arm64",
-              "metal",
-              "zip",
-              os.environ["MACOS_METAL_ASSET"],
-          )
-          if include_ubuntu:
-              add_asset(
-                  "ubuntu-x64-vulkan",
-                  "ubuntu-x64",
-                  "vulkan",
-                  "tar.gz",
-                  os.environ["UBUNTU_VULKAN_ASSET"],
-              )
-          if include_cuda:
-              add_asset(
-                  "windows-x64-cuda",
-                  "windows-x64",
-                  "cuda",
-                  "zip",
-                  os.environ["WIN_CUDA_ASSET"],
-              )
+          for path in sorted(root.iterdir()):
+              name = path.name
+              if name == "SHA256SUMS.txt":
+                  continue
+              metadata = None
+              if name == "engine-amd64.deb":
+                  metadata = ("linux-x64-vulkan", "linux-x64", "vulkan", "deb")
+              elif name == "engine-amd64-cuda.deb":
+                  metadata = ("linux-x64-cuda", "linux-x64", "cuda", "deb")
+              elif "windows-x64-vulkan" in name:
+                  metadata = ("windows-x64-vulkan", "windows-x64", "vulkan", "zip")
+              elif "windows-x64-cuda" in name:
+                  metadata = ("windows-x64-cuda", "windows-x64", "cuda", "zip")
+              elif "macos-arm64-metal" in name:
+                  metadata = ("macos-arm64-metal", "macos-arm64", "metal", "zip")
+              if metadata is None:
+                  continue
+              asset_id, platform, backend, archive = metadata
+              assets.append({
+                  "id": asset_id,
+                  "platform": platform,
+                  "backend": backend,
+                  "archive": archive,
+                  "file_name": name,
+                  "url": f"https://github.com/{repo}/releases/download/{tag}/{name}",
+                  "sha256": sha256(path),
+              })
 
           manifest = {
               "schema_version": 1,
               "project": "Openresearchtools-Engine",
               "repository": repo,
               "tag": tag,
-              "generated_at": generated_at,
+              "non_linux_assets_carried_forward_from": os.environ["CARRY_FORWARD_TAG"],
+              "generated_at": datetime.now(timezone.utc).isoformat(),
               "release_url": f"https://github.com/{repo}/releases/tag/{tag}",
               "assets": assets,
           }
-
-          (dist_dir / "engine-manifest.json").write_text(
-              json.dumps(manifest, indent=2) + "\n",
-              encoding="utf-8",
-          )
+          (root / "engine-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
           PY
 
-      - name: Upload Runtime Release Assets
-        uses: actions/upload-artifact@v6
-        with:
-          name: engine-release-runtime-assets
-          path: release-assets
-          if-no-files-found: error
-
-  build-controller-windows:
-    if: ${{ always() && needs.prepare-runtime-release-assets.result == 'success' }}
-    needs:
-      - resolve-release-meta
-      - prepare-runtime-release-assets
-    runs-on: windows-2022
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Setup Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Download Runtime Manifest Artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: engine-release-runtime-assets
-          path: release-runtime-assets
-
-      - name: Inject Release Manifest Into Controller Build
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path runtime-manifests | Out-Null
-          Copy-Item -Force release-runtime-assets\engine-manifest.json runtime-manifests\engine-manifest.json
-
-      - name: Package Standalone Controller (Windows)
-        shell: pwsh
-        run: |
-          .\build\package_cluster_controller_win.ps1 -BundleDir ..\ENGINEbuilds\gha-controller-win-x64-bundle -CargoTargetDir ..\ENGINEbuilds\gha-controller-win-x64-target
-
-      - name: Stage Controller Artifact (Windows)
-        shell: pwsh
-        run: |
-          $stagingDir = Join-Path $env:GITHUB_WORKSPACE "dist\controller-win"
-          New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
-          Copy-Item -Force ..\ENGINEbuilds\gha-controller-win-x64-bundle\Engine.exe (Join-Path $stagingDir "Engine.exe")
-
-      - name: Upload Controller Artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: engine-controller-win-x64
-          path: dist/controller-win/Engine.exe
-          if-no-files-found: error
-
-  build-controller-macos:
-    if: ${{ always() && needs.prepare-runtime-release-assets.result == 'success' }}
-    needs:
-      - resolve-release-meta
-      - prepare-runtime-release-assets
-    runs-on: macos-14
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Setup Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Download Runtime Manifest Artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: engine-release-runtime-assets
-          path: release-runtime-assets
-
-      - name: Inject Release Manifest Into Controller Build
+      - name: Generate release notes
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p runtime-manifests
-          cp release-runtime-assets/engine-manifest.json runtime-manifests/engine-manifest.json
-
-      - name: Package Standalone Controller (macOS)
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash ./build/package_cluster_controller_macos.sh --bundle-dir ../ENGINEbuilds/gha-controller-macos-arm64-bundle --cargo-target-dir ../ENGINEbuilds/gha-controller-macos-arm64-target
-
-      - name: Stage Controller Artifact (macOS)
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist/controller-macos
-          cp ../ENGINEbuilds/gha-controller-macos-arm64-bundle/Engine.dmg dist/controller-macos/Engine.dmg
-
-      - name: Upload Controller Artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: engine-controller-macos-arm64
-          path: dist/controller-macos/Engine.dmg
-          if-no-files-found: error
-
-  publish-release:
-    if: ${{ always() && needs.resolve-release-meta.result == 'success' && needs.prepare-runtime-release-assets.result == 'success' && needs.build-controller-windows.result == 'success' && needs.build-controller-macos.result == 'success' }}
-    needs:
-      - resolve-release-meta
-      - prepare-runtime-release-assets
-      - build-controller-windows
-      - build-controller-macos
-    runs-on: ubuntu-latest
-    env:
-      RELEASE_TAG: ${{ needs.resolve-release-meta.outputs.tag }}
-      RELEASE_TITLE: ${{ needs.resolve-release-meta.outputs.title }}
-      RELEASE_PRERELEASE: ${{ inputs.prerelease }}
-      INCLUDE_CUDA: ${{ inputs.include_cuda }}
-      INCLUDE_UBUNTU: ${{ inputs.include_ubuntu }}
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-    steps:
-      - name: Download Runtime Release Assets
-        uses: actions/download-artifact@v7
-        with:
-          name: engine-release-runtime-assets
-          path: dist/runtime-assets
-
-      - name: Download Windows Controller Artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: engine-controller-win-x64
-          path: dist/controller-win
-
-      - name: Download macOS Controller Artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: engine-controller-macos-arm64
-          path: dist/controller-macos
-
-      - name: Collect Final Release Assets
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p release-assets
-          cp dist/runtime-assets/* release-assets/
-          cp dist/controller-win/Engine.exe release-assets/
-          cp dist/controller-macos/Engine.dmg release-assets/
-          sha256sum release-assets/* > release-assets/SHA256SUMS.txt
-
-      - name: Generate Release Notes
-        shell: bash
-        run: |
-          set -euo pipefail
-          base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
-          safe_tag="$(echo "$RELEASE_TAG" | tr ' /' '--')"
-          release_prefix="Openresearchtools-Engine-${safe_tag}"
-          win_vulkan_asset="${release_prefix}-windows-x64-vulkan.zip"
-          macos_metal_asset="${release_prefix}-macos-arm64-metal.zip"
-          ubuntu_vulkan_asset="${release_prefix}-ubuntu-x64-vulkan.tar.gz"
-          win_cuda_asset="${release_prefix}-windows-x64-cuda.zip"
-          controller_win_asset="Engine.exe"
-          controller_macos_asset="Engine.dmg"
-          image_url="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/clusterui/assets/engine.png"
+          base_url="https://github.com/$GH_REPO/releases/download/$RELEASE_TAG"
           {
-            echo "# ${RELEASE_TITLE}"
+            echo "# $RELEASE_TITLE"
             echo
-            echo "<p align=\"center\"><img src=\"${image_url}\" alt=\"Engine controller app\" width=\"320\"></p>"
+            echo "Linux is the only platform built for this release. Windows and macOS assets are unchanged copies from \`$CARRY_FORWARD_TAG\`."
             echo
-            echo "Experimental cluster controller for orchestrating single-node and multi-node runtimes across multiple graphics cards on the same and/or different machines."
+            echo "## Linux x64 Debian packages"
             echo
-            echo "> Experimental development release. Expect instability and bugs, especially on clusters larger than 2 nodes."
-            echo
-            echo "## Downloads"
-            echo
-            echo "### Controller Apps"
-            echo
-            echo "| Platform | Package | Download |"
+            echo "| Backend | Debian package | File |"
             echo "|---|---|---|"
-            echo "| Windows x64 | \`${controller_win_asset}\` | [Download](${base_url}/${controller_win_asset}) |"
-            echo "| macOS arm64 (Apple Silicon) | \`${controller_macos_asset}\` | [Download](${base_url}/${controller_macos_asset}) |"
+            echo "| CPU + Vulkan | \`openresearchtools-engine\` | [\`engine-amd64.deb\`]($base_url/engine-amd64.deb) |"
+            echo "| CPU + CUDA | \`openresearchtools-engine-cuda\` | [\`engine-amd64-cuda.deb\`]($base_url/engine-amd64-cuda.deb) |"
             echo
-            echo "### Runtime Bundles"
+            echo "Both packages are co-installable. Their runtime roots are \`/opt/openresearchtools/engine/vulkan\` and \`/opt/openresearchtools/engine/cuda\`."
+            echo "The CUDA package includes the redistributable CUDA runtime libraries, NVIDIA CUDA EULA, and NVIDIA runtime notice. The host NVIDIA driver remains a system requirement."
             echo
-            echo "| Platform | Backend | Package | Download |"
-            echo "|---|---|---|---|"
-            if [[ "$INCLUDE_CUDA" == "true" ]]; then
-              echo "| Windows x64 | CUDA 13.1 + CPU | \`${win_cuda_asset}\` | [Download](${base_url}/${win_cuda_asset}) |"
-            fi
-            echo "| Windows x64 | Vulkan + CPU | \`${win_vulkan_asset}\` | [Download](${base_url}/${win_vulkan_asset}) |"
-            echo "| macOS arm64 (Apple Silicon) | Metal (GPU) | \`${macos_metal_asset}\` | [Download](${base_url}/${macos_metal_asset}) |"
-            if [[ "$INCLUDE_UBUNTU" == "true" ]]; then
-              echo "| Ubuntu x64 | Vulkan + CPU | \`${ubuntu_vulkan_asset}\` | [Download](${base_url}/${ubuntu_vulkan_asset}) |"
-            fi
+            echo "## Carried-forward desktop assets"
             echo
-            echo "### Metadata"
-            echo
-            echo "| Asset | Type | Download |"
-            echo "|---|---|---|"
-            echo "| \`engine-manifest.json\` | Runtime manifest | [Download](${base_url}/engine-manifest.json) |"
-            echo "| \`SHA256SUMS.txt\` | Checksums | [Download](${base_url}/SHA256SUMS.txt) |"
-            echo
-            echo "## Runtime Notes"
-            echo
-            echo "- Windows runtime builds include CPU runtime support."
-            if [[ "$INCLUDE_UBUNTU" == "true" ]]; then
-              echo "- Ubuntu runtime builds include CPU runtime support."
-            fi
-            if [[ "$INCLUDE_CUDA" == "true" ]]; then
-              echo "- Windows CUDA build includes CUDA 13.1 runtime components. If your GPU or driver does not support CUDA 13.1, use the Windows Vulkan build instead."
-            fi
-            echo "- macOS build supports Apple Silicon only (M1, M2, M3, M4 and newer Arm-based Macs) and is distributed as a Metal-focused GPU build that leverages unified memory."
-            echo "- Vulkan builds are GPU vendor-agnostic and can be a better fallback across mixed hardware."
-            echo "- \`Engine.exe\` on Windows and \`Engine.dmg\` on macOS are experimental cluster controller builds."
-            echo "- The macOS controller download contains \`Engine.app\` inside the DMG."
-            echo "- Any connected node can act as initiator, runtime owner, or worker node."
-            echo "- Cluster participation is backend-agnostic across machines: Windows nodes can use Vulkan or CUDA, while macOS nodes use Metal."
-            echo "- Direct Thunderbolt / USB4 link-local connections are strongly preferred for large model transfer and multi-node traffic when available."
-            echo "- CPU device usage is optional, but clustered tensor-model placement on CPU is generally not recommended because it is dramatically slower than GPU-backed placement."
-            echo "- The standalone controller downloads Engine runtime assets during setup so the UI app can stay smaller."
+            for asset in carried-assets/*; do
+              name="$(basename "$asset")"
+              echo "- [\`$name\`]($base_url/$name)"
+            done
           } > release-notes.md
 
-      - name: Create or Update GitHub Release
+      - name: Create or update GitHub release
         shell: bash
         run: |
           set -euo pipefail
           prerelease_args=()
-          if [[ "$RELEASE_PRERELEASE" == "true" ]]; then
+          if [[ "$RELEASE_PRERELEASE" == true ]]; then
             prerelease_args+=(--prerelease)
           fi
-
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release edit "$RELEASE_TAG" \
-              --title "$RELEASE_TITLE" \
-              --notes-file release-notes.md \
-              "${prerelease_args[@]}"
+          if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --repo "$GH_REPO" \
+              --title "$RELEASE_TITLE" --notes-file release-notes.md "${prerelease_args[@]}"
           else
-            gh release create "$RELEASE_TAG" \
-              --target "$GITHUB_SHA" \
-              --title "$RELEASE_TITLE" \
-              --notes-file release-notes.md \
-              "${prerelease_args[@]}"
+            gh release create "$RELEASE_TAG" --repo "$GH_REPO" --target "$GITHUB_SHA" \
+              --title "$RELEASE_TITLE" --notes-file release-notes.md "${prerelease_args[@]}"
           fi
-
-          gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          gh release upload "$RELEASE_TAG" --repo "$GH_REPO" release-assets/* --clobber
