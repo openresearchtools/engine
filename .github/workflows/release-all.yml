@@ -98,6 +98,7 @@ jobs:
     env:
       RELEASE_TAG: ${{ needs.resolve-release-meta.outputs.tag }}
       RELEASE_TITLE: ${{ needs.resolve-release-meta.outputs.title }}
+      PACKAGE_VERSION: ${{ needs.resolve-release-meta.outputs.package_version }}
       RELEASE_PRERELEASE: ${{ inputs.prerelease }}
       CARRY_FORWARD_TAG: ${{ needs.resolve-release-meta.outputs.carry_forward_release_tag }}
       GH_TOKEN: ${{ github.token }}
@@ -235,6 +236,24 @@ jobs:
             echo
             echo "Linux is the only platform built for this release. Windows and macOS assets are unchanged copies from \`$CARRY_FORWARD_TAG\`."
             echo
+            if [[ "$RELEASE_PRERELEASE" != true ]]; then
+              echo '<!-- openresearchtools-apt-install:start -->'
+              echo "## Install on Debian 13+ or Ubuntu 24.04/26.04+"
+              echo
+              echo "For the first Open Research Tools installation on this system:"
+              echo
+              echo '```bash'
+              echo "wget -qO /tmp/keyring.deb https://keyring.openresearchtools.com && sudo apt install -y /tmp/keyring.deb && sudo apt update && sudo apt install -y openresearchtools-engine=$PACKAGE_VERSION openresearchtools-engine-cuda=$PACKAGE_VERSION"
+              echo '```'
+              echo
+              echo "If the Open Research Tools APT repository is already configured:"
+              echo
+              echo '```bash'
+              echo "sudo apt update && sudo apt install -y openresearchtools-engine=$PACKAGE_VERSION openresearchtools-engine-cuda=$PACKAGE_VERSION"
+              echo '```'
+              echo '<!-- openresearchtools-apt-install:end -->'
+              echo
+            fi
             echo "## Linux x64 Debian packages"
             echo
             echo "| Backend | Debian package | File |"
