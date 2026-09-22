@@ -232,7 +232,9 @@ cmake --build "$llama_build" --parallel "${BUILD_JOBS:-$(nproc)}" \
 bridge_lib="$(find "$llama_build" -type f -name 'libllama-server-bridge.so*' -print -quit)"
 [[ -n "$bridge_lib" ]] || die "bridge shared library was not built"
 export LIBRARY_PATH="$(dirname "$bridge_lib"):${LIBRARY_PATH:-}"
-export LD_LIBRARY_PATH="$(dirname "$bridge_lib"):${LD_LIBRARY_PATH:-}"
+# The ARM64 GNU linker must also resolve the bridge's indirect FFmpeg symbols.
+# Its install RUNPATH is already $ORIGIN, but FFmpeg is not staged there yet.
+export LD_LIBRARY_PATH="$(dirname "$bridge_lib"):$ffmpeg_root/lib:${LD_LIBRARY_PATH:-}"
 export CARGO_TARGET_DIR="$cargo_target"
 cargo build --locked --release --manifest-path "$repo_root/Cargo.toml" -p pdf -p pdfvlm -p engine
 
