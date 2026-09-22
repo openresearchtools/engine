@@ -1,0 +1,144 @@
+name: Release Linux ARM64 Vulkan
+run-name: Linux ARM64 Vulkan - ${{ inputs.tag }} (reuse ${{ inputs.carry_forward_release_tag }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: New release tag (must not already exist)
+        required: true
+        default: v1.17
+      carry_forward_release_tag:
+        description: Release to copy Windows, macOS, and Linux amd64 binaries from
+        required: true
+        default: v1.16
+      draft:
+        description: Keep the release as a draft for hardware testing before publishing
+        type: boolean
+        default: true
+
+concurrency:
+  group: linux-arm64-vulkan-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    outputs:
+      package_version: ${{ steps.meta.outputs.package_version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate release inputs
+        id: meta
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          CARRY_FORWARD_TAG: ${{ inputs.carry_forward_release_tag }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]
+          [[ "$CARRY_FORWARD_TAG" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]
+          [[ "$RELEASE_TAG" != "$CARRY_FORWARD_TAG" ]]
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release already exists: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          gh release view "$CARRY_FORWARD_TAG" >/dev/null
+          echo "package_version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+          output_root="$(dirname "$GITHUB_WORKSPACE")/ENGINEbuilds/gha-linux-arm64-vulkan"
+          mkdir -p "$output_root"
+          echo "OUTPUT_ROOT=$output_root" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build ARM64 Vulkan Debian package
+        env:
+          PACKAGE_VERSION: ${{ steps.meta.outputs.package_version }}
+        run: |
+          set -euo pipefail
+          docker buildx build --progress plain --platform linux/arm64 \
+            --target artifact --build-arg "PACKAGE_VERSION=$PACKAGE_VERSION" \
+            --cache-from type=gha,scope=engine-linux-arm64-vulkan \
+            --cache-to type=gha,mode=max,scope=engine-linux-arm64-vulkan \
+            --output "type=local,dest=$OUTPUT_ROOT" \
+            --file build/linux/engine-linux-arm64-vulkan.Dockerfile .
+
+      - name: Verify package and run native startup smoke test
+        env:
+          PACKAGE_VERSION: ${{ steps.meta.outputs.package_version }}
+        run: |
+          set -euo pipefail
+          artifact="$OUTPUT_ROOT/engine-arm64.deb"
+          test "$(dpkg-deb -f "$artifact" Package)" = openresearchtools-engine
+          test "$(dpkg-deb -f "$artifact" Version)" = "$PACKAGE_VERSION"
+          test "$(dpkg-deb -f "$artifact" Architecture)" = arm64
+          root="$OUTPUT_ROOT/extracted"
+          dpkg-deb -x "$artifact" "$root"
+          runtime="$root/opt/openresearchtools/engine/vulkan"
+          python3 - "$runtime/engine-runtime.json" <<'PY'
+          import json, sys
+          runtime = json.load(open(sys.argv[1]))
+          assert runtime['architecture'] == 'arm64'
+          assert runtime['backend'] == 'vulkan'
+          assert runtime['package'] == 'openresearchtools-engine'
+          PY
+          test -s "$runtime/libggml-vulkan.so"
+          ! find "$root" -iname '*cuda*' -print -quit | grep -q .
+          find "$runtime" -type f -print0 | while IFS= read -r -d '' path; do
+            if file -b "$path" | grep -q ELF; then
+              readelf -h "$path" | grep -q 'Machine:.*AArch64'
+              if ldd "$path" | grep 'not found'; then exit 1; fi
+            fi
+          done
+          "$runtime/example-cli" --help
+          "$runtime/example-cli" list-devices
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: engine-linux-arm64-vulkan
+          path: ${{ env.OUTPUT_ROOT }}/engine-arm64.deb
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      CARRY_FORWARD_TAG: ${{ inputs.carry_forward_release_tag }}
+      RELEASE_DRAFT: ${{ inputs.draft }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Resolve external artifact directory
+        run: |
+          root="$(dirname "$GITHUB_WORKSPACE")/ENGINEbuilds/arm64-release"
+          mkdir -p "$root"
+          echo "RELEASE_ROOT=$root" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v7
+        with:
+          name: engine-linux-arm64-vulkan
+          path: ${{ env.RELEASE_ROOT }}/new
+      - name: Reuse earlier binaries and generate manifest and checksums
+        run: |
+          python3 build/linux/prepare_arm64_release.py \
+            --tag "$RELEASE_TAG" --source-tag "$CARRY_FORWARD_TAG" \
+            --package "$RELEASE_ROOT/new/engine-arm64.deb" \
+            --output-dir "$RELEASE_ROOT"
+      - name: Create release with all assets
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ "$RELEASE_DRAFT" == true ]]; then args+=(--draft); fi
+          gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" \
+            --title "Openresearchtools-Engine $RELEASE_TAG" \
+            --notes-file "$RELEASE_ROOT/release-notes.md" \
+            "${args[@]}" "$RELEASE_ROOT/assets/"*

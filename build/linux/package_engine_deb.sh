@@ -5,7 +5,7 @@ usage() {
     cat <<'EOF'
 Usage: package_engine_deb.sh --backend <vulkan|cuda> --version <debian-version> --bundle <dir> [--output-dir <dir>]
 
-Packages an already staged Linux x86_64 ENGINE bundle. The package staging tree
+Packages an already staged Linux amd64/arm64 ENGINE bundle. The package staging tree
 and resulting .deb are always written below the repository sibling ENGINEbuilds.
 EOF
 }
@@ -41,6 +41,11 @@ done
 [[ -n "$version" ]] || die "--version is required"
 [[ "$version" =~ ^[0-9][0-9A-Za-z.+:~-]*$ ]] || die "invalid Debian version: $version"
 [[ -n "$bundle" ]] || die "--bundle is required"
+architecture="$(dpkg --print-architecture)"
+case "$architecture:$backend" in
+    amd64:vulkan|amd64:cuda|arm64:vulkan) ;;
+    *) die "unsupported package architecture/backend: $architecture/$backend" ;;
+esac
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 builds_root="$(cd "$repo_root/.." && pwd -P)/ENGINEbuilds"
@@ -80,7 +85,7 @@ compgen -G "$bundle/libggml-$backend.so*" >/dev/null || die "bundle is missing l
 
 if [[ "$backend" == "vulkan" ]]; then
     package="openresearchtools-engine"
-    artifact="engine-amd64.deb"
+    artifact="engine-$architecture.deb"
     depends="libc6, libstdc++6, libgcc-s1, libgomp1, libvulkan1"
     [[ ! -e "$bundle/vendor/cuda" ]] || die "Vulkan bundle unexpectedly contains vendor/cuda"
     ! compgen -G "$bundle/libggml-cuda.so*" >/dev/null \
@@ -89,7 +94,7 @@ if [[ "$backend" == "vulkan" ]]; then
         || die "Vulkan bundle unexpectedly contains NVIDIA CUDA notices"
 else
     package="openresearchtools-engine-cuda"
-    artifact="engine-amd64-cuda.deb"
+    artifact="engine-$architecture-cuda.deb"
     depends="libc6, libstdc++6, libgcc-s1, libgomp1"
     [[ -d "$bundle/vendor/cuda" ]] || die "CUDA bundle is missing vendor/cuda"
     ! compgen -G "$bundle/libggml-vulkan.so*" >/dev/null \
@@ -104,7 +109,7 @@ else
     done
 fi
 
-package_root="$output_dir/${package}_${version}_amd64"
+package_root="$output_dir/${package}_${version}_${architecture}"
 install_root="$package_root/opt/openresearchtools/engine/$backend"
 launcher="$package_root/usr/bin/openresearchtools-engine-$backend"
 doc_root="$package_root/usr/share/doc/$package"
@@ -125,7 +130,7 @@ cat > "$install_root/engine-runtime.json" <<EOF
   "backend": "$backend",
   "package": "$package",
   "package_version": "$version",
-  "architecture": "amd64",
+  "architecture": "$architecture",
   "root": "/opt/openresearchtools/engine/$backend",
   "executable": "example-cli",
   "launcher": "/usr/bin/openresearchtools-engine-$backend",
@@ -153,7 +158,7 @@ Package: $package
 Version: $version
 Section: science
 Priority: optional
-Architecture: amd64
+Architecture: $architecture
 Depends: $depends
 Installed-Size: $installed_kib
 Maintainer: Open Research Tools <openresearchtools@users.noreply.github.com>
@@ -173,6 +178,6 @@ dpkg-deb --contents "$output_dir/$artifact" \
     | grep -F "./opt/openresearchtools/engine/$backend/engine-runtime.json" >/dev/null
 [[ "$(dpkg-deb --field "$output_dir/$artifact" Package)" == "$package" ]] \
     || die "packaged Debian identity does not match $package"
-[[ "$(dpkg-deb --field "$output_dir/$artifact" Architecture)" == "amd64" ]] \
-    || die "packaged Debian architecture is not amd64"
+[[ "$(dpkg-deb --field "$output_dir/$artifact" Architecture)" == "$architecture" ]] \
+    || die "packaged Debian architecture is not $architecture"
 echo "$output_dir/$artifact"

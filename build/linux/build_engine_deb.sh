@@ -5,7 +5,7 @@ usage() {
     cat <<'EOF'
 Usage: build_engine_deb.sh --backend <vulkan|cuda> --version <debian-version> [--build-root <dir>]
 
-Builds the patched ENGINE Linux x86_64 runtime and packages it as a .deb.
+Builds the patched ENGINE Linux amd64/arm64 runtime and packages it as a .deb.
 Every generated file is placed below the sibling ../ENGINEbuilds directory.
 Run this directly in a prepared Ubuntu 24.04 build environment, or use
 container_build_debs.sh for the supported container build.
@@ -90,6 +90,16 @@ done
 
 [[ "$backend" == "vulkan" || "$backend" == "cuda" ]] || die "--backend must be vulkan or cuda"
 [[ -n "$version" ]] || die "--version is required"
+architecture="$(dpkg --print-architecture)"
+case "$architecture" in
+    amd64) ffmpeg_platform=linux64; pdfium_platform=linux-x64 ;;
+    arm64)
+        [[ "$backend" == vulkan ]] || die "ARM64 supports only the Vulkan package"
+        ffmpeg_platform=linuxarm64
+        pdfium_platform=linux-arm64
+        ;;
+    *) die "unsupported native build architecture: $architecture" ;;
+esac
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 builds_root="$(cd "$repo_root/.." && pwd -P)/ENGINEbuilds"
@@ -134,9 +144,9 @@ ffmpeg_root="$deps_root/ffmpeg"
 safe_reset_dir "$ffmpeg_root"
 ffmpeg_url="$(resolve_release_asset \
     'https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest' \
-    'ffmpeg-master-latest-linux64-lgpl-shared.tar.xz' \
-    'linux64-lgpl-shared')"
-ffmpeg_archive="$downloads/ffmpeg-linux64-lgpl-shared.tar.xz"
+    "ffmpeg-master-latest-$ffmpeg_platform-lgpl-shared.tar.xz" \
+    "$ffmpeg_platform-lgpl-shared")"
+ffmpeg_archive="$downloads/ffmpeg-$ffmpeg_platform-lgpl-shared.tar.xz"
 curl --retry 5 --fail --location "$ffmpeg_url" --output "$ffmpeg_archive"
 tar -xJf "$ffmpeg_archive" -C "$ffmpeg_root" --strip-components=1
 [[ -d "$ffmpeg_root/include" && -d "$ffmpeg_root/lib" ]] || die "invalid FFmpeg archive"
@@ -145,9 +155,9 @@ pdfium_root="$deps_root/pdfium"
 safe_reset_dir "$pdfium_root"
 pdfium_url="$(resolve_release_asset \
     'https://api.github.com/repos/bblanchon/pdfium-binaries/releases/latest' \
-    'pdfium-linux-x64.tgz' \
-    'pdfium-linux-x64')"
-pdfium_archive="$downloads/pdfium-linux-x64.tgz"
+    "pdfium-$pdfium_platform.tgz" \
+    "pdfium-$pdfium_platform.tgz")"
+pdfium_archive="$downloads/pdfium-$pdfium_platform.tgz"
 curl --retry 5 --fail --location "$pdfium_url" --output "$pdfium_archive"
 tar -xzf "$pdfium_archive" -C "$pdfium_root"
 pdfium_lib="$(find "$pdfium_root" -type f -name 'libpdfium.so' -print -quit)"
@@ -195,9 +205,15 @@ cmake_args=(
     -DLLAMA_SERVER_AUDIO_WEBRTC_ROOT="$webrtc_src"
     -DLLAMA_SERVER_AUDIO_WEBRTC_LIBRARIES="$webrtc_libraries"
     -DGGML_BACKEND_DL=ON
-    -DGGML_CPU_ALL_VARIANTS=ON
     -DGGML_NATIVE=OFF
 )
+if [[ "$architecture" == arm64 ]]; then
+    # Keep CPU fallback portable across ARMv8 machines (including Snapdragon).
+    # Ubuntu 24.04 GCC cannot compile the upstream all-variants SME targets.
+    cmake_args+=(-DGGML_CPU_ALL_VARIANTS=OFF -DGGML_CPU_ARM_ARCH=armv8-a)
+else
+    cmake_args+=(-DGGML_CPU_ALL_VARIANTS=ON)
+fi
 if [[ "$backend" == "vulkan" ]]; then
     cmake_args+=(-DGGML_VULKAN=ON)
 else
@@ -218,7 +234,7 @@ bridge_lib="$(find "$llama_build" -type f -name 'libllama-server-bridge.so*' -pr
 export LIBRARY_PATH="$(dirname "$bridge_lib"):${LIBRARY_PATH:-}"
 export LD_LIBRARY_PATH="$(dirname "$bridge_lib"):${LD_LIBRARY_PATH:-}"
 export CARGO_TARGET_DIR="$cargo_target"
-cargo build --release --manifest-path "$repo_root/Cargo.toml" -p pdf -p pdfvlm -p engine
+cargo build --locked --release --manifest-path "$repo_root/Cargo.toml" -p pdf -p pdfvlm -p engine
 
 safe_reset_dir "$bundle"
 mkdir -p \
@@ -290,7 +306,14 @@ copy_license_files "$webrtc_src" "$bundle/vendor/webrtc-audio-processing"
 cp "$repo_root/third_party/licenses/pdfium-LICENSE.txt" "$bundle/vendor/pdfium/pdfium-LICENSE.txt"
 cp "$repo_root/third_party/licenses/pdfium-binaries-LICENSE.txt" "$bundle/vendor/pdfium/pdfium-binaries-LICENSE.txt"
 cp "$repo_root/third_party/licenses/ffmpeg-LGPL-2.1.txt" "$bundle/vendor/ffmpeg/ffmpeg-LGPL-2.1.txt"
-cp "$repo_root/third_party/licenses/ffmpeg-SOURCE-ubuntu-x64.txt" "$bundle/vendor/ffmpeg/ffmpeg-SOURCE.txt"
+cat > "$bundle/vendor/ffmpeg/ffmpeg-SOURCE.txt" <<EOF
+FFmpeg source/license provenance (Linux $architecture bundle)
+
+Runtime distribution: https://github.com/BtbN/FFmpeg-Builds
+Downloaded asset: $ffmpeg_url
+Upstream source: https://github.com/FFmpeg/FFmpeg
+License: LGPL 2.1 or later; see ffmpeg-LGPL-2.1.txt and bundled notices.
+EOF
 cp "$repo_root/third_party/licenses/miniaudio-LICENSE.txt" "$bundle/vendor/miniaudio/miniaudio-LICENSE.txt"
 cp "$repo_root/third_party/licenses/webrtc-audio-processing-LICENSE.txt" "$bundle/vendor/webrtc-audio-processing/webrtc-audio-processing-LICENSE.txt"
 
