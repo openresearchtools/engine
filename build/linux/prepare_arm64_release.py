@@ -127,6 +127,11 @@ Adds Linux ARM64 CPU + Vulkan support as `engine-arm64.deb`. No engine applicati
 code changes. Windows, macOS, and Linux amd64 CUDA/Vulkan binaries are unchanged,
 checksum-verified copies from `{args.source_tag}`; their embedded versions remain unchanged.
 
+The new ARM64 build includes the narrowly scoped Vulkan subgroup-size correction
+from [upstream llama.cpp #27726](https://github.com/ggml-org/llama.cpp/pull/27726),
+applied through the existing build patch. This fixes incorrect matrix multiplication
+on Adreno GPUs reporting 128-thread subgroups without updating the frozen engine.
+
 ## Linux ARM64 installation
 
 For Ubuntu 24.04+ / Debian 13+ on ARM64, download

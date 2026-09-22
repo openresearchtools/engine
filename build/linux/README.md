@@ -13,8 +13,16 @@ Use a new tag for each release; existing releases are never overwritten.
 
 The shared Linux build/package scripts select native FFmpeg and PDFium assets
 and Debian architecture. ARM64 uses a portable ARMv8 CPU fallback, with Vulkan
-enabled; it does not require the build runner's SVE/SME CPU features. No engine
-application code or vendored llama.cpp/whisper.cpp sources are changed.
+enabled; it does not require the build runner's SVE/SME CPU features. Engine
+application code and vendored llama.cpp/whisper.cpp sources remain unchanged.
+
+The existing `0300-llama-unified-audio.patch` carries the small Vulkan tile-size
+fix from upstream [llama.cpp #27726](https://github.com/ggml-org/llama.cpp/pull/27726)
+(commit `5e6a37cb115dc1074e274ac004373f5661909695`), adapted to the frozen snapshot.
+Without it, the Adreno X1-45's 128-thread subgroups produce incorrect matrix
+multiplication results and garbled Whisper/chat output. Only medium/large tiles
+are clamped to 64; small tiles retain their original subgroup size. The patch
+is applied by the existing source preparation script outside the repository.
 
 All generated output, including container staging, downloads and local tests,
 belongs in the sibling `../ENGINEbuilds` directory.
